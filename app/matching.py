@@ -198,7 +198,7 @@ def _resetear_seleccion():
 
 
 def render_tab2(supabase: Client, encoder: SentenceTransformer):
-    st.subheader("🤝 Coincidencia Inteligente: Licitación → Empresas")
+    st.subheader("Coincidencia Inteligente: Licitación → Empresas")
     st.caption(
         "Introduce el título, el enlace oficial o el identificador de una licitación. "
         "Si no está en nuestra base de datos, también puedes describirla directamente."
@@ -265,7 +265,7 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
     if licitacion:
         st.markdown(f"**Licitación seleccionada:** {licitacion['titulo']}")
 
-        if st.button("🤝 Buscar empresas coincidentes", key="tab2_buscar_empresas", use_container_width=True):
+        if st.button("Buscar empresas coincidentes", key="tab2_buscar_empresas", use_container_width=True):
             with st.spinner("Cruzando con la base de datos de empresas..."):
                 if licitacion.get("codigo_unico"):
                     st.session_state.tab2_coincidencias = obtener_coincidencias(supabase, licitacion["codigo_unico"])
