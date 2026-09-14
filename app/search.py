@@ -88,7 +88,7 @@ def formatear_para_tabla(resultados: list) -> pd.DataFrame:
 def render_tab1(supabase: Client, encoder: SentenceTransformer):
     from config import FUENTES_LICITACIONES
 
-    st.subheader("🔍 Buscador de Licitaciones")
+    st.subheader("Buscador de Licitaciones")
     st.caption("Fuente activa en esta primera versión: Banco Africano de Desarrollo (AfDB).")
 
     col_texto, col_pais, col_fuente = st.columns([3, 1.5, 1.2])
