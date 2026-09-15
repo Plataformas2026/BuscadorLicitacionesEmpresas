@@ -11,7 +11,7 @@ on:
     # fichero en Drive ha cambiado -- si no, la ejecución es casi
     # instantánea. Ajusta la frecuencia si quieres detectarlo antes/con
     # menos consumo de minutos.
-    - cron: '*/30 * * * *'
+    - cron: '0 0 */7 * *'
   workflow_dispatch:   # para forzar una sincronización inmediata a mano
 
 jobs:
