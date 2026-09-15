@@ -88,7 +88,7 @@ def formatear_para_tabla(resultados: list) -> pd.DataFrame:
 def render_tab1(supabase: Client, encoder: SentenceTransformer):
     from config import FUENTES_LICITACIONES
 
-    st.subheader("🔍 Buscador de Licitaciones")
+    st.subheader("Buscador de Licitaciones")
     st.caption("Fuente activa en esta primera versión: Banco Africano de Desarrollo (AfDB).")
 
     col_texto, col_pais, col_fuente = st.columns([3, 1.5, 1.2])
@@ -105,7 +105,7 @@ def render_tab1(supabase: Client, encoder: SentenceTransformer):
     with col_fuente:
         filtro_fuente = st.selectbox("Fuente", ["Todas"] + FUENTES_LICITACIONES, key="tab1_filtro_fuente")
 
-    buscar_click = st.button("🔍 Buscar licitaciones", key="tab1_buscar", use_container_width=True)
+    buscar_click = st.button("Buscar licitaciones", key="tab1_buscar", use_container_width=True)
 
     if "tab1_resultados" not in st.session_state:
         st.session_state.tab1_resultados = None
