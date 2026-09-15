@@ -1,0 +1,12 @@
+# Secretos: nunca deben llegar al repositorio
+.env
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Caché de modelos de sentence-transformers si se descargan en local
+.cache/

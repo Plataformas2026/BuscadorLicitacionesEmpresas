@@ -1,5 +1,11 @@
 streamlit
 pandas
-sentence-transformers
-supabase
 numpy
+supabase
+sentence-transformers
+requests
+beautifulsoup4
+openpyxl
+langdetect
+google-api-python-client
+google-auth
