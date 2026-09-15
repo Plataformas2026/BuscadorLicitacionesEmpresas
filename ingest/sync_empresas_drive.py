@@ -2,41 +2,54 @@
 """
 sync_empresas_drive.py
 --------------------------
-Sincroniza el Excel de empresas almacenado en Google Drive contra la
-tabla `empresas` de Supabase. Pensado para ejecutarse periódicamente
-(ver .github/workflows/sincronizar_empresas_drive.yml): en cada
-ejecución comprueba la fecha de modificación del fichero en Drive contra
-la última que tenemos guardada (tabla `sync_estado`); si no ha cambiado,
-no hace nada.
+Sincroniza el Excel de empresas (BBDD_Empresas_260909.xlsx o como se
+llame en cada momento) almacenado en Google Drive contra las tablas
+`empresas` y `empresas_referencias` de Supabase. Pensado para ejecutarse
+periódicamente (ver .github/workflows/sincronizar_empresas_drive.yml):
+en cada ejecución comprueba la fecha de modificación del fichero en
+Drive contra la última que tenemos guardada (tabla `sync_estado`); si no
+ha cambiado, no hace nada.
 
-AVISO SOBRE EL MAPEO DE COLUMNAS
+DOS HOJAS DEL EXCEL, DOS TABLAS
 -----------------------------------
-La captura de referencia que se compartió solo mostraba 2 columnas: una
-SIN cabecera con un número correlativo (p. ej. 74) y la columna "ID" con
-el código real de empresa (p. ej. "ENT_90"). Esas dos SÍ están
-confirmadas y se leen por posición: la primera columna del Excel siempre
-es el número interno, y la columna cuya cabecera es exactamente "ID"
-siempre es el identificador real -- ninguna de las dos se regenera.
+- "DOSSIER COMPLETO"          -> tabla `empresas` (perfil de cada empresa)
+- "REFERENCIAS P BÚSQUEDAS"   -> tabla `empresas_referencias` (histórico
+                                  de licitaciones en las que ha
+                                  participado cada empresa)
 
-El resto de columnas (Sector, Subsector, Web, Contacto...) están
-mapeadas por NOMBRE de cabecera en `MAPEO_COLUMNAS`, a partir de la
-lista de campos que describiste, pero sin haber visto esas cabeceras
-reales. Si el Excel usa nombres distintos a los que aquí se prueban,
-solo hay que añadir la variante real a la lista correspondiente de
-`MAPEO_COLUMNAS` -- el resto del script no necesita cambios. En
-particular, no había ninguna columna explícita para el NOMBRE de la
-empresa en la lista de campos que diste (solo aparecía "Nombre" dentro
-del bloque de "Contacto"); se asume que existe una columna de nombre de
-empresa con alguno de los encabezados típicos ("Empresa", "Nombre de la
-empresa"...) -- confirma o ajusta esto en MAPEO_COLUMNAS.
+El Excel real tiene más hojas ("REFERENCIAS", "REF AGUA", "REF TURISMO",
+"lista para chatgpt", "PALABRAS CLAVE PARA BÚSQUEDAS"...) que, tras
+revisarlas, son vistas derivadas/de trabajo de esas dos hojas
+principales (subconjuntos filtrados por sector, o exports para pegar en
+un chat) -- no se ingieren para no duplicar datos. Si alguna de ellas SÍ
+tiene información que no esté en las dos hojas principales, dímelo y lo
+ajusto.
+
+POR QUÉ CASI TODO SE GUARDA COMO TEXTO/JSONB
+-----------------------------------------------
+Al leer el Excel real se vio que varias columnas son mucho más libres de
+lo que su nombre sugiere -- p. ej. "ÁMBITO GEOGRÁFICO DE OPERACIÓN
+(Local/Regional/Nacional/Internacional)" en la práctica contiene listas
+de países en texto libre, y "RESULTADO (ADJUDICADA/NO ADJUDICADA/SIN
+INFORMACIÓN)" tiene decenas de redacciones distintas. Por eso este
+script NO intenta forzar esos valores a un tipo/enum limpio: los guarda
+tal cual, y además guarda la FILA COMPLETA de cada hoja (cabecera real
+-> valor real) en una columna `datos_excel` JSONB, como red de
+seguridad para no perder nunca ninguna anotación atípica.
+
+5 IDIOMAS DE PALABRAS CLAVE: en el Excel real solo se han encontrado 4
+columnas de idioma ("PALABRAS CLAVE", "PALABRAS CLAVE EN INGLÉS", "...EN
+FRANCÉS", "...EN PORTUGUÉS") -- si hay un 5º idioma en otra hoja o con
+otro nombre de cabecera, dímelo y lo añado a MAPEO_EMPRESAS; el resto
+del script (embeddings por idioma, búsqueda) ya está preparado para
+soportar más idiomas sin cambios estructurales.
 
 Variables de entorno requeridas:
     SUPABASE_URL, SUPABASE_SERVICE_KEY
     GOOGLE_SERVICE_ACCOUNT_JSON  -- contenido COMPLETO del JSON de la
                                     cuenta de servicio de Google (como
                                     secreto de GitHub Actions)
-    GOOGLE_DRIVE_FILE_ID          -- ID del fichero Excel en Drive (se
-                                     saca de su URL para compartir)
+    GOOGLE_DRIVE_FILE_ID          -- ID del fichero Excel en Drive
 
 La cuenta de servicio debe tener el fichero compartido con ella (basta
 con permiso de "Lector") -- ver README.md para el paso a paso.
@@ -46,40 +59,90 @@ import json
 import os
 import re
 import unicodedata
+from datetime import date, datetime
 
+import numpy as np
 import pandas as pd
 
-from common import generar_embedding, obtener_cliente_supabase, subir_en_lotes
+from common import (
+    generar_embedding,
+    obtener_cliente_supabase,
+    subir_en_lotes,
+)
 
 CLAVE_SYNC_ESTADO = "empresas_drive_modified_time"
 TAMANO_LOTE_SUPABASE = 20
 
-# clave interna -> posibles cabeceras en el Excel (se comparan ya
-# normalizadas: minúsculas y sin acentos). Añade aquí cualquier variante
-# real que use vuestro fichero.
-MAPEO_COLUMNAS = {
-    "nombre_empresa": ["empresa", "nombre de la empresa", "nombre comercial", "razon social", "nombre empresa"],
-    "sector": ["sector"],
-    "subsector": ["subsector"],
-    "tipo_empresa": ["tipo de empresa", "tipo empresa", "tipo"],
-    "cif": ["cif", "nif"],
-    "web": ["web", "pagina web", "sitio web", "url"],
-    "descripcion_actividad": ["descripcion de la actividad", "descripcion actividad", "descripcion", "actividad"],
-    "palabras_clave": ["palabras clave", "keywords"],
-    "proyectos_tipo": ["proyectos tipo", "tipo de proyectos", "tipos de proyecto"],
-    "experiencia_paises": ["experiencia en paises", "paises de experiencia", "experiencia paises", "paises"],
-    "zona_geografica": ["zona geografica", "zonas geograficas", "region"],
-    "tamano": ["tamano"],
-    "facturacion_anual": ["facturacion anual", "facturacion"],
-    "contacto_nombre": ["nombre contacto", "nombre del contacto", "contacto"],
-    "contacto_cargo": ["cargo", "cargo contacto", "puesto"],
-    "contacto_email": ["e-mail", "email", "correo electronico", "correo"],
+HOJA_EMPRESAS = "DOSSIER COMPLETO"
+FILA_CABECERA_EMPRESAS = 0          # cabecera en la 1ª fila
+
+HOJA_REFERENCIAS = "REFERENCIAS P BÚSQUEDAS"
+FILA_CABECERA_REFERENCIAS = 1       # cabecera en la 2ª fila (la 1ª va vacía en el Excel real)
+
+IDIOMAS_PALABRAS_CLAVE = ["es", "en", "fr", "pt"]  # ver nota "5 IDIOMAS" arriba
+
+# clave interna -> cabecera REAL confirmada contra BBDD_Empresas_260909.xlsx
+MAPEO_EMPRESAS = {
+    "nombre_empresa": "EMPRESA",
+    "sector": "SECTOR",
+    "sector_secundario": "SECTOR.1",  # 2ª columna también titulada "SECTOR" en el Excel (ver docstring)
+    "subsector": "SUBSECTOR",
+    "tipo_empresa": "EMPRESA PÚBLICA / CLÚSTER / ASOCIACIÓN / PRIVADA",
+    "cif": "CIF",
+    "cnae": "CNAE",
+    "web": "WEB",
+    "descripcion_actividad": "DESCRIPCIÓN BREVE DE LA ACTIVIDAD QUE DESARROLLA",
+    "palabras_clave": "PALABRAS CLAVE",
+    "proyectos_tipo": "PRINCIPALES PROYECTOS TIPO",
+    "experiencia_paises": "EXPERIENCIA PAÍSES",
+    "zona_geografica_interes": "ZONA GEOGRÁFICA DE INTERÉS",
+    "paises_interes": "PAÍSES DE INTERÉS",
+    "pais": "PAÍS",
+    "tamano": "TAMAÑO (MICRO/PYME/GRANDE)",
+    "registro_oficial_proveedores": "REGISTRO OFICIAL DE PROVEEDORES (SI/NO)",
+    "certificaciones": "CERTIFICACIONES (ISO, sectoriales, etc.)",
+    "facturacion_anual": "FACTURACIÓN ANUAL (USD/EUR)",
+    "experiencia_contratos_similares": "EXPERIENCIA EN CONTRATOS SIMILARES (Sí/No)",
+    "clientes_principales": "CLIENTES PRINCIPALES",
+    "capacidad_tecnica": "CAPACIDAD TÉCNICA (equipos, tecnología, etc.)",
+    "ambito_geografico": "ÁMBITO GEOGRÁFICO DE OPERACIÓN (Local/Regional/Nacional/Internacional)",
+    "preferencias_licitaciones": "PREFERENCIAS LICITACIONES (Monto mínimo/máximo, sector, etc.)",
+    "contacto_nombre": "NOMBRE",
+    "contacto_cargo": "CARGO",
+    "contacto_email": "E-MAIL",
+    "palabras_clave_en": "PALABRAS CLAVE EN INGLÉS",
+    "palabras_clave_fr": "PALABRAS CLAVE EN FRANCÉS",
+    "palabras_clave_pt": "PALABRAS CLAVE EN PORTUGUÉS",
+}
+COLUMNA_NUMERO_INTERNO = "Unnamed: 0"   # columna A, sin cabecera
+COLUMNA_ID_EMPRESA = "ID"
+COLUMNA_NOTAS_LIBRES = "Unnamed: 26"    # comentarios sueltos del analista, sin cabecera
+
+MAPEO_REFERENCIAS = {
+    "sector": "SECTOR",
+    "nombre_empresa_excel": "EMPRESA",
+    "tipo_proyecto": "TIPO PROYECTO",
+    "pais": "PAÍS Country",
+    "organismo_financiador": "ORGANISMO FINANCIADOR",
+    "agencia_ejecutora": "AGENCIA EJECUTORA /Name of Client",
+    "titulo": "TITULO (Assignment name)",
+    "descripcion_trabajos": "BREVE DESCRIPCIÓN TRABAJOS",
+    "fecha": "FECHA",
+    "duracion": "Duración Duration of assignment (months):",
+    "importe": "IMPORTE Approx. value of the contract (in current US$):",
+    "resultado": "RESULTADO (ADJUDICADA/NO ADJUDICADA/SIN INFORMACIÓN)",
+    "descripcion_empresa": "DESCRIPCIÓN DE LA EMPRESA",
+    "palabras_clave": "PALABRAS CLAVE",
 }
 
-CAMPOS_LISTA = {"palabras_clave", "proyectos_tipo", "experiencia_paises", "zona_geografica"}
-CAMPOS_COMPARABLES = (
-    "nombre_empresa", "sector", "subsector", "tipo_empresa", "web",
-    "descripcion_actividad", "tamano", "facturacion_anual",
+CAMPOS_LISTA_EMPRESAS = {
+    "palabras_clave", "palabras_clave_en", "palabras_clave_fr", "palabras_clave_pt",
+    "proyectos_tipo", "experiencia_paises", "zona_geografica_interes", "paises_interes",
+}
+CAMPOS_COMPARABLES_EMPRESAS = (
+    "nombre_empresa", "sector", "sector_secundario", "subsector", "tipo_empresa",
+    "cif", "cnae", "web", "descripcion_actividad", "pais", "tamano",
+    "ambito_geografico", "facturacion_anual",
 )
 
 
@@ -107,13 +170,11 @@ def obtener_metadata_archivo(servicio, file_id: str) -> dict:
 
 def descargar_excel(servicio, file_id: str, mime_type: str) -> io.BytesIO:
     if mime_type == "application/vnd.google-apps.spreadsheet":
-        # Google Sheets nativo: hay que exportarlo a .xlsx
         contenido = servicio.files().export_media(
             fileId=file_id,
             mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ).execute()
     else:
-        # Ya es un .xlsx subido tal cual
         contenido = servicio.files().get_media(fileId=file_id).execute()
     return io.BytesIO(contenido)
 
@@ -135,120 +196,231 @@ def guardar_ultima_modificacion(supabase, valor: str):
 
 
 # ------------------------------------------------------------------
-# Lectura y normalización del Excel
+# Utilidades de lectura/normalización
 # ------------------------------------------------------------------
 def _normalizar_cabecera(texto) -> str:
     texto = str(texto).strip().lower()
     return "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
 
 
-def _mapear_columnas(df: pd.DataFrame) -> dict:
-    cabeceras_normalizadas = {_normalizar_cabecera(c): c for c in df.columns}
-    mapa_resuelto = {}
-    for clave_interna, alternativas in MAPEO_COLUMNAS.items():
-        for alternativa in alternativas:
-            columna_real = cabeceras_normalizadas.get(_normalizar_cabecera(alternativa))
-            if columna_real:
-                mapa_resuelto[clave_interna] = columna_real
-                break
-    return mapa_resuelto
+def _es_nulo(valor) -> bool:
+    if valor is None:
+        return True
+    try:
+        return bool(pd.isna(valor))
+    except (TypeError, ValueError):
+        return False
 
 
-def _dividir_lista(valor) -> list:
-    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
-        return []
-    texto = str(valor).strip()
-    if not texto:
-        return []
-    return [p.strip() for p in re.split(r"[,;|]", texto) if p.strip()]
-
-
-def _valor_texto(fila: pd.Series, columna) -> str:
-    if not columna:
+def _valor_json_seguro(valor):
+    """Convierte un valor de celda (que puede ser numpy/pandas) a algo serializable en JSON."""
+    if _es_nulo(valor):
         return None
-    valor = fila.get(columna)
-    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+    if isinstance(valor, (pd.Timestamp, datetime, date)):
+        return valor.isoformat()
+    if isinstance(valor, np.integer):
+        return int(valor)
+    if isinstance(valor, np.floating):
+        return float(valor)
+    if isinstance(valor, np.bool_):
+        return bool(valor)
+    return valor
+
+
+def _fila_a_json(fila: pd.Series) -> dict:
+    """La fila COMPLETA del Excel, cabecera real -> valor real (ver docstring del módulo)."""
+    return {str(clave): _valor_json_seguro(valor) for clave, valor in fila.items()}
+
+
+def _valor_texto(fila: pd.Series, columna: str):
+    if not columna or columna not in fila.index:
         return None
+    valor = fila[columna]
+    if _es_nulo(valor):
+        return None
+    if isinstance(valor, (pd.Timestamp, datetime)):
+        return valor.date().isoformat()
+    if isinstance(valor, date):
+        return valor.isoformat()
+    if isinstance(valor, float) and valor.is_integer():
+        return str(int(valor))  # evita "2018.0" cuando en realidad es un año
     texto = str(valor).strip()
     return texto if texto else None
 
 
-def leer_empresas_desde_excel(buffer_excel: io.BytesIO) -> list:
-    df = pd.read_excel(buffer_excel, dtype=object)
+def _dividir_lista(valor) -> list:
+    if _es_nulo(valor):
+        return []
+    texto = str(valor).strip()
+    if not texto:
+        return []
+    # el Excel usa indistintamente coma, punto y coma o salto de línea
+    return [p.strip() for p in re.split(r"[,;\n]", texto) if p.strip()]
+
+
+def _leer_hoja(buffer_excel: io.BytesIO, hoja: str, fila_cabecera: int) -> pd.DataFrame:
+    df = pd.read_excel(buffer_excel, sheet_name=hoja, header=fila_cabecera, dtype=object)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+# ------------------------------------------------------------------
+# Lectura de "DOSSIER COMPLETO" -> empresas
+# ------------------------------------------------------------------
+def leer_empresas(buffer_excel: io.BytesIO) -> list:
+    df = _leer_hoja(buffer_excel, HOJA_EMPRESAS, FILA_CABECERA_EMPRESAS)
     if df.empty:
         return []
 
-    columna_numero_interno = df.columns[0]  # primera columna, tal cual (ver aviso del docstring)
-    mapa = _mapear_columnas(df)
-
-    # La columna "ID" se busca por nombre exacto (normalizado), no por
-    # posición, para no depender de que sea siempre la segunda columna.
-    cabeceras_normalizadas = {_normalizar_cabecera(c): c for c in df.columns}
-    columna_id = cabeceras_normalizadas.get("id")
-    if not columna_id:
-        raise RuntimeError(
-            "No se ha encontrado una columna llamada 'ID' en el Excel. "
-            "Esa columna es obligatoria: es el identificador único de cada empresa."
-        )
-
-    print(f"Columnas reconocidas: {mapa}", flush=True)
-    faltantes = [c for c in MAPEO_COLUMNAS if c not in mapa]
+    faltantes = [c for c in list(MAPEO_EMPRESAS.values()) + [COLUMNA_ID_EMPRESA] if c not in df.columns]
     if faltantes:
-        print(f"⚠️ No se han encontrado columnas para: {faltantes} (revisa MAPEO_COLUMNAS si son necesarias).", flush=True)
+        print(f"⚠️ No se han encontrado estas columnas en '{HOJA_EMPRESAS}': {faltantes}", flush=True)
 
     empresas = []
-    for _, fila in df.iterrows():
-        id_empresa = _valor_texto(fila, columna_id)
-        if not id_empresa:
-            continue  # sin ID no se puede identificar la empresa de forma fiable
+    ids_generados = 0
 
-        numero_interno = None
-        valor_numero = fila.get(columna_numero_interno)
-        if valor_numero is not None and not (isinstance(valor_numero, float) and pd.isna(valor_numero)):
-            try:
-                numero_interno = int(valor_numero)
-            except (ValueError, TypeError):
-                numero_interno = None
+    for _, fila in df.iterrows():
+        numero_interno = _valor_texto(fila, COLUMNA_NUMERO_INTERNO)
+        if not numero_interno:
+            continue  # sin número interno no hay forma fiable de identificar la fila
+
+        id_empresa = _valor_texto(fila, COLUMNA_ID_EMPRESA)
+        if not id_empresa:
+            # 5 filas del Excel real no traen "ID" -- se genera uno estable a
+            # partir del número interno (que sí es siempre único) para poder
+            # seguir haciendo upsert sin crear duplicados en cada sync.
+            id_empresa = f"SIN_ID_{numero_interno}"
+            ids_generados += 1
 
         empresa = {
             "numero_interno": numero_interno,
             "id_empresa": id_empresa,
         }
-        for clave in MAPEO_COLUMNAS:
-            columna = mapa.get(clave)
-            if clave in CAMPOS_LISTA:
-                empresa[clave] = _dividir_lista(fila.get(columna)) if columna else []
+        for clave, columna in MAPEO_EMPRESAS.items():
+            if columna not in df.columns:
+                empresa[clave] = [] if clave in CAMPOS_LISTA_EMPRESAS else None
+            elif clave in CAMPOS_LISTA_EMPRESAS:
+                empresa[clave] = _dividir_lista(fila.get(columna))
             else:
                 empresa[clave] = _valor_texto(fila, columna)
 
+        empresa["notas_libres"] = _valor_texto(fila, COLUMNA_NOTAS_LIBRES)
+        empresa["datos_excel"] = _fila_a_json(fila)
         empresas.append(empresa)
+
+    if ids_generados:
+        print(f"ℹ️ {ids_generados} empresas sin 'ID' en el Excel: se les asignó un ID estable 'SIN_ID_<número interno>'.", flush=True)
 
     return empresas
 
 
 # ------------------------------------------------------------------
-# Texto para el embedding
+# Lectura de "REFERENCIAS P BÚSQUEDAS" -> empresas_referencias
 # ------------------------------------------------------------------
-def construir_texto_completo(empresa: dict) -> str:
+def _normalizar_resultado(texto: str) -> str:
+    if not texto:
+        return "desconocido"
+    t = _normalizar_cabecera(texto)
+    if any(p in t for p in ("no adjudicad", "no seleccionad", "eliminad", "no pasa", "rechazad", "descartad")):
+        return "no_adjudicada"
+    if "adjudicad" in t:  # también coge "CONSORCIO ADJUDICADO...", "CON GESPLAN. ADJUDICADA"...
+        return "adjudicada"
+    return "desconocido"
+
+
+def leer_referencias(buffer_excel: io.BytesIO, indice_nombres_empresa: dict) -> list:
+    """
+    `indice_nombres_empresa`: {nombre_normalizado: id_empresa}, construido
+    a partir de lo que ya hay en Supabase, para resolver a qué empresa
+    corresponde cada fila de referencias (ver ejecutar_sincronizacion).
+    """
+    df = _leer_hoja(buffer_excel, HOJA_REFERENCIAS, FILA_CABECERA_REFERENCIAS)
+    if df.empty:
+        return []
+
+    faltantes = [c for c in MAPEO_REFERENCIAS.values() if c not in df.columns]
+    if faltantes:
+        print(f"⚠️ No se han encontrado estas columnas en '{HOJA_REFERENCIAS}': {faltantes}", flush=True)
+
+    referencias = []
+    sin_match = 0
+
+    for _, fila in df.iterrows():
+        nombre_excel = _valor_texto(fila, MAPEO_REFERENCIAS["nombre_empresa_excel"])
+        if not nombre_excel:
+            continue  # una fila de referencias sin empresa asociada no es aprovechable
+
+        referencia = {"nombre_empresa_excel": nombre_excel}
+        for clave, columna in MAPEO_REFERENCIAS.items():
+            if clave == "nombre_empresa_excel":
+                continue
+            if clave == "palabras_clave":
+                referencia[clave] = _dividir_lista(fila.get(columna)) if columna in df.columns else []
+            else:
+                referencia[clave] = _valor_texto(fila, columna) if columna in df.columns else None
+
+        referencia["resultado_normalizado"] = _normalizar_resultado(referencia.get("resultado"))
+        referencia["datos_excel"] = _fila_a_json(fila)
+
+        id_empresa = indice_nombres_empresa.get(_normalizar_cabecera(nombre_excel))
+        referencia["id_empresa"] = id_empresa
+        if not id_empresa:
+            sin_match += 1
+
+        referencias.append(referencia)
+
+    if sin_match:
+        print(
+            f"ℹ️ {sin_match}/{len(referencias)} filas de referencias no se han podido enlazar "
+            f"con ninguna empresa de '{HOJA_EMPRESAS}' por nombre (quedan con id_empresa=NULL, "
+            f"pero se guardan igualmente).",
+            flush=True,
+        )
+
+    return referencias
+
+
+# ------------------------------------------------------------------
+# Texto y embeddings por idioma
+# ------------------------------------------------------------------
+def construir_texto_por_idioma(empresa: dict, idioma: str) -> str:
+    columna_palabras = "palabras_clave" if idioma == "es" else f"palabras_clave_{idioma}"
     partes = []
     if empresa.get("nombre_empresa"):
-        partes.append(f"Empresa: {empresa['nombre_empresa']}")
-    if empresa.get("sector"):
-        detalle = empresa["sector"]
-        if empresa.get("subsector"):
-            detalle += f" / {empresa['subsector']}"
-        partes.append(f"Sector: {detalle}")
+        partes.append(empresa["nombre_empresa"])
     if empresa.get("descripcion_actividad"):
         partes.append(empresa["descripcion_actividad"])
-    if empresa.get("palabras_clave"):
-        partes.append("Palabras clave: " + ", ".join(empresa["palabras_clave"]))
     if empresa.get("proyectos_tipo"):
-        partes.append("Proyectos tipo: " + ", ".join(empresa["proyectos_tipo"]))
-    if empresa.get("experiencia_paises"):
-        partes.append("Experiencia en países: " + ", ".join(empresa["experiencia_paises"]))
-    if empresa.get("zona_geografica"):
-        partes.append("Zona geográfica: " + ", ".join(empresa["zona_geografica"]))
+        partes.append(", ".join(empresa["proyectos_tipo"]))
+    palabras = empresa.get(columna_palabras) or []
+    if palabras:
+        partes.append(", ".join(palabras))
     return "\n".join(partes)
+
+
+def calcular_textos_y_embeddings(empresa: dict) -> dict:
+    """
+    Genera texto_completo/embedding para español (siempre) y para
+    en/fr/pt SOLO cuando hay palabras clave propias en ese idioma -- si
+    no, se deja a NULL y la búsqueda cae automáticamente al embedding en
+    español (ver `buscar_empresas_directorio` en sql/schema.sql), en vez
+    de gastar cómputo generando un embedding idéntico al de español.
+    """
+    resultado = {}
+    for idioma in IDIOMAS_PALABRAS_CLAVE:
+        columna_palabras = "palabras_clave" if idioma == "es" else f"palabras_clave_{idioma}"
+        sufijo_campo = "" if idioma == "es" else f"_{idioma}"
+
+        if idioma != "es" and not empresa.get(columna_palabras):
+            resultado[f"texto_completo{sufijo_campo}"] = None
+            resultado[f"embedding{sufijo_campo}"] = None
+            continue
+
+        texto = construir_texto_por_idioma(empresa, idioma)
+        resultado[f"texto_completo{sufijo_campo}"] = texto or None
+        resultado[f"embedding{sufijo_campo}"] = generar_embedding(texto) if texto else None
+
+    return resultado
 
 
 # ------------------------------------------------------------------
@@ -278,23 +450,59 @@ def ejecutar_sincronizacion():
     print("Se ha detectado un cambio (o es la primera sincronización). Descargando...", flush=True)
     buffer_excel = descargar_excel(servicio_drive, file_id, metadata.get("mimeType", ""))
 
-    empresas = leer_empresas_desde_excel(buffer_excel)
-    print(f"Empresas leídas del Excel: {len(empresas)}", flush=True)
+    # ---------------- Empresas ----------------
+    empresas = leer_empresas(buffer_excel)
+    print(f"Empresas leídas de '{HOJA_EMPRESAS}': {len(empresas)}", flush=True)
 
     if not empresas:
-        print("El Excel no contiene filas aprovechables (¿falta la columna 'ID'?). No se sincroniza nada.", flush=True)
+        print("No se ha podido leer ninguna empresa del Excel. Se aborta sin tocar Supabase.", flush=True)
         return
 
-    print("Generando/actualizando embeddings y subiendo a Supabase...", flush=True)
+    print("Generando embeddings (español siempre; en/fr/pt solo si hay palabras clave propias)...", flush=True)
     for empresa in empresas:
-        texto_completo = construir_texto_completo(empresa)
-        empresa["texto_completo"] = texto_completo
-        empresa["embedding"] = generar_embedding(texto_completo) if texto_completo else None
+        empresa.update(calcular_textos_y_embeddings(empresa))
 
-    subidas = subir_en_lotes(
-        supabase, "empresas", "id_empresa", empresas, tamano_lote=TAMANO_LOTE_SUPABASE
-    )
+    subidas = subir_en_lotes(supabase, "empresas", "id_empresa", empresas, tamano_lote=TAMANO_LOTE_SUPABASE)
     print(f"Empresas sincronizadas: {subidas}/{len(empresas)}", flush=True)
+
+    # Poda: empresas que ya no están en el Excel se retiran de Supabase
+    # (el Excel es la fuente de verdad -- si alguien la quita de ahí,
+    # también debe desaparecer del directorio).
+    ids_actuales = {e["id_empresa"] for e in empresas}
+    respuesta_existentes = supabase.table("empresas").select("id, id_empresa").execute()
+    ids_a_borrar = [f["id"] for f in respuesta_existentes.data if f["id_empresa"] not in ids_actuales]
+    if ids_a_borrar:
+        for i in range(0, len(ids_a_borrar), 100):
+            supabase.table("empresas").delete().in_("id", ids_a_borrar[i:i + 100]).execute()
+        print(f"Empresas retiradas (ya no están en el Excel): {len(ids_a_borrar)}", flush=True)
+
+    # ---------------- Referencias ----------------
+    indice_nombres = {
+        _normalizar_cabecera(e["nombre_empresa"]): e["id_empresa"]
+        for e in empresas if e.get("nombre_empresa")
+    }
+    referencias = leer_referencias(buffer_excel, indice_nombres)
+    print(f"Referencias leídas de '{HOJA_REFERENCIAS}': {len(referencias)}", flush=True)
+
+    if referencias:
+        # `empresas_referencias` no tiene una clave natural para upsert
+        # (el Excel no numera cada fila), así que se recarga entera en
+        # cada sincronización: se borra todo y se vuelve a insertar. Es
+        # simple, predecible, y evita ir acumulando duplicados.
+        print("Recargando 'empresas_referencias' (borrado + inserción completa)...", flush=True)
+        supabase.table("empresas_referencias").delete().neq("id", 0).execute()
+
+        tamano_lote = 200
+        insertadas = 0
+        for i in range(0, len(referencias), tamano_lote):
+            lote = referencias[i:i + tamano_lote]
+            try:
+                supabase.table("empresas_referencias").insert(lote).execute()
+                insertadas += len(lote)
+                print(f"Progreso referencias: {insertadas}/{len(referencias)}...", flush=True)
+            except Exception as error:
+                print(f"⚠️ Error insertando lote de referencias {i // tamano_lote + 1}: {error}", flush=True)
+        print(f"Referencias sincronizadas: {insertadas}/{len(referencias)}", flush=True)
 
     guardar_ultima_modificacion(supabase, modificado_en)
     print("Estado de sincronización actualizado.", flush=True)
