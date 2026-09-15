@@ -214,7 +214,7 @@ def _mostrar_ficha(supabase: Client, id_empresa: str):
     col_izq, col_der = st.columns([3, 2])
 
     with col_izq:
-        st.markdown("#### Información completa (tal cual en el Excel)")
+        st.markdown("#### Información completa")
         datos_excel = empresa.get("datos_excel") or {}
         huecos = 0
         for cabecera, valor in datos_excel.items():
