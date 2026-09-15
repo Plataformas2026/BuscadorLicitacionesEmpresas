@@ -1,0 +1,32 @@
+name: Limpiar Licitaciones Vistas
+
+on:
+  schedule:
+    - cron: '0 4 * * *'   # todos los días a las 04:00 UTC
+  workflow_dispatch:
+
+jobs:
+  limpiar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests supabase
+
+      - name: Eliminar licitaciones vistas hace más de 3 días
+        working-directory: ingest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python limpiar_licitaciones_vistas.py
