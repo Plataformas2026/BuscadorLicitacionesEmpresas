@@ -1,4 +1,3 @@
-```python
 # -*- coding: utf-8 -*-
 """
 ingesta_afdb.py
@@ -949,4 +948,3 @@ def ejecutar_sincronizacion():
 
 if __name__ == "__main__":
     ejecutar_sincronizacion()
-```
