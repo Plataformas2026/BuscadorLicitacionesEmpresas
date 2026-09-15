@@ -21,6 +21,7 @@ que la use, no por usuario individual.
 """
 from datetime import date, datetime, timezone
 
+import pandas as pd
 import streamlit as st
 from sentence_transformers import SentenceTransformer
 from supabase import Client
@@ -124,51 +125,77 @@ def listar_guardados(supabase: Client) -> list:
 # ------------------------------------------------------------------
 # Interfaz
 # ------------------------------------------------------------------
-def _renderizar_licitacion(supabase: Client, licitacion: dict, contexto: str):
-    codigo = licitacion["codigo_unico"]
+# Mismos campos que se venían mostrando antes de pasar a formato tabla:
+# Título, Fuente, Lugar, Publicación, Cierre, Enlace -- más las dos
+# columnas de casilla "Visto"/"Guardado". "codigo_unico" viaja oculto en
+# los datos (column_order la deja fuera de la vista) para poder saber a
+# qué fila de Supabase corresponde cada casilla marcada.
+def _tabla_licitaciones(supabase: Client, resultados: list, contexto: str):
+    if not resultados:
+        return
 
-    with st.container(border=True):
-        col_estado, col_info = st.columns([1, 6])
+    filas = [{
+        "codigo_unico": r["codigo_unico"],
+        "Visto": bool(r.get("visto")),
+        "Guardado": bool(r.get("guardado")),
+        "Título": r.get("titulo") or "Sin título",
+        "Fuente": r.get("fuente_origen") or "No especificada",
+        "Lugar": r.get("pais") or "No especificado",
+        "Publicación": r.get("fecha_publicacion") or "No especificada",
+        "Cierre": r.get("fecha_limite") or "No especificada",
+        "Enlace": r.get("url_oficial") or "",
+    } for r in resultados]
 
-        with col_estado:
-            visto_actual = bool(licitacion.get("visto"))
-            guardado_actual = bool(licitacion.get("guardado"))
+    df_base = pd.DataFrame(filas)
 
-            nuevo_visto = st.checkbox("Visto", value=visto_actual, key=f"{contexto}_visto_{codigo}")
-            nuevo_guardado = st.checkbox("Guardado", value=guardado_actual, key=f"{contexto}_guardado_{codigo}")
+    df_editado = st.data_editor(
+        df_base,
+        key=f"tab1_editor_{contexto}",
+        hide_index=True,
+        use_container_width=True,
+        column_order=["Visto", "Guardado", "Título", "Fuente", "Lugar", "Publicación", "Cierre", "Enlace"],
+        disabled=["Título", "Fuente", "Lugar", "Publicación", "Cierre", "Enlace"],
+        column_config={
+            "Visto": st.column_config.CheckboxColumn("Visto"),
+            "Guardado": st.column_config.CheckboxColumn("Guardado"),
+            "Enlace": st.column_config.LinkColumn("Enlace", display_text="Ver convocatoria"),
+        },
+    )
 
-            if nuevo_visto != visto_actual:
-                marcar_visto(supabase, codigo, nuevo_visto)
-                # Se actualiza también el propio diccionario en memoria (y,
-                # por tanto, la copia que pueda seguir en
-                # st.session_state.tab1_resultados de un "Buscar" anterior):
-                # si no, en el siguiente rerun `visto_actual` se recalcularía
-                # a partir del snapshot desactualizado, el checkbox seguiría
-                # "detectando" el mismo cambio, y se entraría en un bucle
-                # infinito de reruns (bug real encontrado al probarlo).
-                licitacion["visto"] = nuevo_visto
-                licitacion["visto_en"] = datetime.now(timezone.utc).isoformat() if nuevo_visto else None
-                st.rerun()
-            if nuevo_guardado != guardado_actual:
-                marcar_guardado(supabase, codigo, nuevo_guardado)
-                licitacion["guardado"] = nuevo_guardado
-                licitacion["guardado_en"] = datetime.now(timezone.utc).isoformat() if nuevo_guardado else None
-                st.rerun()
+    # Se compara fila a fila contra el estado ANTES de este render (`df_base`,
+    # construido a partir de `resultados`) para detectar qué casillas ha
+    # tocado el usuario. Igual que con las tarjetas de la versión anterior:
+    # tras aplicar el cambio en Supabase, se actualiza también el propio
+    # diccionario en `resultados` (que puede seguir viviendo en
+    # st.session_state de una búsqueda anterior) ANTES de llamar a
+    # st.rerun() -- si no, en el siguiente rerun se volvería a detectar la
+    # misma diferencia y se entraría en un bucle infinito de reruns (bug
+    # real ya encontrado y corregido en la versión de tarjetas).
+    hubo_cambio = False
+    for posicion in df_base.index:
+        codigo = df_base.loc[posicion, "codigo_unico"]
+        licitacion = next((r for r in resultados if r["codigo_unico"] == codigo), None)
+        if licitacion is None:
+            continue
 
-        with col_info:
-            titulo = licitacion.get("titulo") or "Sin título"
-            url = licitacion.get("url_oficial")
-            st.markdown(f"**[{titulo}]({url})**" if url else f"**{titulo}**")
+        visto_antes = bool(df_base.loc[posicion, "Visto"])
+        visto_despues = bool(df_editado.loc[posicion, "Visto"])
+        if visto_despues != visto_antes:
+            marcar_visto(supabase, codigo, visto_despues)
+            licitacion["visto"] = visto_despues
+            licitacion["visto_en"] = datetime.now(timezone.utc).isoformat() if visto_despues else None
+            hubo_cambio = True
 
-            detalles = [d for d in [licitacion.get("fuente_origen"), licitacion.get("pais")] if d]
-            if licitacion.get("fecha_publicacion"):
-                detalles.append(f"Publicación: {licitacion['fecha_publicacion']}")
-            detalles.append(f"Cierre: {licitacion.get('fecha_limite') or 'No detectada'}")
-            st.caption(" · ".join(detalles))
+        guardado_antes = bool(df_base.loc[posicion, "Guardado"])
+        guardado_despues = bool(df_editado.loc[posicion, "Guardado"])
+        if guardado_despues != guardado_antes:
+            marcar_guardado(supabase, codigo, guardado_despues)
+            licitacion["guardado"] = guardado_despues
+            licitacion["guardado_en"] = datetime.now(timezone.utc).isoformat() if guardado_despues else None
+            hubo_cambio = True
 
-            descripcion = licitacion.get("descripcion")
-            if descripcion:
-                st.write(descripcion[:280] + ("…" if len(descripcion) > 280 else ""))
+    if hubo_cambio:
+        st.rerun()
 
 
 def _vista_buscar(supabase: Client, encoder: SentenceTransformer):
@@ -183,7 +210,7 @@ def _vista_buscar(supabase: Client, encoder: SentenceTransformer):
             key="tab1_consulta_texto",
         )
     with col_fuente:
-        filtro_fuente = st.selectbox("Fuente", ["Todas"] + FUENTES_LICITACIONES, key="tab1_filtro_fuente")
+        filtro_fuente = st.multiselect("Fuente", FUENTES_LICITACIONES, key="tab1_filtro_fuente")
     with col_lugar:
         lugares_disponibles = obtener_lugares_disponibles(supabase)
         filtro_lugar = st.multiselect("Lugar", lugares_disponibles, key="tab1_filtro_lugar")
@@ -207,8 +234,8 @@ def _vista_buscar(supabase: Client, encoder: SentenceTransformer):
             # Las marcadas como "Visto" nunca aparecen en la vista principal.
             resultados = [r for r in resultados if not r.get("visto")]
 
-            if filtro_fuente != "Todas":
-                resultados = [r for r in resultados if r.get("fuente_origen") == filtro_fuente]
+            if filtro_fuente:
+                resultados = [r for r in resultados if r.get("fuente_origen") in filtro_fuente]
             if filtro_lugar:
                 resultados = [r for r in resultados if r.get("pais") in filtro_lugar]
 
@@ -234,11 +261,10 @@ def _vista_buscar(supabase: Client, encoder: SentenceTransformer):
         return
 
     st.success(f"Se han encontrado {len(visibles)} licitaciones.")
-    for licitacion in visibles:
-        # Se filtra por `visto` en cada render (no solo al pulsar "Buscar")
-        # para que marcar "Visto" la haga desaparecer al instante, tal como
-        # se pide, sin esperar a una nueva búsqueda.
-        _renderizar_licitacion(supabase, licitacion, contexto="buscar")
+    # Se filtra por `visto` en cada render (no solo al pulsar "Buscar") para
+    # que marcar "Visto" la haga desaparecer al instante, sin esperar a una
+    # nueva búsqueda.
+    _tabla_licitaciones(supabase, visibles, contexto="buscar")
 
 
 def _vista_vistos(supabase: Client):
@@ -252,8 +278,7 @@ def _vista_vistos(supabase: Client):
     if not vistos:
         st.info("No hay licitaciones marcadas como vistas.")
         return
-    for licitacion in vistos:
-        _renderizar_licitacion(supabase, licitacion, contexto="vistas")
+    _tabla_licitaciones(supabase, vistos, contexto="vistas")
 
 
 def _vista_guardados(supabase: Client):
@@ -263,8 +288,7 @@ def _vista_guardados(supabase: Client):
     if not guardados:
         st.info("No hay licitaciones guardadas todavía.")
         return
-    for licitacion in guardados:
-        _renderizar_licitacion(supabase, licitacion, contexto="favoritos")
+    _tabla_licitaciones(supabase, guardados, contexto="favoritos")
 
 
 def render_tab1(supabase: Client, encoder: SentenceTransformer):
