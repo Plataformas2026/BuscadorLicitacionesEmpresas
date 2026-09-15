@@ -29,13 +29,6 @@ from supabase import Client
 
 from search import buscar_semantica
 
-COLUMNAS_EMPRESA_MATCH = (
-    "id_empresa, nombre_empresa, sector, subsector, tipo_empresa, web, "
-    "descripcion_actividad, palabras_clave, proyectos_tipo, "
-    "experiencia_paises, zona_geografica, tamano, contacto_nombre, "
-    "contacto_cargo, contacto_email"
-)
-
 PATRON_URL = re.compile(r"^https?://", re.IGNORECASE)
 
 
@@ -148,13 +141,19 @@ def explicar_coincidencia(texto_licitacion: str, pais_licitacion: str, empresa: 
         motivos.append(f"Afinidad semántica {nivel} con el objeto de la licitación ({pct}%).")
 
     paises_empresa = set(_normalizar(p) for p in (empresa.get("experiencia_paises") or []))
-    zonas_empresa = set(_normalizar(z) for z in (empresa.get("zona_geografica") or []))
+    paises_interes_empresa = set(_normalizar(p) for p in (empresa.get("paises_interes") or []))
+    zonas_empresa = set(_normalizar(z) for z in (empresa.get("zona_geografica_interes") or []))
+    ambito_geografico_norm = _normalizar(empresa.get("ambito_geografico") or "")
     if pais_licitacion:
         pais_norm = _normalizar(pais_licitacion)
         if pais_norm in paises_empresa:
             motivos.append(f"Experiencia previa acreditada en {pais_licitacion}.")
+        elif pais_norm in paises_interes_empresa:
+            motivos.append(f"La empresa tiene interés declarado en {pais_licitacion}.")
         elif any(pais_norm in z or z in pais_norm for z in zonas_empresa):
-            motivos.append(f"La empresa opera en la zona geográfica de {pais_licitacion}.")
+            motivos.append(f"La empresa tiene interés en la zona geográfica de {pais_licitacion}.")
+        elif ambito_geografico_norm and pais_norm in ambito_geografico_norm:
+            motivos.append(f"El ámbito geográfico de operación de la empresa menciona {pais_licitacion}.")
 
     palabras_coincidentes = [
         palabra for palabra in (empresa.get("palabras_clave") or [])
@@ -198,7 +197,7 @@ def _resetear_seleccion():
 
 
 def render_tab2(supabase: Client, encoder: SentenceTransformer):
-    st.subheader("Coincidencia Inteligente: Licitación → Empresas")
+    st.subheader("🤝 Coincidencia Inteligente: Licitación → Empresas")
     st.caption(
         "Introduce el título, el enlace oficial o el identificador de una licitación. "
         "Si no está en nuestra base de datos, también puedes describirla directamente."
@@ -265,7 +264,7 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
     if licitacion:
         st.markdown(f"**Licitación seleccionada:** {licitacion['titulo']}")
 
-        if st.button("Buscar empresas coincidentes", key="tab2_buscar_empresas", use_container_width=True):
+        if st.button("🤝 Buscar empresas coincidentes", key="tab2_buscar_empresas", use_container_width=True):
             with st.spinner("Cruzando con la base de datos de empresas..."):
                 if licitacion.get("codigo_unico"):
                     st.session_state.tab2_coincidencias = obtener_coincidencias(supabase, licitacion["codigo_unico"])
