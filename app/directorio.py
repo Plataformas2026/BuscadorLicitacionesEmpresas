@@ -67,23 +67,29 @@ def obtener_opciones_filtro(_supabase: Client) -> dict:
 
 def listar_empresas(
     supabase: Client,
-    id_empresa: str = None,
-    sector: str = None,
-    subsector: str = None,
-    tipo: str = None,
-    cnae: str = None,
+    id_empresa: list = None,
+    sector: list = None,
+    subsector: list = None,
+    tipo: list = None,
+    cnae: list = None,
 ) -> list:
     consulta = supabase.table("empresas").select(COLUMNAS_TARJETA)
+
     if id_empresa:
-        consulta = consulta.eq("id_empresa", id_empresa)
+        consulta = consulta.in_("id_empresa", id_empresa)
+
     if sector:
-        consulta = consulta.eq("sector", sector)
+        consulta = consulta.in_("sector", sector)
+
     if subsector:
-        consulta = consulta.eq("subsector", subsector)
+        consulta = consulta.in_("subsector", subsector)
+
     if tipo:
-        consulta = consulta.eq("tipo_empresa", tipo)
+        consulta = consulta.in_("tipo_empresa", tipo)
+
     if cnae:
-        consulta = consulta.eq("cnae", cnae)
+        consulta = consulta.in_("cnae", cnae)
+
     respuesta = consulta.order("nombre_empresa").execute()
     return respuesta.data or []
 
@@ -214,7 +220,7 @@ def _mostrar_ficha(supabase: Client, id_empresa: str):
     col_izq, col_der = st.columns([3, 2])
 
     with col_izq:
-        st.markdown("#### Información completa (tal cual en el Excel)")
+        st.markdown("#### Información completa")
         datos_excel = empresa.get("datos_excel") or {}
         huecos = 0
         for cabecera, valor in datos_excel.items():
@@ -274,22 +280,43 @@ def render_tab3(supabase: Client, encoder: SentenceTransformer):
         placeholder="ej. gestión del agua en África · water management projects · projets d'énergies renouvelables · gestão de resíduos",
         key="tab3_busqueda_semantica",
     )
-
     col_id, col_sector, col_subsector, col_tipo, col_cnae = st.columns(5)
+  
     with col_id:
-        filtro_id = st.selectbox("ID", ["Todos"] + opciones["ids"], key="tab3_filtro_id")
+        filtro_id = st.multiselect(
+            "ID",
+            opciones["ids"],
+            key="tab3_filtro_id",
+        )
+    
     with col_sector:
-        filtro_sector = st.selectbox("Sector", ["Todos"] + opciones["sectores"], key="tab3_filtro_sector")
+        filtro_sector = st.multiselect(
+            "Sector",
+            opciones["sectores"],
+            key="tab3_filtro_sector",
+        )
+    
     with col_subsector:
-        filtro_subsector = st.selectbox("Subsector", ["Todos"] + opciones["subsectores"], key="tab3_filtro_subsector")
+        filtro_subsector = st.multiselect(
+            "Subsector",
+            opciones["subsectores"],
+            key="tab3_filtro_subsector",
+        )
+    
     with col_tipo:
-        filtro_tipo = st.selectbox(
+        filtro_tipo = st.multiselect(
             "Empresa pública / clúster / asociación / privada",
-            ["Todos"] + opciones["tipos"],
+            opciones["tipos"],
             key="tab3_filtro_tipo",
         )
+    
     with col_cnae:
-        filtro_cnae = st.selectbox("CNAE", ["Todos"] + opciones["cnaes"], key="tab3_filtro_cnae")
+        filtro_cnae = st.multiselect(
+            "CNAE",
+            opciones["cnaes"],
+            key="tab3_filtro_cnae",
+        )
+
 
     buscar_click = st.button("Buscar empresas", key="tab3_buscar", use_container_width=True)
 
@@ -301,28 +328,46 @@ def render_tab3(supabase: Client, encoder: SentenceTransformer):
             else:
                 resultados = listar_empresas(
                     supabase,
-                    id_empresa=None if filtro_id == "Todos" else filtro_id,
-                    sector=None if filtro_sector == "Todos" else filtro_sector,
-                    subsector=None if filtro_subsector == "Todos" else filtro_subsector,
-                    tipo=None if filtro_tipo == "Todos" else filtro_tipo,
-                    cnae=None if filtro_cnae == "Todos" else filtro_cnae,
+                    id_empresa=filtro_id or None,
+                    sector=filtro_sector or None,
+                    subsector=filtro_subsector or None,
+                    tipo=filtro_tipo or None,
+                    cnae=filtro_cnae or None,
                 )
                 st.session_state.tab3_idioma_detectado = None
 
             # Con texto de búsqueda, los filtros se aplican COMO REFINAMIENTO
             # sobre los resultados semánticos (para poder combinar ambos).
             if consulta_texto.strip():
-                if filtro_id != "Todos":
-                    resultados = [r for r in resultados if r.get("id_empresa") == filtro_id]
-                if filtro_sector != "Todos":
-                    resultados = [r for r in resultados if r.get("sector") == filtro_sector]
-                if filtro_subsector != "Todos":
-                    resultados = [r for r in resultados if r.get("subsector") == filtro_subsector]
-                if filtro_tipo != "Todos":
-                    resultados = [r for r in resultados if r.get("tipo_empresa") == filtro_tipo]
-                if filtro_cnae != "Todos":
-                    resultados = [r for r in resultados if r.get("cnae") == filtro_cnae]
-
+              if filtro_id:
+                  resultados = [
+                      r for r in resultados
+                      if r.get("id_empresa") in filtro_id
+                  ]
+          
+              if filtro_sector:
+                  resultados = [
+                      r for r in resultados
+                      if r.get("sector") in filtro_sector
+                  ]
+          
+              if filtro_subsector:
+                  resultados = [
+                      r for r in resultados
+                      if r.get("subsector") in filtro_subsector
+                  ]
+          
+              if filtro_tipo:
+                  resultados = [
+                      r for r in resultados
+                      if r.get("tipo_empresa") in filtro_tipo
+                  ]
+          
+              if filtro_cnae:
+                  resultados = [
+                      r for r in resultados
+                      if r.get("cnae") in filtro_cnae
+                  ]
             st.session_state.tab3_resultados_busqueda = resultados
 
     resultados = st.session_state.tab3_resultados_busqueda
