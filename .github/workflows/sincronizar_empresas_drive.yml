@@ -1,0 +1,43 @@
+name: Sincronizar Empresas (Google Drive)
+
+on:
+  schedule:
+    # Cada 30 minutos. GitHub Actions no ofrece triggers por webhook de
+    # Drive en el plan gratuito (habría que exponer un endpoint HTTPS
+    # propio para recibir notificaciones push de Google), así que la
+    # forma gratuita de "detectar un cambio" es comprobarlo
+    # periódicamente: el script solo hace trabajo real (descargar,
+    # regenerar embeddings, subir a Supabase) cuando el modifiedTime del
+    # fichero en Drive ha cambiado -- si no, la ejecución es casi
+    # instantánea. Ajusta la frecuencia si quieres detectarlo antes/con
+    # menos consumo de minutos.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:   # para forzar una sincronización inmediata a mano
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ejecutar sincronización de empresas
+        working-directory: ingest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_DRIVE_FILE_ID: ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
+        run: python sync_empresas_drive.py
