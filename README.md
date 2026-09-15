@@ -25,16 +25,20 @@ Streamlit Community Cloud + Supabase + GitHub Actions.
 ├── ingest/                                  # scripts de ingesta (backend, escritura)
 │   ├── common.py
 │   ├── ingesta_afdb.py                      # Pestaña 1: scraping del AfDB
+│   ├── limpiar_licitaciones_vistas.py       # Pestaña 1: borrado a los 3 días de "Visto"
 │   └── sync_empresas_drive.py               # Pestañas 2/3: Google Drive -> Supabase
 └── .github/workflows/
     ├── sincronizar_afdb.yml                 # diario
+    ├── limpiar_licitaciones_vistas.yml      # diario
     └── sincronizar_empresas_drive.yml       # cada 30 min (ver sección Google Drive)
 ```
 
 Principio de siempre: **la app solo lee, `ingest/` es lo único que
-escribe/borra**. Por eso hay dos claves de Supabase (`SUPABASE_ANON_KEY`
-para la app, `SUPABASE_SERVICE_KEY` para la ingesta) y RLS que solo deja
-`SELECT` a la clave anónima.
+escribe/borra** -- con una única excepción deliberada: la propia app
+puede marcar/desmarcar "Visto" y "Guardado" en tiempo real (ver sección
+7). Por eso hay dos claves de Supabase (`SUPABASE_ANON_KEY` para la app,
+`SUPABASE_SERVICE_KEY` para la ingesta) y RLS que solo deja `SELECT` (y,
+solo sobre esas 4 columnas, `UPDATE`) a la clave anónima.
 
 
 ## 1. Supabase
@@ -176,22 +180,78 @@ de la consulta del usuario usa `langdetect` (gratuita, sin API, sin
 conexión a internet) -- ver `app/directorio.py:detectar_idioma`.
 
 
-## 6. AfDB (Pestaña 1) — aviso de fiabilidad
+## 6. AfDB (Pestaña 1)
 
-El AfDB **no tiene API pública** para sus avisos de contratación (se
-comprobó expresamente). `ingest/ingesta_afdb.py` hace scraping de:
+### Fuente (corregida)
 
-    https://www.afdb.org/en/documents/category/specific-procurement-notices?page=N
+La versión anterior scrapeaba una página equivocada
+(`/en/documents/category/specific-procurement-notices`, filtrando solo
+títulos que empezaran literalmente por "SPN -"/"GPN -") -- por eso solo
+subía 1 registro: casi ningún aviso real usa ese prefijo. La fuente
+correcta, confirmada contra la página real, es:
 
-El parseo se apoya en patrones de contenido (un enlace cuyo texto
-empieza por "SPN -"/"GPN -", con una fecha "DD-Mon-YYYY" justo antes)
-en vez de nombres de clases CSS, que no se han podido verificar contra
-el HTML en crudo -- se ha probado contra HTML reconstruido a partir de
-la página real, pero no contra la página en vivo. Ejecútalo una vez a
-mano y revisa los logs antes de dejarlo en el cron desatendido.
+    https://www.afdb.org/en/projects-and-operations/procurement?page=N
+
+Un listado mucho más grande (+12.000 documentos) con tipos de aviso muy
+variados: AMI (Appel à Manifestation d'Intérêt), AAO (Appel d'Offres
+Ouvert), IFB (Invitation For Bids), EOI (Expression Of Interest), PPM,
+SPN, GPN... `ingest/ingesta_afdb.py` reconoce cualquier prefijo de 2 a 6
+letras mayúsculas seguido de " - país - ..." (no solo SPN/GPN), y
+descarta explícitamente los avisos de resultado/adjudicación
+("Attribution de..."/"Contract Award...": ya no son oportunidades
+abiertas).
+
+### Fecha de cierre (deadline) -- heurística de mejor esfuerzo
+
+Ni el listado ni la ficha HTML de cada aviso traen la fecha de cierre en
+ningún campo estructurado (se comprobó descargando una ficha real) --
+solo aparece dentro del PDF adjunto, como texto libre ("...must be
+submitted... no later than 13 March 2026...", "...au plus tard le...").
+Por cada aviso dentro de la ventana de sincronización, el script:
+
+1. Descarga la ficha HTML (para la descripción y la URL del PDF/documento adjunto).
+2. Si hay un PDF, descarga sus 3 primeras páginas y busca frases
+   habituales que anuncian el plazo, en inglés, francés y portugués
+   (`FRASES_DISPARADORAS_FECHA_CIERRE` en el código), y si encuentra una,
+   intenta leer una fecha justo después con `dateutil.parser` (traduciendo
+   antes los nombres de mes en francés/portugués, que `dateutil` no
+   reconoce por defecto).
+3. Descarta cualquier fecha que no caiga entre hoy y +3 años: mejor no
+   guardar `fecha_limite` que guardar una fecha sin sentido por una mala
+   lectura del PDF.
+
+Es una heurística sobre texto libre en varios idiomas y formatos de PDF
+distintos -- no va a acertar siempre; se ha probado contra frases reales
+de avisos ya publicados por el AfDB (ver las pruebas que se entregan
+aparte), no hay garantía de cobertura al 100%. Cuando no se detecta, la
+app muestra "Cierre: No detectada" en vez de inventar un dato.
+
+Por el volumen de peticiones que esto añade (ficha + PDF por cada aviso
+candidato), hay un tope `MAX_DETALLES_POR_EJECUCION` (80 por defecto):
+si hay más candidatos en la ventana de 3 días, el resto se recoge en la
+siguiente ejecución programada.
 
 
-## 7. Probar en local
+## 7. "Visto" y "Guardado" (Pestaña 1)
+
+Única parte de la app con permiso de ESCRITURA desde el navegador (con
+la clave anónima) -- ver `sql/schema.sql`, que concede `UPDATE` **solo**
+sobre las columnas `visto`/`visto_en`/`guardado`/`guardado_en`
+(comprobado con un `SET ROLE anon` real: intentar tocar cualquier otra
+columna falla con "permission denied"). Como la app no tiene login, este
+estado es compartido por todo el que la use, no por usuario individual.
+
+- **Visto**: desaparece al instante de la vista principal "Buscar" y
+  pasa a la sección "Vistas". `ingest/limpiar_licitaciones_vistas.py`
+  (a diario, ver el workflow correspondiente) la borra a los 3 días de
+  marcarse -- **salvo que también esté "Guardada"**. Se puede desmarcar
+  en cualquier momento mientras no se haya borrado.
+- **Guardado**: pasa a "Favoritos" de forma permanente; nunca se borra
+  automáticamente, y protege del borrado por "Visto" aunque ambas
+  estén marcadas a la vez. Se puede desmarcar en cualquier momento.
+
+
+## 8. Probar en local
 
 ```bash
 pip install -r requirements.txt
@@ -203,4 +263,5 @@ export GOOGLE_DRIVE_FILE_ID="tu_id_de_archivo"
 cd ingest
 python ingesta_afdb.py
 python sync_empresas_drive.py
+python limpiar_licitaciones_vistas.py
 ```

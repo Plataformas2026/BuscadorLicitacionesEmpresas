@@ -9,3 +9,5 @@ openpyxl
 langdetect
 google-api-python-client
 google-auth
+python-dateutil
+pdfplumber
