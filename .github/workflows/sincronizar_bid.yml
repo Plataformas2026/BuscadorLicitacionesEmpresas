@@ -23,7 +23,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
+          
+      - name: Instalar binarios de Playwright
+        run: |
+          playwright install chromium
+          
       - name: Ejecutar sincronizacion BID
         working-directory: ingest
         env:
@@ -31,6 +35,4 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python ingesta_bid.py
         
-      - name: Instalar binarios de Playwright
-        run: |
-          playwright install chromium
+     
