@@ -127,7 +127,17 @@ CANDIDATOS_POR_CONCEPTO = {
 # Ver docstring: rellenar aqui a mano tras revisar los logs de una
 # primera ejecucion si el emparejamiento automatico se equivoca con
 # alguna columna, p. ej. {"fecha_limite": "nombre_real_exacto"}.
-MAPEO_CONCEPTOS_FORZADO = {}
+MAPEO_CONCEPTOS_FORZADO = {
+    "referencia": ["noticeid"],
+    "titulo": ["noticetitle"],
+    "descripcion": ["process_desc"],
+    "pais": ["countryname"],
+    "fecha_publicacion": ["publicationdate"],
+    "fecha_limite": ["deadline"],
+    "url": ["proyecturl"],
+    "tipo": ["type""],
+    "organismo": ["projectname"],
+}
 
 
 # ------------------------------------------------------------------
