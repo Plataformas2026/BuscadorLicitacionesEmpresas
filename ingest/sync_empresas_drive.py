@@ -147,10 +147,11 @@ CAMPOS_COMPARABLES_EMPRESAS = (
 
 
 # ------------------------------------------------------------------
-# Mapeo explícito de alias / variantes conocidas que difieren mucho
+# Mapeo explícito de alias (Variante normalizada -> Nombre exacto en Dossier Completo)
 # ------------------------------------------------------------------
 ALIAS_EMPRESAS = {
     "canarias tecnologica y si": "CTSI",
+    "ctsi (canarias tecnologica y sistemas de informacion)": "CTSI",
     "ctsi": "CTSI",
     "cocosolutions": "COCO SOLUTIONS",
     "coco solutions": "COCO SOLUTIONS",
@@ -158,26 +159,14 @@ ALIAS_EMPRESAS = {
     "evm": "EVM",
     "acosta ing y wet ingenieria": "GRUPO ACOSTA",
     "acosta": "GRUPO ACOSTA",
+    "grupo acosta acosta ing y wet ingenieria": "GRUPO ACOSTA",
     "smart linking": "SMARTLINKING",
     "smartlinking": "SMARTLINKING",
     "axionnet": "AXIONET",
-    "axionet": "AXIONET",
+    "axionnet": "AXIONET",
+    "axionnet": "AXIONNET",
     "2raestudio ingenieria y arquitectura": "2RA STUDIO",
     "2ra studio": "2RA STUDIO",
-    "COCOSOLUTIONS": "COCO SOLUTIONS",
-    "COCO SOLUTIONS" : "COCOSOLUTIONS",
-    "EVM": "GRUPO EVM",
-    "GRUPO EVM":  "EVM",
-    "2RAestudio Ingeniería y Arquitectura" : "2RA STUDIO",
-    "2RA STUDIO" : "2RAestudio Ingeniería y Arquitectura",
-    "GRUPO ACOSTA (ACOSTA ING Y WET INGENIERÍA)": "ACOSTA",
-    "ACOSTA" : "GRUPO ACOSTA (ACOSTA ING Y WET INGENIERÍA)",
-    "SMARTLINKING": "SMART LINKING",
-    "SMART LINKING" : "SMARTLINKING",
-    "AXIONET": "AXIONNET",
-    "AXIONNET" : "AXIONET",
-    "CTSI (Canarias Tecnológica y Sistemas de Información)": "CANARIAS TECNOLÓGICA Y SI",
-    "CANARIAS TECNOLÓGICA Y SI": "CTSI (Canarias Tecnológica y Sistemas de Información)"
 }
 
 
@@ -371,40 +360,43 @@ def _normalizar_resultado(texto: str) -> str:
     return "desconocido"
 
 
-def _buscar_empresa_por_prefijo_o_alias(nombre_original: str, indice_nombres: dict) -> str:
-    """Busca mediante alias explícitos, coincidencia exacta normalizada y prefijos inteligentes."""
+def _buscar_empresa_por_prefijo_o_alias(nombre_original: str, indice_nombres: dict) -> tuple:
+    """Busca mediante alias explícitos, coincidencia exacta normalizada y prefijos inteligentes.
+       Devuelve (id_empresa, motivo_falla)"""
     if not nombre_original:
-        return None
+        return None, "Nombre de empresa vacío en la referencia"
 
     nombre_norm = _normalizar_nombre_empresa(nombre_original)
 
     # 1. Comprobar si existe un alias explícito predefinido en ALIAS_EMPRESAS
     if nombre_norm in ALIAS_EMPRESAS:
-        nombre_objetivo = _normalizar_nombre_empresa(ALIAS_EMPRESAS[nombre_norm])
-        if nombre_objetivo in indice_nombres:
-            return indice_nombres[nombre_objetivo]
+        nombre_objetivo_real = _normalizar_nombre_empresa(ALIAS_EMPRESAS[nombre_norm])
+        if nombre_objetivo_real in indice_nombres:
+            return indice_nombres[nombre_objetivo_real], None
+        else:
+            return None, f"Alias encontrado ('{ALIAS_EMPRESAS[nombre_norm]}'), pero no existe en el índice de 'DOSSIER COMPLETO'"
 
     # 2. Coincidencia exacta normalizada
     if nombre_norm in indice_nombres:
-        return indice_nombres[nombre_norm]
+        return indice_nombres[nombre_norm], None
 
     # 3. Coincidencia por prefijo o palabra principal (ej: ROMPEI ENERGY -> ROMPEI)
     palabras = nombre_norm.split()
     if not palabras:
-        return None
+        return None, "Nombre normalizado sin palabras"
     
     primera_palabra = palabras[0]
     if len(primera_palabra) < 3:  # Evita prefijos demasiado cortos como "la", "el", "de"
         if len(palabras) > 1:
             primera_palabra = f"{palabras[0]} {palabras[1]}"
         else:
-            return None
+            return None, f"Primera palabra demasiado corta y sin secundaria: '{primera_palabra}'"
 
     for nombre_idx, id_emp in indice_nombres.items():
         if nombre_idx.startswith(primera_palabra) or primera_palabra.startswith(nombre_idx):
-            return id_emp
+            return id_emp, None
 
-    return None
+    return None, f"No se encontró coincidencia exacta, alias ni prefijo compatible para '{nombre_original}' (normalizado: '{nombre_norm}')"
 
 
 def leer_referencias(buffer_excel: io.BytesIO, indice_nombres_empresa: dict) -> list:
@@ -436,12 +428,13 @@ def leer_referencias(buffer_excel: io.BytesIO, indice_nombres_empresa: dict) -> 
         referencia["resultado_normalizado"] = _normalizar_resultado(referencia.get("resultado"))
         referencia["datos_excel"] = _fila_a_json(fila)
 
-        # Búsqueda inteligente usando el nuevo sistema de alias y normalización
-        id_empresa = _buscar_empresa_por_prefijo_o_alias(nombre_excel, indice_nombres_empresa)
+        # Búsqueda inteligente con impresión de motivos detallados si falla
+        id_empresa, motivo = _buscar_empresa_por_prefijo_o_alias(nombre_excel, indice_nombres_empresa)
         
         referencia["id_empresa"] = id_empresa
         if not id_empresa:
             sin_match += 1
+            print(f"⚠️ [SIN MATCH] Empresa en referencia: '{nombre_excel}' -> Motivo: {motivo}", flush=True)
 
         referencias.append(referencia)
 
