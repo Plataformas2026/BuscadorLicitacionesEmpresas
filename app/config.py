@@ -26,6 +26,6 @@ SUPABASE_ANON_KEY = _config("SUPABASE_ANON_KEY")
 
 MODELO_EMBEDDING = "intfloat/multilingual-e5-small"  # 384 dimensiones
 
-FUENTES_LICITACIONES = ["AfDB", "BID"]  # se irán añadiendo más bancos/organismos aquí
+FUENTES_LICITACIONES = ["AfDB", "BID", "CAF"]  # se irán añadiendo más bancos/organismos aquí
 
 TIPOS_EMPRESA = ["Pública", "Privada"]
