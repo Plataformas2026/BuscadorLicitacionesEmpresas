@@ -251,7 +251,33 @@ estado es compartido por todo el que la use, no por usuario individual.
   estén marcadas a la vez. Se puede desmarcar en cualquier momento.
 
 
-## 8. Probar en local
+## 8. Coincidencia Inteligente (Pestaña 2)
+
+Además de la similitud semántica, `explicar_coincidencia()` en
+`app/matching.py` compara, con heurísticas de solapamiento de texto (sin
+LLM, nada inventado):
+
+- `PRINCIPALES PROYECTOS TIPO` y `DESCRIPCIÓN BREVE DE LA ACTIVIDAD` de
+  la empresa frente al título + descripción de la licitación.
+- `PREFERENCIAS LICITACIONES` de la empresa.
+- Títulos de licitaciones antiguas de la empresa (tabla
+  `empresas_referencias`, cargada desde la hoja "REFERENCIAS P
+  BÚSQUEDAS" del Excel -- ver Sección 4): si alguna se parece a la
+  licitación actual, se muestra junto con si fue adjudicada o no.
+
+`preferencias_licitaciones` se ha añadido a las funciones RPC
+`buscar_empresas_para_licitacion` y `buscar_empresas_por_embedding` en
+`sql/schema.sql` (antes no se devolvía). Es un cambio aditivo: ninguna
+columna ni función existente se ha eliminado ni renombrado.
+
+Cada empresa candidata incluye también una tabla comparando el lugar de
+la licitación contra los 4 campos geográficos ya definidos en el
+Directorio de Empresas (Experiencia países, Zona geográfica de interés,
+Países de interés, Ámbito geográfico), marcando "Coincide" / "No
+coincide" / "Sin datos" en cada uno.
+
+
+## 9. Probar en local
 
 ```bash
 pip install -r requirements.txt
