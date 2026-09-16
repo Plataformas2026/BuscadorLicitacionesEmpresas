@@ -125,7 +125,6 @@ CANDIDATOS_POR_CONCEPTO = {
     "organismo": ["agency", "executing_agency", "borrower", "organization", "buyer", "client"],
 }
 
-# CORREGIDO: Ahora son strings (cadenas de texto plano), no listas.
 MAPEO_CONCEPTOS_FORZADO = {
     "referencia": "noticeid",
     "titulo": "noticetitle",
@@ -173,7 +172,6 @@ def emparejar_columnas(columnas_reales: list) -> dict:
 # Normalizacion de valores
 # ------------------------------------------------------------------
 def _extraer_valor_plano(registro: dict, columna: str):
-    """Extrae un valor de forma segura, manejando si viene como string, número o lista."""
     if not columna:
         return None
     valor = registro.get(columna)
@@ -190,7 +188,6 @@ def _extraer_valor_plano(registro: dict, columna: str):
 
 
 def _parsear_fecha(valor):
-    """Defensivo a proposito: un export CSV->CKAN puede traer la fecha en varios formatos o listas."""
     if valor is None:
         return None
     if isinstance(valor, list):
@@ -299,12 +296,15 @@ def ejecutar_sincronizacion():
     print(f"Fuente: {ENDPOINT_DATASTORE_SEARCH}?resource_id={RESOURCE_ID}", flush=True)
 
     try:
-        columnas_reales = descubrir_columnas()
+        resultado_inicial = _consultar_datastore(offset=0, limit=1)
+        total_registros_tabla = resultado_inicial.get("total", 0)
+        columnas_reales = [campo["id"] for campo in resultado_inicial.get("fields", []) if campo["id"] != "_id"]
     except Exception as error:
         print(f"Error consultando la API de datos abiertos del BID: {error}", flush=True)
         return
 
-    print(f"\nColumnas reales detectadas en el recurso ({len(columnas_reales)}): {columnas_reales}", flush=True)
+    print(f"\nTotal registros en la tabla remota del BID: {total_registros_tabla}", flush=True)
+    print(f"Columnas reales detectadas en el recurso ({len(columnas_reales)}): {columnas_reales}", flush=True)
 
     mapeo = emparejar_columnas(columnas_reales)
     print("\nEmparejamiento concepto -> columna real:", flush=True)
@@ -324,18 +324,18 @@ def ejecutar_sincronizacion():
     if not columna_fecha_orden:
         print(
             "\nAviso: no se ha identificado ninguna columna de fecha -- no se puede aplicar la "
-            f"ventana de {DIAS_ATRAS} dias. Se recogeran como mucho las primeras "
-            f"{TAMANO_PAGINA} filas del recurso (orden por defecto de la API) en vez de filtrar "
-            "por fecha; conviene revisar el emparejamiento antes de confiar en el cron automatico.",
+            f"ventana de {DIAS_ATRAS} dias.",
             flush=True,
         )
 
-    # ---------------- Paginacion segura sin usar 'sort' en la API ----------------
+    # ---------------- Paginacion desde el FINAL (registros más recientes) ----------------
+    # Como CKAN devuelve por defecto los registros antiguos primero (_id ascendente),
+    # calculamos el offset para empezar a descargar desde los más recientes al final de la tabla.
+    offset = max(0, total_registros_tabla - MAX_REGISTROS_SEGURIDAD) if total_registros_tabla > MAX_REGISTROS_SEGURIDAD else 0
     candidatos = []
-    offset = 0
 
-    print("\nDescargando registros de la API del BID...", flush=True)
-    while offset < MAX_REGISTROS_SEGURIDAD:
+    print(f"\nDescargando registros recientes desde el offset {offset} hasta el final...", flush=True)
+    while offset < total_registros_tabla and len(candidatos) < MAX_REGISTROS_SEGURIDAD:
         try:
             resultado = _consultar_datastore(offset=offset, limit=TAMANO_PAGINA)
         except Exception as error:
@@ -347,10 +347,6 @@ def ejecutar_sincronizacion():
             break
 
         candidatos.extend(registros)
-        
-        if len(registros) < TAMANO_PAGINA:
-            break
-
         offset += TAMANO_PAGINA
         time.sleep(PAUSA_ENTRE_PAGINAS_SEGUNDOS)
 
@@ -359,7 +355,7 @@ def ejecutar_sincronizacion():
     if not candidatos:
         return
 
-    # Si tenemos columna de fecha, ordenamos en Python y filtramos por la ventana de días
+    # Ordenar en memoria por fecha descendente y filtrar por la ventana de días
     if columna_fecha_orden:
         candidatos = sorted(
             candidatos,
