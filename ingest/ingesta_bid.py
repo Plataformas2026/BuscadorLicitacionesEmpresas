@@ -3,66 +3,7 @@
 ingesta_bid.py
 ----------------
 Sincroniza avisos de licitacion del Banco Interamericano de Desarrollo
-(BID/IADB) leyendo directamente el informe de Power BI incrustado en:
-
-    https://www.iadb.org/es/como-trabajar-juntos/adquisiciones/adquisiciones-para-proyectos/avisos-de-adquisiciones
-
-usando Playwright (navegador real, headless, gratuito) -- la unica via
-viable ya que ese informe se renderiza con JavaScript y no hay ninguna
-URL fija que se pueda descargar con requests/BeautifulSoup (ver el
-aviso de fiabilidad del CKAN abandonado en versiones anteriores de este
-script: ese conjunto de datos abierto resulto estar desactualizado).
-
-AVISO DE FIABILIDAD -- EL MAS IMPORTANTE DE LOS TRES SCRAPERS
-------------------------------------------------------------------
-No ha sido posible ejecutar este script contra la pagina REAL del BID
-durante su desarrollo: el entorno usado para construirlo no tiene
-salida de red hacia iadb.org (mismo motivo por el que ya se descarto
-antes reconstruir a mano la llamada interna de Power BI). Lo que SI se
-ha podido hacer es validar la logica de extraccion -- el bucle de
-scroll con acumulacion de filas, el emparejamiento de columnas por
-cabecera -- con Playwright REAL contra una pagina de prueba construida
-a mano que imita la estructura de accesibilidad (roles ARIA) que Power
-BI usa habitualmente en sus tablas: contenedor con role="grid" o
-role="table", filas con role="row", celdas de cabecera con
-role="columnheader" y celdas de datos con role="gridcell"/role="cell".
-Esto es un patron DOCUMENTADO y consistente en como Power BI renderiza
-sus visuales de tabla/matriz para cumplir accesibilidad -- pero no hay
-ninguna garantia de que el informe concreto del BID use exactamente esa
-estructura (podria variar segun la version de Power BI, el tipo de
-visual elegido, etc.).
-
-**Este script necesita, imprescindiblemente, una prueba manual
-(workflow_dispatch) con acceso real a internet antes de fiarse del cron
-automatico.** Para hacer esa primera prueba lo mas util posible, el
-script:
-  - Imprime en el log cuantos iframes encuentra y sus URLs, cual elige
-    como "el informe de Power BI" y por que.
-  - Imprime cuantas filas via reconoce en cada vuelta de scroll.
-  - Si al final no ha reconocido ninguna cabecera de columna o ninguna
-    fila, guarda una captura de pantalla en
-    `debug_bid_powerbi.png` (en el directorio de trabajo) y vuelca el
-    texto plano completo del frame que penso que era el informe -- para
-    poder ver exactamente que fue lo que encontro y ajustar los
-    selectores con datos reales, en vez de mas conjeturas.
-
-Si tras la primera ejecucion real los roles ARIA no coinciden, lo mas
-probable es que compartas ese log/captura y se ajusten los selectores
-de EXTRAER_FILA_SELECTORES / CANDIDATOS_COLUMNA a lo que de verdad haya.
-
-SIN URL POR AVISO
------------------------
-Las tablas de Power BI casi nunca traen celdas con enlaces reales
-(salvo que el autor del informe haya configurado explicitamente una
-columna de tipo "URL web"). Este script comprueba si hay un <a> dentro
-de cada fila por si acaso, pero si no lo hay (lo mas probable), usa como
-`url_oficial` la propia pagina de avisos -- igual que se hacia con el
-conjunto de datos de CKAN quee se ha descartado.
-
-Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
-Ejecucion local:      python ingesta_bid.py
-Ejecucion programada: ver .github/workflows/sincronizar_bid.yml
-   (necesita el paso extra "playwright install --with-deps chromium")
+(BID/IADB) leyendo directamente el informe de Power BI incrustado.
 """
 import re
 import time
@@ -84,14 +25,11 @@ LOTE_ENVIO_SUPABASE = 15
 CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "tipo_aviso")
 
 TIEMPO_ESPERA_CARGA_MS = 45000
-MAX_INTENTOS_SCROLL = 30
+MAX_INTENTOS_SCROLL = 3  # Reducido para traer solo lo reciente de arriba
 PAUSA_ENTRE_SCROLLS_SEGUNDOS = 0.7
-INTENTOS_SIN_NOVEDAD_PARA_PARAR = 3
+INTENTOS_SIN_NOVEDAD_PARA_PARAR = 2
 CAPTURA_DEPURACION = "debug_bid_powerbi.png"
 
-# Selectores de fila/celda, en orden de preferencia -- ver aviso de
-# fiabilidad: son el patron ARIA mas habitual en tablas/matrices de
-# Power BI, no una certeza para este informe en concreto.
 SELECTOR_FILA = '[role="row"]'
 SELECTOR_CABECERA = '[role="columnheader"]'
 SELECTOR_CELDA = '[role="gridcell"], [role="cell"]'
@@ -111,7 +49,6 @@ def _generar_slug(texto: str) -> str:
 
 
 def _parsear_fecha_flexible(texto: str):
-    """Defensivo a proposito: no se sabe de antemano en que formato Power BI renderiza la fecha como texto."""
     if not texto:
         return None
     texto = texto.strip()
@@ -129,34 +66,22 @@ def _parsear_fecha_flexible(texto: str):
     return None
 
 
-# ------------------------------------------------------------------
-# Localizar el frame del informe de Power BI
-# ------------------------------------------------------------------
 def obtener_frame_powerbi(page):
     print(f"Frames presentes en la pagina: {len(page.frames)}", flush=True)
     candidato_generico = None
     for frame in page.frames:
         if frame == page.main_frame:
-            continue  # el propio documento principal nunca es el informe incrustado
+            continue
         url_frame = (frame.url or "").lower()
         print(f"  - {frame.url}", flush=True)
         if "powerbi" in url_frame:
             return frame
         if candidato_generico is None:
-            candidato_generico = frame  # por si el iframe no tiene "powerbi" en la URL
-
-    if candidato_generico:
-        print(
-            "Aviso: ningun frame contenia 'powerbi' en su URL; se usa como candidato el primer "
-            f"iframe distinto de la pagina principal ({candidato_generico.url}). Revisa el log de "
-            "frames de arriba si esto no es correcto.",
-            flush=True,
-        )
+            candidato_generico = frame
     return candidato_generico
 
 
 def intentar_pestana_abiertas(page):
-    """Best-effort: si existe una pestaña/boton 'Abierto para licitación ahora', hacer clic en ella."""
     try:
         boton = page.get_by_text("Abierto para licitación ahora", exact=False).first
         if boton.count() > 0:
@@ -167,19 +92,7 @@ def intentar_pestana_abiertas(page):
         print(f"Aviso: no se pudo hacer clic en la pestaña de avisos abiertos ({error}); se continua igualmente.", flush=True)
 
 
-# ------------------------------------------------------------------
-# Captura de filas con scroll virtualizado
-# ------------------------------------------------------------------
 def extraer_filas_powerbi(frame) -> tuple:
-    """
-    Power BI virtualiza las filas de sus tablas: solo mantiene en el DOM
-    las que estan visibles en cada momento. Se hace scroll DENTRO del
-    propio visual (no de la pagina) repetidamente, acumulando el texto
-    de las filas vistas hasta ahora (deduplicadas por contenido), hasta
-    que varias vueltas seguidas no aporten ninguna fila nueva.
-    Devuelve (cabeceras, lista_de_filas); cabeceras puede ser None si no
-    se reconocio ninguna fila con role="columnheader".
-    """
     filas_vistas = {}
     cabeceras = None
     sin_novedad_seguidas = 0
@@ -254,9 +167,6 @@ def emparejar_columnas(cabeceras: list) -> dict:
     return mapeo
 
 
-# ------------------------------------------------------------------
-# Orquestacion de Playwright
-# ------------------------------------------------------------------
 def extraer_licitaciones_playwright() -> list:
     candidatos = []
 
@@ -279,7 +189,7 @@ def extraer_licitaciones_playwright() -> list:
 
             frame = obtener_frame_powerbi(pagina)
             if frame is None:
-                print("No se ha encontrado ningun iframe distinto de la pagina principal. Abortando.", flush=True)
+                print("No se ha encontrado ningun iframe. Abortando.", flush=True)
                 pagina.screenshot(path=CAPTURA_DEPURACION, full_page=True)
                 return []
 
@@ -289,17 +199,12 @@ def extraer_licitaciones_playwright() -> list:
             except Exception as error:
                 print(f"No aparecio ninguna fila reconocible a tiempo: {error}", flush=True)
                 pagina.screenshot(path=CAPTURA_DEPURACION, full_page=True)
-                print(
-                    f"Captura de depuracion guardada en {CAPTURA_DEPURACION}. Texto plano del frame "
-                    f"(primeros 2000 caracteres): {frame.locator('body').inner_text()[:2000]!r}",
-                    flush=True,
-                )
                 return []
 
             cabeceras, filas = extraer_filas_powerbi(frame)
 
             if not filas:
-                print("No se ha reconocido ninguna fila de datos. Guardando diagnostico.", flush=True)
+                print("No se ha reconocido ninguna fila de datos.", flush=True)
                 pagina.screenshot(path=CAPTURA_DEPURACION, full_page=True)
                 return []
 
@@ -307,15 +212,6 @@ def extraer_licitaciones_playwright() -> list:
             print(f"Emparejamiento de columnas: {mapeo}", flush=True)
 
             indice_titulo = mapeo.get("titulo")
-            if indice_titulo is None:
-                # Sin cabecera de titulo reconocida: se usa la celda con el
-                # texto mas largo de cada fila como mejor conjetura, en vez
-                # de descartar todas las filas por no encajar el mapeo.
-                print(
-                    "Aviso: no se ha reconocido una columna de titulo por cabecera; se usara la celda "
-                    "con mas texto de cada fila como mejor conjetura.",
-                    flush=True,
-                )
 
             for fila in filas:
                 if indice_titulo is not None and indice_titulo < len(fila):
@@ -362,9 +258,6 @@ def extraer_licitaciones_playwright() -> list:
     return list(unicos)
 
 
-# ------------------------------------------------------------------
-# Ventana de dias + subida a Supabase
-# ------------------------------------------------------------------
 def preparar_lote_para_subir(candidatos: list, registros_existentes: dict) -> list:
     a_subir = []
     for datos in candidatos:
@@ -411,31 +304,19 @@ def ejecutar_sincronizacion():
     print("=" * 100, flush=True)
     print("SINCRONIZACION DE LICITACIONES INTERNACIONALES - BID (Power BI via Playwright)", flush=True)
     print("=" * 100, flush=True)
-    print(f"Ventana de publicacion (best-effort, ver docstring): {desde} .. {hoy}", flush=True)
+    print(f"Ventana de publicacion: {desde} .. {hoy}", flush=True)
 
     candidatos = extraer_licitaciones_playwright()
     print(f"\nTotal avisos candidatos extraidos: {len(candidatos)}", flush=True)
 
     if not candidatos:
-        print(
-            "No se ha extraido ningun aviso. Revisa el log de arriba y, si existe, "
-            f"{CAPTURA_DEPURACION} -- lo mas probable es que los selectores de este script no "
-            "coincidan con la estructura real del informe (ver aviso de fiabilidad en el docstring).",
-            flush=True,
-        )
+        print("No se ha extraido ningun aviso.", flush=True)
         return
 
-    con_fecha = [c for c in candidatos if c.get("fecha_publicacion")]
-    sin_fecha = len(candidatos) - len(con_fecha)
     en_ventana = [
         c for c in candidatos
         if not c.get("fecha_publicacion") or date.fromisoformat(c["fecha_publicacion"]) >= desde
     ]
-    print(
-        f"Con fecha de publicacion reconocida: {len(con_fecha)}  ·  sin fecha reconocida "
-        f"(se incluyen igualmente, ver mas abajo): {sin_fecha}",
-        flush=True,
-    )
     print(f"Dentro de la ventana de {DIAS_ATRAS} dias (o sin fecha reconocida): {len(en_ventana)}", flush=True)
 
     if not en_ventana:
@@ -444,15 +325,22 @@ def ejecutar_sincronizacion():
 
     supabase = obtener_cliente_supabase()
 
-    print("\nComparando con lo ya existente en Supabase...", flush=True)
+    print("\nComparando con lo ya existente en Supabase (en lotes)...", flush=True)
     claves_a_buscar = [f"BID-{_generar_slug(c['titulo'])}"[:150] for c in en_ventana]
-    registros_existentes = obtener_registros_existentes(
-        supabase,
-        tabla="licitaciones_internacionales",
-        columna_clave="codigo_unico",
-        columnas=("id", "codigo_unico") + CAMPOS_COMPARABLES,
-        claves=claves_a_buscar,
-    )
+    
+    # Consulta troceada en bloques de 50 para evitar errores 400 de PostgREST
+    registros_existentes = {}
+    for i in range(0, len(claves_a_buscar), 50):
+        bloque = claves_a_buscar[i:i+50]
+        parcial = obtener_registros_existentes(
+            supabase,
+            tabla="licitaciones_internacionales",
+            columna_clave="codigo_unico",
+            columnas=("id", "codigo_unico") + CAMPOS_COMPARABLES,
+            claves=bloque,
+        )
+        if parcial:
+            registros_existentes.update(parcial)
 
     lote_final = preparar_lote_para_subir(en_ventana, registros_existentes)
 
