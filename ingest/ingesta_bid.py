@@ -36,63 +36,68 @@ def _generar_slug(texto: str) -> str:
 def extraer_licitaciones_playwright() -> list:
     """
     Utiliza Playwright en modo headless para navegar a la web del BID,
-    esperar al informe de Power BI y extraer las filas de licitaciones del DOM.
+    hacer scroll para activar el contenido y extraer las filas del informe de Power BI.
     """
     print("Iniciando navegador Playwright para extraer datos de Power BI...", flush=True)
     candidatos = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1920, "height": 1080})
+        # Usar un User-Agent realista para evitar bloqueos por bot
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080}
+        )
+        page = context.new_page()
         
         try:
-            page.goto(URL_OFICIAL_BID, timeout=60000)
+            print(f"Navegando a {URL_OFICIAL_BID}...", flush=True)
+            page.goto(URL_OFICIAL_BID, timeout=60000, wait_until="networkidle")
             
-            # Esperar a que el iframe o contenedor principal del informe cargue
-            print("Esperando a que cargue el informe de Power BI...", flush=True)
-            page.wait_for_selector("iframe", timeout=45000)
-            
-            # Dar un margen adicional para que las consultas internas de Power BI pinten la tabla
-            time.sleep(10)
+            # Hacer scroll hacia abajo para forzar la carga de elementos multimedia y iframes
+            print("Realizando scroll para activar componentes visuales...", flush=True)
+            for _ in range(3):
+                page.mouse.wheel(0, 800)
+                time.sleep(2)
 
-            # Localizar el iframe de Power BI si está incrustado mediante iframe
+            # Esperar a que cualquier iframe esté presente en el DOM (sin exigir visibilidad estricta)
+            print("Buscando iframes en el DOM...", flush=True)
+            page.wait_for_selector("iframe", state="attached", timeout=30000)
+            
+            # Dar un margen adicional para que Power BI pinte los datos dentro del marco
+            print("Esperando a que el informe de Power BI procese los datos...", flush=True)
+            time.sleep(15)
+
+            # Recorrer los iframes y el contexto principal para extraer textos y enlaces
             frames = page.frames
-            target_frame = page
+            print(frames)
+            print(f"Frames detectados: {len(frames)}", flush=True)
+            
             for frame in frames:
-                if "powerbi" in frame.url or "report" in frame.url:
-                    target_frame = frame
-                    break
+                try:
+                    # Extraer todos los enlaces visibles en el frame actual
+                    enlaces = frame.locator("a").evaluate_all(
+                        "nodes => nodes.map(n => ({text: n.innerText, href: n.href}))"
+                    )
+                    for item in enlaces:
+                        titulo = item.get("text", "").strip()
+                        url = item.get("href", "").strip()
+                        # Filtrar títulos válidos que parezcan licitaciones o avisos
+                        if len(titulo) > 15:
+                            candidatos.append({
+                                "titulo": titulo,
+                                "descripcion": "Extraido desde informe Power BI del BID",
+                                "pais": "No especificado",
+                                "organismo": "Banco Interamericano de Desarrollo",
+                                "tipo_aviso": "GENERAL",
+                                "url_oficial": url if url.startswith("http") else URL_OFICIAL_BID,
+                                "fecha_publicacion": date.today().isoformat()
+                            })
+                except Exception as frame_err:
+                    # Algunos frames externos de analítica o publicidad pueden denegar acceso, se omiten de forma segura
+                    continue
 
-            # Extraer filas o celdas de la tabla renderizada dentro del informe
-            # Nota: Los selectores de celdas de Power BI suelen basarse en celdas de cuadrícula (grid cells o text cells)
-            print("Extrayendo elementos de la tabla visual...", flush=True)
-            
-            # Intentar capturar elementos de texto del grid de Power BI
-            elementos_texto = target_frame.locator(".cellText, .pivotTableCellWrap, text").all_inner_texts()
-            
-            # Procesamiento defensivo: agrupar los textos extraídos en bloques lógicos si el DOM lo permite,
-            # o extraer enlaces y títulos si se detectan anclajes directos.
-            enlaces = target_frame.locator("a").evaluate_all(
-                "nodes => nodes.map(n => ({text: n.innerText, href: n.href}))"
-            )
-
-            print(f"Textos crudos extraídos del DOM: {len(elementos_texto)} elementos.", flush=True)
-            print(f"Enlaces extraídos del DOM: {len(enlaces)} enlaces.", flush=True)
-
-            # Construir estructura unificada con los enlaces y textos encontrados
-            for item in enlaces:
-                titulo = item.get("text", "").strip()
-                url = item.get("href", "").strip()
-                if len(titulo) > 15:  # Filtro básico para descartar menús cortos o basura de UI
-                    candidatos.append({
-                        "titulo": titulo,
-                        "descripcion": "Extraido desde informe Power BI del BID",
-                        "pais": "No especificado",
-                        "organismo": "Banco Interamericano de Desarrollo",
-                        "tipo_aviso": "GENERAL",
-                        "url_oficial": url if url.startswith("http") else URL_OFICIAL_BID,
-                        "fecha_publicacion": date.today().isoformat()
-                    })
+            print(f"Enlaces útiles encontrados en los frames: {len(candidatos)}", flush=True)
 
         except Exception as error:
             print(f"Error durante la ejecucion de Playwright: {error}", flush=True)
@@ -102,7 +107,6 @@ def extraer_licitaciones_playwright() -> list:
     # Eliminar duplicados por título
     unicos = {c["titulo"]: c for c in candidatos}.values()
     return list(unicos)
-
 
 def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> list:
     a_subir = []
