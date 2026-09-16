@@ -164,6 +164,20 @@ ALIAS_EMPRESAS = {
     "axionet": "AXIONET",
     "2raestudio ingenieria y arquitectura": "2RA STUDIO",
     "2ra studio": "2RA STUDIO",
+    "COCOSOLUTIONS": "COCO SOLUTIONS",
+    "COCO SOLUTIONS" : "COCOSOLUTIONS",
+    "EVM": "GRUPO EVM",
+    "GRUPO EVM":  "EVM",
+    "2RAestudio Ingeniería y Arquitectura" : "2RA STUDIO",
+    "2RA STUDIO" : "2RAestudio Ingeniería y Arquitectura",
+    "GRUPO ACOSTA (ACOSTA ING Y WET INGENIERÍA)": "ACOSTA",
+    "ACOSTA" : "GRUPO ACOSTA (ACOSTA ING Y WET INGENIERÍA)",
+    "SMARTLINKING": "SMART LINKING",
+    "SMART LINKING" : "SMARTLINKING",
+    "AXIONET": "AXIONNET",
+    "AXIONNET" : "AXIONET",
+    "CTSI (Canarias Tecnológica y Sistemas de Información)": "CANARIAS TECNOLÓGICA Y SI",
+    "CANARIAS TECNOLÓGICA Y SI": "CTSI (Canarias Tecnológica y Sistemas de Información)"
 }
 
 
