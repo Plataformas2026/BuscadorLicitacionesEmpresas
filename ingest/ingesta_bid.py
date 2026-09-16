@@ -269,6 +269,9 @@ def ejecutar_sincronizacion():
         time.sleep(PAUSA_ENTRE_PAGINAS_SEGUNDOS)
 
     print(f"\nTotal registros descargados: {len(candidatos)}", flush=True)
+    # Diagnóstico rápido de fechas
+    fechas_muestra = [r.get(columna_fecha_orden) for r in candidatos[:5]]
+    print(f"Las 5 fechas más recientes en la API del BID son: {fechas_muestra}")
 
     if not candidatos:
         return
