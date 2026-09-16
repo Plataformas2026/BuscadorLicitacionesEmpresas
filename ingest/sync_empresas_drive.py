@@ -147,6 +147,27 @@ CAMPOS_COMPARABLES_EMPRESAS = (
 
 
 # ------------------------------------------------------------------
+# Mapeo explícito de alias / variantes conocidas que difieren mucho
+# ------------------------------------------------------------------
+ALIAS_EMPRESAS = {
+    "canarias tecnologica y si": "CTSI",
+    "ctsi": "CTSI",
+    "cocosolutions": "COCO SOLUTIONS",
+    "coco solutions": "COCO SOLUTIONS",
+    "grupo evm": "EVM",
+    "evm": "EVM",
+    "acosta ing y wet ingenieria": "GRUPO ACOSTA",
+    "acosta": "GRUPO ACOSTA",
+    "smart linking": "SMARTLINKING",
+    "smartlinking": "SMARTLINKING",
+    "axionnet": "AXIONET",
+    "axionet": "AXIONET",
+    "2raestudio ingenieria y arquitectura": "2RA STUDIO",
+    "2ra studio": "2RA STUDIO",
+}
+
+
+# ------------------------------------------------------------------
 # Google Drive
 # ------------------------------------------------------------------
 def obtener_servicio_drive():
@@ -201,6 +222,17 @@ def guardar_ultima_modificacion(supabase, valor: str):
 def _normalizar_cabecera(texto) -> str:
     texto = str(texto).strip().lower()
     return "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
+
+
+def _normalizar_nombre_empresa(texto: str) -> str:
+    """Normaliza un nombre de empresa eliminando tildes, mayúsculas, espacios extra y símbolos comunes."""
+    if not texto:
+        return ""
+    t = str(texto).strip().lower()
+    t = "".join(c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn")
+    t = re.sub(r'[^a-z0-9\s]', '', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
 
 
 def _es_nulo(valor) -> bool:
@@ -325,22 +357,30 @@ def _normalizar_resultado(texto: str) -> str:
     return "desconocido"
 
 
-def _buscar_empresa_por_prefijo(nombre_normalizado: str, indice_nombres: dict) -> str:
-    """Busca de forma inteligente si alguna empresa del índice empieza por el mismo prefijo o palabra clave."""
-    if not nombre_normalizado:
+def _buscar_empresa_por_prefijo_o_alias(nombre_original: str, indice_nombres: dict) -> str:
+    """Busca mediante alias explícitos, coincidencia exacta normalizada y prefijos inteligentes."""
+    if not nombre_original:
         return None
-    
-    # 1. Coincidencia exacta inicial
-    if nombre_normalizado in indice_nombres:
-        return indice_nombres[nombre_normalizado]
 
-    # 2. Coincidencia por prefijo o palabra principal (ej: ROMPEI ENERGY -> ROMPEI)
-    palabras = nombre_normalizado.split()
+    nombre_norm = _normalizar_nombre_empresa(nombre_original)
+
+    # 1. Comprobar si existe un alias explícito predefinido en ALIAS_EMPRESAS
+    if nombre_norm in ALIAS_EMPRESAS:
+        nombre_objetivo = _normalizar_nombre_empresa(ALIAS_EMPRESAS[nombre_norm])
+        if nombre_objetivo in indice_nombres:
+            return indice_nombres[nombre_objetivo]
+
+    # 2. Coincidencia exacta normalizada
+    if nombre_norm in indice_nombres:
+        return indice_nombres[nombre_norm]
+
+    # 3. Coincidencia por prefijo o palabra principal (ej: ROMPEI ENERGY -> ROMPEI)
+    palabras = nombre_norm.split()
     if not palabras:
         return None
     
     primera_palabra = palabras[0]
-    if len(primera_palabra) < 3: # Evita prefijos demasiado cortos como "la", "el", "de"
+    if len(primera_palabra) < 3:  # Evita prefijos demasiado cortos como "la", "el", "de"
         if len(palabras) > 1:
             primera_palabra = f"{palabras[0]} {palabras[1]}"
         else:
@@ -382,9 +422,8 @@ def leer_referencias(buffer_excel: io.BytesIO, indice_nombres_empresa: dict) -> 
         referencia["resultado_normalizado"] = _normalizar_resultado(referencia.get("resultado"))
         referencia["datos_excel"] = _fila_a_json(fila)
 
-        # Búsqueda inteligente mejorada
-        nombre_norm = _normalizar_cabecera(nombre_excel)
-        id_empresa = _buscar_empresa_por_prefijo(nombre_norm, indice_nombres_empresa)
+        # Búsqueda inteligente usando el nuevo sistema de alias y normalización
+        id_empresa = _buscar_empresa_por_prefijo_o_alias(nombre_excel, indice_nombres_empresa)
         
         referencia["id_empresa"] = id_empresa
         if not id_empresa:
@@ -491,7 +530,7 @@ def ejecutar_sincronizacion():
 
     # ---------------- Referencias ----------------
     indice_nombres = {
-        _normalizar_cabecera(e["nombre_empresa"]): e["id_empresa"]
+        _normalizar_nombre_empresa(e["nombre_empresa"]): e["id_empresa"]
         for e in empresas if e.get("nombre_empresa")
     }
     referencias = leer_referencias(buffer_excel, indice_nombres)
