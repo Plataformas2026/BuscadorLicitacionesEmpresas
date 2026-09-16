@@ -64,7 +64,7 @@ Otros dos hallazgos documentados por terceros que ya consumen esta
 misma API (ver enlace de mcp-idb arriba), aplicados aqui de forma
 defensiva:
   - La columna "type" (tipo de aviso) trae espacios en blanco finales
-    inconsistentes ("AWARD", "AWARD ", "AWARD   " son 3 valores
+    inconsistentes ("AWARD", "AWARD ", "AWARD    " son 3 valores
     distintos en el dato en crudo) -- por eso TODOS los valores de
     texto se limpian con strip() antes de guardarlos.
   - Las URLs de descarga directa (/files/download/<id>) estan detras de
@@ -72,7 +72,7 @@ defensiva:
     por la API de Datastore.
 
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
-Ejecucion local:      python ingesta_bid.py
+Ejecucion local:     python ingesta_bid.py
 Ejecucion programada: ver .github/workflows/sincronizar_bid.yml
 """
 import re
@@ -221,7 +221,7 @@ def construir_registro(registro: dict, mapeo: dict) -> dict:
     referencia = _valor_texto(registro, mapeo.get("referencia"))
     codigo_unico = f"BID-{_generar_slug(referencia or titulo)}"
 
-    tipo_aviso = _valor_texto(registro, mapeo.get("tipo"))  # strip() ya aplicado en _valor_texto (ver docstring: espacios finales inconsistentes)
+    tipo_aviso = _valor_texto(registro, mapeo.get("tipo"))  # strip() ya aplicado en _valor_texto
 
     fecha_publicacion = _parsear_fecha(registro.get(mapeo.get("fecha_publicacion"))) if mapeo.get("fecha_publicacion") else None
     fecha_limite = _parsear_fecha(registro.get(mapeo.get("fecha_limite"))) if mapeo.get("fecha_limite") else None
@@ -322,6 +322,7 @@ def ejecutar_sincronizacion():
             "por fecha; conviene revisar el emparejamiento antes de confiar en el cron automatico.",
             flush=True,
         )
+
     # ---------------- Paginacion segura sin usar 'sort' en la API ----------------
     candidatos = []
     offset = 0
@@ -369,15 +370,7 @@ def ejecutar_sincronizacion():
                 candidatos_en_ventana.append(registro)
         candidatos = candidatos_en_ventana
 
-    print(f"Avisos candidatos en la ventana ({desde} a {hoy}): {len(candidatos)}", flush=True)
-
-    if not candidatos:
-        return
-
-        if not columna_fecha_orden:
-            break  # sin columna de fecha no se puede acotar la ventana: una sola pagina y fin
-
-    print(f"\nAvisos candidatos en la ventana: {len(candidatos)}", flush=True)
+    print(f"\nAvisos candidatos en la ventana ({desde} a {hoy}): {len(candidatos)}", flush=True)
 
     if not candidatos:
         return
