@@ -5,12 +5,11 @@ ingesta_bid.py
 Sincroniza avisos y planes de adquisiciones del Banco Interamericano de Desarrollo
 (BID/IADB) contra la tabla `licitaciones_internacionales` de Supabase.
 
-AUTO-DETECCION DE RECURSO:
-El script visita la pagina oficial del dataset en el portal del BID,
-lee el HTML y extrae dinámicamente el `resource_id` actual de la API de Datastore
-por si los administradores lo actualizan o recrean en el futuro.
+AUTO-DETECCION DE RECURSO DE ADQUISICIONES:
+Visita la pagina oficial del dataset de contrataciones y adquisiciones del BID,
+lee el HTML y extrae dinamicamente el `resource_id` actual de la API de Datastore.
 
-URL del Dataset: https://data.iadb.org/dataset/ati-documents
+URL del Dataset: https://data.iadb.org/dataset/project-procurement-bidding-notices-and-notification-of-contract-awards
 """
 import re
 import time
@@ -26,7 +25,8 @@ from common import (
 )
 
 BASE_URL_CKAN = "https://data.iadb.org"
-URL_DATASET_WEB = BASE_URL_CKAN + "/dataset/ati-documents"
+# URL corregida apuntando específicamente al dataset de Licitaciones y Adquisiciones
+URL_DATASET_WEB = BASE_URL_CKAN + "/dataset/project-procurement-bidding-notices-and-notification-of-contract-awards"
 ENDPOINT_DATASTORE_SEARCH = BASE_URL_CKAN + "/api/3/action/datastore_search"
 
 URL_FICHA_GENERICA = "https://www.iadb.org/es/como-trabajar-juntos/adquisiciones/adquisiciones-para-proyectos/avisos-de-adquisiciones"
@@ -43,33 +43,35 @@ CABECERAS = {"User-Agent": "Mozilla/5.0 (compatible; LicitacionesEmpresasBot/1.0
 
 CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "tipo_aviso")
 
+# Candidatos actualizados para las columnas del dataset de adquisiciones
 CANDIDATOS_POR_CONCEPTO = {
-    "referencia": ["project_number", "id"],
-    "titulo": ["document_name", "title"],
-    "descripcion": ["document_activity", "activity"],
+    "referencia": ["procurement_number", "notice_number", "project_number", "id"],
+    "titulo": ["notice_title", "title", "document_name"],
+    "descripcion": ["notice_description", "description", "document_activity"],
     "pais": ["country", "pais"],
-    "fecha_publicacion": ["disclosure_date", "created_date"],
-    "fecha_limite": [],
-    "url": ["document_url", "url"],
-    "tipo": ["document_activity", "policy"],
-    "organismo": ["project_number"],
+    "fecha_publicacion": ["publication_date", "disclosure_date", "created_date"],
+    "fecha_limite": ["submission_deadline", "deadline", "closing_date"],
+    "url": ["notice_url", "url", "document_url"],
+    "tipo": ["notice_type", "type", "document_activity"],
+    "organismo": ["executing_agency", "borrower", "project_number"],
 }
 
 MAPEO_CONCEPTOS_FORZADO = {
-    "referencia": "project_number",
-    "titulo": "document_name",
-    "descripcion": "document_activity",
+    "referencia": "notice_number",
+    "titulo": "notice_title",
+    "descripcion": "notice_description",
     "pais": "country",
-    "fecha_publicacion": "disclosure_date",
-    "url": "document_url",
-    "tipo": "document_activity",
-    "organismo": "project_number",
+    "fecha_publicacion": "publication_date",
+    "fecha_limite": "submission_deadline",
+    "url": "notice_url",
+    "tipo": "notice_type",
+    "organismo": "executing_agency",
 }
 
 
 def obtener_resource_id_dinamico() -> str:
     """
-    Visita la pagina HTML del dataset y extrae dinamicamente el resource_id
+    Visita la pagina HTML del dataset de adquisiciones y extrae dinamicamente el resource_id
     actualizado desde el enlace de la API de datastore_search.
     """
     print(f"Obteniendo resource_id dinamicamente desde: {URL_DATASET_WEB} ...", flush=True)
@@ -77,17 +79,16 @@ def obtener_resource_id_dinamico() -> str:
     respuesta.raise_for_status()
     html = respuesta.text
 
-    # Buscar patrones como: datastore_search?resource_id=5d3c0ea2-d1f5-4006-94bf-f55e18c5b20d
+    # Buscar patrones como: datastore_search?resource_id=...
     coincidencia = re.search(r"datastore_search\?resource_id=([a-f0-9\-]{36})", html)
     if not coincidencia:
-        # Fallback alternativo buscando en formato JSON embebido o atributos data
         coincidencia = re.search(r"resource_id['\"]?\s*[:=]\s*['\"]([a-f0-9\-]{36})['\"]", html)
         
     if not coincidencia:
-        raise RuntimeError("No se pudo extraer automaticamente el resource_id de la pagina del dataset.")
+        raise RuntimeError("No se pudo extraer automaticamente el resource_id de la pagina del dataset de adquisiciones.")
 
     resource_id = coincidencia.group(1)
-    print(f"-> Resource ID detectado con exito: {resource_id}", flush=True)
+    print(f"-> Resource ID de Adquisiciones detectado con exito: {resource_id}", flush=True)
     return resource_id
 
 
@@ -112,7 +113,15 @@ def emparejar_columnas(columnas_reales: list) -> dict:
             if any(candidato in columna_norm for candidato in candidatos):
                 emparejado[concepto] = columna_real
                 break
-    emparejado.update(MAPEO_CONCEPTOS_FORZADO)
+    
+    # Mapeo inteligente o flexible de respaldo basado en lo que realmente venga en las columnas reales
+    for concepto, col_forzada in MAPEO_CONCEPTOS_FORZADO.items():
+        if concepto not in emparejado or not emparejado[concepto]:
+            for columna_real, columna_norm in columnas_normalizadas:
+                if col_forzada in columna_norm:
+                    emparejado[concepto] = columna_real
+                    break
+                    
     return emparejado
 
 
@@ -170,6 +179,7 @@ def construir_registro(registro: dict, mapeo: dict) -> dict:
     tipo_aviso = _extraer_valor_plano(registro, mapeo.get("tipo"))
 
     fecha_publicacion = _parsear_fecha(registro.get(mapeo.get("fecha_publicacion"))) if mapeo.get("fecha_publicacion") else None
+    fecha_limite = _parsear_fecha(registro.get(mapeo.get("fecha_limite"))) if mapeo.get("fecha_limite") else None
 
     return {
         "codigo_unico": codigo_unico[:150],
@@ -183,7 +193,7 @@ def construir_registro(registro: dict, mapeo: dict) -> dict:
         "url_oficial": _extraer_valor_plano(registro, mapeo.get("url")) or URL_FICHA_GENERICA,
         "url_documento": _extraer_valor_plano(registro, mapeo.get("url")),
         "fecha_publicacion": fecha_publicacion.isoformat() if fecha_publicacion else None,
-        "fecha_limite": None,
+        "fecha_limite": fecha_limite.isoformat() if fecha_limite else None,
     }
 
 
@@ -225,12 +235,11 @@ def ejecutar_sincronizacion():
     desde = hoy - timedelta(days=DIAS_ATRAS)
 
     print("=" * 100, flush=True)
-    print("SINCRONIZACION DE LICITACIONES INTERNACIONALES - BID (IADB)", flush=True)
+    print("SINCRONIZACION DE LICITACIONES INTERNACIONALES - BID (ADQUISICIONES)", flush=True)
     print("=" * 100, flush=True)
     print(f"Ventana: {desde} .. {hoy}", flush=True)
 
     try:
-        # Obtener dinámicamente el resource_id actual en cada ejecución
         resource_id_actual = obtener_resource_id_dinamico()
     except Exception as error:
         print(f"Error obteniendo el resource_id de forma dinamica: {error}", flush=True)
@@ -243,23 +252,26 @@ def ejecutar_sincronizacion():
         print(f"Error consultando la API de datos abiertos del BID: {error}", flush=True)
         return
 
-    print(f"\nColumnas reales detectadas en el recurso ({len(columnas_reales)}): {columnas_reales}", flush=True)
+    print(f"\nColumnas reales detectadas en el recurso de adquisiciones ({len(columnas_reales)}): {columnas_reales}", flush=True)
 
     mapeo = emparejar_columnas(columnas_reales)
     print("\nEmparejamiento concepto -> columna real:", flush=True)
     for concepto in CANDIDATOS_POR_CONCEPTO:
         print(f"  {concepto:20} -> {mapeo.get(concepto) or 'NO ENCONTRADA'}", flush=True)
 
-    if "titulo" not in mapeo:
+    if "titulo" not in mapeo or not mapeo.get("titulo"):
         print("\nNo se ha podido identificar la columna de titulo. Abortando.", flush=True)
         return
 
     columna_fecha_orden = mapeo.get("fecha_publicacion")
+    if not columna_fecha_orden:
+        # Fallback si no encuentra columna explícita de fecha de publicación
+        columna_fecha_orden = next((col for col in columnas_reales if "date" in col.lower()), None)
 
     candidatos = []
     offset = 0
 
-    print(f"\nDescargando registros ordenados por '{columna_fecha_orden}' (descendente)...", flush=True)
+    print(f"\nDescargando registros ordenados por '{columna_fecha_orden or 'ninguna'}' (descendente)...", flush=True)
     while offset < MAX_REGISTROS_SEGURIDAD:
         try:
             resultado = _consultar_datastore(resource_id_actual, offset=offset, limit=TAMANO_PAGINA, sort_field=columna_fecha_orden)
@@ -284,12 +296,10 @@ def ejecutar_sincronizacion():
     if not candidatos:
         return
 
-    # Diagnóstico rápido de fechas
-    fechas_muestra = [r.get(columna_fecha_orden) for r in candidatos[:5]]
-    print(f"Las 5 fechas más recientes en la API del BID son: {fechas_muestra}", flush=True)
-
-    # Filtrar estrictamente por la ventana de días requerida
     if columna_fecha_orden:
+        fechas_muestra = [r.get(columna_fecha_orden) for r in candidatos[:5]]
+        print(f"Las 5 fechas más recientes en la API de adquisiciones son: {fechas_muestra}", flush=True)
+
         candidatos_en_ventana = []
         for registro in candidatos:
             fecha_referencia = _parsear_fecha(registro.get(columna_fecha_orden))
