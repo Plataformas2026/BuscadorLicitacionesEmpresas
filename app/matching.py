@@ -15,10 +15,19 @@ Flujo:
   3. Si la licitación NO está en nuestra tabla (el usuario la pega/escribe
      directamente), `obtener_coincidencias_texto_libre()` calcula el
      embedding al vuelo y usa `buscar_empresas_por_embedding`.
-  4. `explicar_coincidencia()` -- construye la explicación de cada
-     coincidencia a partir de datos concretos (similitud, país,
-     solapamiento de palabras clave): nada inventado ni una llamada a un
-     LLM externo, para mantener la app dentro de la arquitectura gratuita.
+  4. `obtener_referencias_por_empresas()` -- trae en UNA sola consulta
+     (nunca N+1) los títulos de licitaciones antiguas de todas las
+     empresas candidatas, desde `empresas_referencias`.
+  5. `explicar_coincidencia()` -- construye la explicación de cada
+     coincidencia a partir de datos concretos: similitud semántica,
+     proyectos tipo ya realizados, descripción de actividad, preferencias
+     de licitación declaradas, país/zona geográfica, palabras clave, y
+     licitaciones antiguas parecidas a las que ya se presentó la empresa.
+     Nada inventado ni una llamada a un LLM externo, para mantener la app
+     dentro de la arquitectura gratuita.
+  6. `construir_comparacion_lugares()` -- tabla visual comparando el
+     lugar de la licitación contra los 4 campos geográficos de la
+     empresa (los mismos que en el Directorio de Empresas).
 """
 import re
 
@@ -30,6 +39,14 @@ from supabase import Client
 from search import buscar_semantica
 
 PATRON_URL = re.compile(r"^https?://", re.IGNORECASE)
+
+# Palabras demasiado comunes en español/francés/inglés como para aportar
+# señal en el solapamiento de texto (ver _hay_solapamiento).
+PALABRAS_VACIAS = {
+    "de", "la", "el", "los", "las", "en", "y", "a", "del", "para", "con", "por",
+    "un", "una", "unos", "unas", "que", "se", "su", "sus", "al", "o", "the", "of",
+    "and", "for", "to", "in", "on", "an", "des", "du", "les", "le", "au", "aux",
+}
 
 
 def localizar_licitacion(supabase: Client, encoder: SentenceTransformer, entrada: str) -> list:
@@ -45,7 +62,7 @@ def localizar_licitacion(supabase: Client, encoder: SentenceTransformer, entrada
         return []
 
     columnas = (
-        "codigo_unico, titulo, pais, fuente_origen, url_oficial, "
+        "codigo_unico, titulo, descripcion, pais, fuente_origen, url_oficial, "
         "fecha_publicacion, fecha_limite"
     )
 
@@ -111,17 +128,66 @@ def obtener_coincidencias_texto_libre(
     return respuesta.data or []
 
 
+def obtener_referencias_por_empresas(supabase: Client, ids_empresa: list) -> dict:
+    """
+    Trae, en UNA sola consulta por lote (nunca una por empresa), los
+    títulos de licitaciones antiguas de todas las empresas candidatas --
+    la hoja "REFERENCIAS P BÚSQUEDAS" del Excel, ya cargada en
+    `empresas_referencias` (ver ingest/sync_empresas_drive.py). Se
+    agrupan por id_empresa para que explicar_coincidencia() solo tenga
+    que consultar un diccionario en memoria.
+    """
+    ids_empresa = [i for i in (ids_empresa or []) if i]
+    if not ids_empresa:
+        return {}
+
+    respuesta = (
+        supabase.table("empresas_referencias")
+        .select("id_empresa, titulo, resultado_normalizado")
+        .in_("id_empresa", ids_empresa)
+        .execute()
+    )
+
+    agrupado = {}
+    for fila in respuesta.data or []:
+        if fila.get("titulo"):
+            agrupado.setdefault(fila["id_empresa"], []).append(fila)
+    return agrupado
+
+
 def _normalizar(texto: str) -> str:
     return (texto or "").casefold()
 
 
-def explicar_coincidencia(texto_licitacion: str, pais_licitacion: str, empresa: dict) -> list:
+def _palabras_significativas(texto: str) -> set:
+    texto_norm = _normalizar(texto)
+    palabras = re.findall(r"[a-zàâäéèêëïîôöùûüçñ0-9]+", texto_norm)
+    return {p for p in palabras if len(p) > 3 and p not in PALABRAS_VACIAS}
+
+
+def _hay_solapamiento(texto_a: str, texto_b: str, minimo: int = 2) -> bool:
+    """Solapamiento de palabras significativas entre dos textos -- heurística de texto, nada de LLM."""
+    if not texto_a or not texto_b:
+        return False
+    return len(_palabras_significativas(texto_a) & _palabras_significativas(texto_b)) >= minimo
+
+
+def explicar_coincidencia(
+    texto_licitacion: str,
+    pais_licitacion: str,
+    empresa: dict,
+    referencias_empresa: list = None,
+) -> list:
     """
     Devuelve una lista de frases (bullets) explicando por qué esta
     empresa encaja con la licitación, basada en datos concretos:
       - nivel de similitud semántica
+      - proyectos tipo de la empresa que coinciden con el objeto de la licitación
+      - descripción de actividad de la empresa frente a la licitación
+      - preferencias de licitación declaradas por la empresa
       - coincidencia de país / zona geográfica
       - palabras clave de la empresa presentes en el texto de la licitación
+      - licitaciones antiguas parecidas a las que ya se ha presentado la empresa
       - sector/subsector, como contexto
     """
     motivos = []
@@ -139,6 +205,22 @@ def explicar_coincidencia(texto_licitacion: str, pais_licitacion: str, empresa: 
         else:
             nivel = "orientativa"
         motivos.append(f"Afinidad semántica {nivel} con el objeto de la licitación ({pct}%).")
+
+    proyectos_coincidentes = [
+        p for p in (empresa.get("proyectos_tipo") or [])
+        if p and _hay_solapamiento(p, texto_licitacion, minimo=1)
+    ]
+    if proyectos_coincidentes:
+        motivos.append(
+            "Coincide con proyectos tipo ya realizados por la empresa: "
+            + "; ".join(proyectos_coincidentes[:3]) + "."
+        )
+
+    if empresa.get("descripcion_actividad") and _hay_solapamiento(empresa["descripcion_actividad"], texto_licitacion, minimo=2):
+        motivos.append("La actividad habitual de la empresa coincide con el objeto de la licitación.")
+
+    if empresa.get("preferencias_licitaciones") and _hay_solapamiento(empresa["preferencias_licitaciones"], texto_licitacion, minimo=1):
+        motivos.append(f"Encaja con las preferencias de licitación declaradas por la empresa: {empresa['preferencias_licitaciones']}.")
 
     paises_empresa = set(_normalizar(p) for p in (empresa.get("experiencia_paises") or []))
     paises_interes_empresa = set(_normalizar(p) for p in (empresa.get("paises_interes") or []))
@@ -162,6 +244,20 @@ def explicar_coincidencia(texto_licitacion: str, pais_licitacion: str, empresa: 
     if palabras_coincidentes:
         motivos.append("Palabras clave de la empresa presentes en la licitación: " + ", ".join(palabras_coincidentes) + ".")
 
+    for referencia in (referencias_empresa or []):
+        titulo_referencia = referencia.get("titulo")
+        if titulo_referencia and _hay_solapamiento(titulo_referencia, texto_licitacion, minimo=2):
+            resultado = referencia.get("resultado_normalizado")
+            if resultado == "adjudicada":
+                sufijo = " (adjudicada)"
+            elif resultado == "no_adjudicada":
+                sufijo = " (no adjudicada)"
+            else:
+                sufijo = ""
+            titulo_recortado = titulo_referencia if len(titulo_referencia) <= 100 else titulo_referencia[:100] + "…"
+            motivos.append(f"Ya se presentó a una licitación similar: \"{titulo_recortado}\"{sufijo}.")
+            break  # una sola referencia antigua basta como señal; evita repetir el mismo motivo
+
     if empresa.get("sector"):
         detalle_sector = empresa["sector"]
         if empresa.get("subsector"):
@@ -172,6 +268,45 @@ def explicar_coincidencia(texto_licitacion: str, pais_licitacion: str, empresa: 
         motivos.append("Coincidencia detectada por similitud semántica general del perfil de la empresa.")
 
     return motivos
+
+
+def construir_comparacion_lugares(pais_licitacion: str, empresa: dict) -> pd.DataFrame:
+    """
+    Tabla visual: lugar de la licitación frente a los 4 campos
+    geográficos de la empresa ya definidos en el Directorio de Empresas
+    (Experiencia países, Zona geográfica de interés, Países de interés,
+    Ámbito geográfico) -- para ver de un vistazo si conviene por
+    ubicación, no solo por afinidad semántica.
+    """
+    pais_norm = _normalizar(pais_licitacion) if pais_licitacion else ""
+
+    def _fila(etiqueta, valor):
+        if isinstance(valor, list):
+            texto = ", ".join(v for v in valor if v)
+            valores_norm = [_normalizar(v) for v in valor if v]
+            coincide = bool(pais_norm) and any(
+                pais_norm == v or pais_norm in v or v in pais_norm for v in valores_norm
+            )
+        else:
+            texto = valor or ""
+            coincide = bool(pais_norm) and bool(texto) and pais_norm in _normalizar(texto)
+
+        if not texto:
+            estado = "Sin datos"
+        elif coincide:
+            estado = "Coincide"
+        else:
+            estado = "No coincide"
+
+        return {"Campo de la empresa": etiqueta, "Valor declarado": texto or "No especificado", "Respecto al lugar de la licitación": estado}
+
+    filas = [
+        _fila("Experiencia países", empresa.get("experiencia_paises") or []),
+        _fila("Zona geográfica de interés", empresa.get("zona_geografica_interes") or []),
+        _fila("Países de interés", empresa.get("paises_interes") or []),
+        _fila("Ámbito geográfico", empresa.get("ambito_geografico")),
+    ]
+    return pd.DataFrame(filas)
 
 
 def formatear_tabla_coincidencias(coincidencias: list) -> pd.DataFrame:
@@ -218,7 +353,7 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
         on_change=_resetear_seleccion,
     )
 
-    if st.button("🔎 Buscar licitación", key="tab2_buscar_licitacion", use_container_width=True):
+    if st.button("Buscar licitación", key="tab2_buscar_licitacion", use_container_width=True):
         with st.spinner("Buscando la licitación..."):
             st.session_state.tab2_candidatos = localizar_licitacion(supabase, encoder, entrada)
             st.session_state.tab2_licitacion_elegida = None
@@ -244,7 +379,7 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
         st.warning("No se ha encontrado ninguna licitación parecida en nuestra base de datos.")
 
     # --- Fallback: introducir la licitación directamente ---
-    with st.expander("✏️ ¿No está en la base de datos? Descríbela directamente"):
+    with st.expander("¿No está en la base de datos? Descríbela directamente"):
         titulo_manual = st.text_input("Título de la licitación", key="tab2_titulo_manual")
         descripcion_manual = st.text_area("Descripción / objeto del contrato", key="tab2_descripcion_manual", height=80)
         if st.button("Usar esta descripción", key="tab2_usar_manual"):
@@ -279,7 +414,19 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
                 st.warning("No se han encontrado empresas con un perfil afín a esta licitación.")
             else:
                 st.success(f"**{len(coincidencias)}** empresas encajan con esta licitación, de más a menos afín:")
-                texto_licitacion = licitacion.get("titulo", "") + " " + (licitacion.get("descripcion_manual", "") or "")
+                # Título + descripción de la licitación (ver docstring del módulo,
+                # sección 2): antes solo se usaba el título.
+                texto_licitacion = " ".join(filter(None, [
+                    licitacion.get("titulo"),
+                    licitacion.get("descripcion"),
+                    licitacion.get("descripcion_manual"),
+                ]))
+                pais_licitacion = licitacion.get("pais")
+
+                # Una sola consulta por lote para el historial de referencias de
+                # TODAS las empresas candidatas (nunca N+1).
+                ids_empresa = [e["id_empresa"] for e in coincidencias if e.get("id_empresa")]
+                referencias_por_empresa = obtener_referencias_por_empresas(supabase, ids_empresa)
 
                 for empresa in coincidencias:
                     with st.container(border=True):
@@ -289,6 +436,14 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
                         with col_score:
                             st.markdown(f"**{round(empresa['similarity'] * 100, 1)}%**")
 
-                        motivos = explicar_coincidencia(texto_licitacion, licitacion.get("pais"), empresa)
+                        referencias_empresa = referencias_por_empresa.get(empresa["id_empresa"], [])
+                        motivos = explicar_coincidencia(texto_licitacion, pais_licitacion, empresa, referencias_empresa)
                         for motivo in motivos:
                             st.markdown(f"- {motivo}")
+
+                        st.caption(f"Lugar de la licitación: {pais_licitacion or 'No especificado'}")
+                        st.dataframe(
+                            construir_comparacion_lugares(pais_licitacion, empresa),
+                            hide_index=True,
+                            use_container_width=True,
+                        )
