@@ -12,10 +12,10 @@ ha cambiado, no hace nada.
 
 DOS HOJAS DEL EXCEL, DOS TABLAS
 -----------------------------------
-- "DOSSIER COMPLETO"          -> tabla `empresas` (perfil de cada empresa)
-- "REFERENCIAS P BÚSQUEDAS"   -> tabla `empresas_referencias` (histórico
-                                  de licitaciones en las que ha
-                                  participado cada empresa)
+- "DOSSIER COMPLETO"         -> tabla `empresas` (perfil de cada empresa)
+- "REFERENCIAS P BÚSQUEDAS"    -> tabla `empresas_referencias` (histórico
+                                de licitaciones en las que ha
+                                participado cada empresa)
 
 El Excel real tiene más hojas ("REFERENCIAS", "REF AGUA", "REF TURISMO",
 "lista para chatgpt", "PALABRAS CLAVE PARA BÚSQUEDAS"...) que, tras
@@ -49,7 +49,7 @@ Variables de entorno requeridas:
     GOOGLE_SERVICE_ACCOUNT_JSON  -- contenido COMPLETO del JSON de la
                                     cuenta de servicio de Google (como
                                     secreto de GitHub Actions)
-    GOOGLE_DRIVE_FILE_ID          -- ID del fichero Excel en Drive
+    GOOGLE_DRIVE_FILE_ID         -- ID del fichero Excel en Drive
 
 La cuenta de servicio debe tener el fichero compartido con ella (basta
 con permiso de "Lector") -- ver README.md para el paso a paso.
@@ -286,9 +286,6 @@ def leer_empresas(buffer_excel: io.BytesIO) -> list:
 
         id_empresa = _valor_texto(fila, COLUMNA_ID_EMPRESA)
         if not id_empresa:
-            # 5 filas del Excel real no traen "ID" -- se genera uno estable a
-            # partir del número interno (que sí es siempre único) para poder
-            # seguir haciendo upsert sin crear duplicados en cada sync.
             id_empresa = f"SIN_ID_{numero_interno}"
             ids_generados += 1
 
@@ -323,17 +320,40 @@ def _normalizar_resultado(texto: str) -> str:
     t = _normalizar_cabecera(texto)
     if any(p in t for p in ("no adjudicad", "no seleccionad", "eliminad", "no pasa", "rechazad", "descartad")):
         return "no_adjudicada"
-    if "adjudicad" in t:  # también coge "CONSORCIO ADJUDICADO...", "CON GESPLAN. ADJUDICADA"...
+    if "adjudicad" in t:  
         return "adjudicada"
     return "desconocido"
 
 
+def _buscar_empresa_por_prefijo(nombre_normalizado: str, indice_nombres: dict) -> str:
+    """Busca de forma inteligente si alguna empresa del índice empieza por el mismo prefijo o palabra clave."""
+    if not nombre_normalizado:
+        return None
+    
+    # 1. Coincidencia exacta inicial
+    if nombre_normalizado in indice_nombres:
+        return indice_nombres[nombre_normalizado]
+
+    # 2. Coincidencia por prefijo o palabra principal (ej: ROMPEI ENERGY -> ROMPEI)
+    palabras = nombre_normalizado.split()
+    if not palabras:
+        return None
+    
+    primera_palabra = palabras[0]
+    if len(primera_palabra) < 3: # Evita prefijos demasiado cortos como "la", "el", "de"
+        if len(palabras) > 1:
+            primera_palabra = f"{palabras[0]} {palabras[1]}"
+        else:
+            return None
+
+    for nombre_idx, id_emp in indice_nombres.items():
+        if nombre_idx.startswith(primera_palabra) or primera_palabra.startswith(nombre_idx):
+            return id_emp
+
+    return None
+
+
 def leer_referencias(buffer_excel: io.BytesIO, indice_nombres_empresa: dict) -> list:
-    """
-    `indice_nombres_empresa`: {nombre_normalizado: id_empresa}, construido
-    a partir de lo que ya hay en Supabase, para resolver a qué empresa
-    corresponde cada fila de referencias (ver ejecutar_sincronizacion).
-    """
     df = _leer_hoja(buffer_excel, HOJA_REFERENCIAS, FILA_CABECERA_REFERENCIAS)
     if df.empty:
         return []
@@ -348,7 +368,7 @@ def leer_referencias(buffer_excel: io.BytesIO, indice_nombres_empresa: dict) -> 
     for _, fila in df.iterrows():
         nombre_excel = _valor_texto(fila, MAPEO_REFERENCIAS["nombre_empresa_excel"])
         if not nombre_excel:
-            continue  # una fila de referencias sin empresa asociada no es aprovechable
+            continue  
 
         referencia = {"nombre_empresa_excel": nombre_excel}
         for clave, columna in MAPEO_REFERENCIAS.items():
@@ -362,7 +382,10 @@ def leer_referencias(buffer_excel: io.BytesIO, indice_nombres_empresa: dict) -> 
         referencia["resultado_normalizado"] = _normalizar_resultado(referencia.get("resultado"))
         referencia["datos_excel"] = _fila_a_json(fila)
 
-        id_empresa = indice_nombres_empresa.get(_normalizar_cabecera(nombre_excel))
+        # Búsqueda inteligente mejorada
+        nombre_norm = _normalizar_cabecera(nombre_excel)
+        id_empresa = _buscar_empresa_por_prefijo(nombre_norm, indice_nombres_empresa)
+        
         referencia["id_empresa"] = id_empresa
         if not id_empresa:
             sin_match += 1
@@ -399,13 +422,6 @@ def construir_texto_por_idioma(empresa: dict, idioma: str) -> str:
 
 
 def calcular_textos_y_embeddings(empresa: dict) -> dict:
-    """
-    Genera texto_completo/embedding para español (siempre) y para
-    en/fr/pt SOLO cuando hay palabras clave propias en ese idioma -- si
-    no, se deja a NULL y la búsqueda cae automáticamente al embedding en
-    español (ver `buscar_empresas_directorio` en sql/schema.sql), en vez
-    de gastar cómputo generando un embedding idéntico al de español.
-    """
     resultado = {}
     for idioma in IDIOMAS_PALABRAS_CLAVE:
         columna_palabras = "palabras_clave" if idioma == "es" else f"palabras_clave_{idioma}"
@@ -465,9 +481,6 @@ def ejecutar_sincronizacion():
     subidas = subir_en_lotes(supabase, "empresas", "id_empresa", empresas, tamano_lote=TAMANO_LOTE_SUPABASE)
     print(f"Empresas sincronizadas: {subidas}/{len(empresas)}", flush=True)
 
-    # Poda: empresas que ya no están en el Excel se retiran de Supabase
-    # (el Excel es la fuente de verdad -- si alguien la quita de ahí,
-    # también debe desaparecer del directorio).
     ids_actuales = {e["id_empresa"] for e in empresas}
     respuesta_existentes = supabase.table("empresas").select("id, id_empresa").execute()
     ids_a_borrar = [f["id"] for f in respuesta_existentes.data if f["id_empresa"] not in ids_actuales]
@@ -485,10 +498,6 @@ def ejecutar_sincronizacion():
     print(f"Referencias leídas de '{HOJA_REFERENCIAS}': {len(referencias)}", flush=True)
 
     if referencias:
-        # `empresas_referencias` no tiene una clave natural para upsert
-        # (el Excel no numera cada fila), así que se recarga entera en
-        # cada sincronización: se borra todo y se vuelve a insertar. Es
-        # simple, predecible, y evita ir acumulando duplicados.
         print("Recargando 'empresas_referencias' (borrado + inserción completa)...", flush=True)
         supabase.table("empresas_referencias").delete().neq("id", 0).execute()
 
