@@ -2,14 +2,15 @@
 """
 ingesta_bid.py
 ----------------
-Sincroniza avisos de licitacion del Banco Interamericano de Desarrollo
-(BID/IADB) contra la tabla `licitaciones_internacionales` de Supabase,
-con EXACTAMENTE los mismos campos que ya se usan para la fuente AfDB
-(ver ingest/ingesta_afdb.py) -- ninguna columna nueva en el esquema.
+Sincroniza avisos y planes de adquisiciones del Banco Interamericano de Desarrollo
+(BID/IADB) contra la tabla `licitaciones_internacionales` de Supabase.
 
-FUENTE REAL: API REST de CKAN (data.iadb.org)
-Resource ID ("Procurement Notices"): 856aabfd-2c6a-48fb-a8b8-19f3ff443618
-Endpoint:  https://data.iadb.org/api/3/action/datastore_search
+AUTO-DETECCION DE RECURSO:
+El script visita la pagina oficial del dataset en el portal del BID,
+lee el HTML y extrae dinámicamente el `resource_id` actual de la API de Datastore
+por si los administradores lo actualizan o recrean en el futuro.
+
+URL del Dataset: https://data.iadb.org/dataset/ati-documents
 """
 import re
 import time
@@ -25,53 +26,73 @@ from common import (
 )
 
 BASE_URL_CKAN = "https://data.iadb.org"
+URL_DATASET_WEB = BASE_URL_CKAN + "/dataset/ati-documents"
 ENDPOINT_DATASTORE_SEARCH = BASE_URL_CKAN + "/api/3/action/datastore_search"
-RESOURCE_ID = "856aabfd-2c6a-48fb-a8b8-19f3ff443618"
 
 URL_FICHA_GENERICA = "https://www.iadb.org/es/como-trabajar-juntos/adquisiciones/adquisiciones-para-proyectos/avisos-de-adquisiciones"
 
 FUENTE = "BID"
 DIAS_ATRAS = 3                       # Últimos 3 días
 TAMANO_PAGINA = 200
-MAX_REGISTROS_SEGURIDAD = 1000        # Suficiente para barrer los más recientes ordenados
+MAX_REGISTROS_SEGURIDAD = 1000        
 PAUSA_ENTRE_PAGINAS_SEGUNDOS = 0.4
 TIMEOUT_PETICION = 30
 LOTE_ENVIO_SUPABASE = 15
 
 CABECERAS = {"User-Agent": "Mozilla/5.0 (compatible; LicitacionesEmpresasBot/1.0)"}
 
-CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "fecha_limite", "tipo_aviso")
+CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "tipo_aviso")
 
 CANDIDATOS_POR_CONCEPTO = {
-    "referencia": ["notice_id", "noticeid", "reference_no", "reference", "referencia", "notice_no", "notice_number", "id"],
-    "titulo": ["title", "titulo", "notice_title", "project_name", "name"],
-    "descripcion": ["description", "descripcion", "summary", "scope", "notice_text", "detail"],
-    "pais": ["country", "pais", "country_name"],
-    "fecha_publicacion": ["publication_date", "publish_date", "issue_date", "date_published", "notice_date", "created_date", "posted_date"],
-    "fecha_limite": ["deadline", "closing_date", "due_date", "submission_date", "expiration_date", "closing"],
-    "url": ["url", "link", "document_url", "notice_url", "web"],
-    "tipo": ["type", "notice_type", "category"],
-    "organismo": ["agency", "executing_agency", "borrower", "organization", "buyer", "client"],
+    "referencia": ["project_number", "id"],
+    "titulo": ["document_name", "title"],
+    "descripcion": ["document_activity", "activity"],
+    "pais": ["country", "pais"],
+    "fecha_publicacion": ["disclosure_date", "created_date"],
+    "fecha_limite": [],
+    "url": ["document_url", "url"],
+    "tipo": ["document_activity", "policy"],
+    "organismo": ["project_number"],
 }
 
 MAPEO_CONCEPTOS_FORZADO = {
-    "referencia": "noticeid",
-    "titulo": "noticetitle",
-    "descripcion": "process_desc",
-    "pais": "countryname",
-    "fecha_publicacion": "publicationdate",
-    "fecha_limite": "deadline",
-    "url": "proyecturl",
-    "tipo": "type",
-    "organismo": "projectname",
+    "referencia": "project_number",
+    "titulo": "document_name",
+    "descripcion": "document_activity",
+    "pais": "country",
+    "fecha_publicacion": "disclosure_date",
+    "url": "document_url",
+    "tipo": "document_activity",
+    "organismo": "project_number",
 }
 
 
-# ------------------------------------------------------------------
-# Llamadas a la API de Datastore (CKAN) con ordenación nativa
-# ------------------------------------------------------------------
-def _consultar_datastore(offset: int = 0, limit: int = 1, sort_field: str = None) -> dict:
-    parametros = {"resource_id": RESOURCE_ID, "limit": limit, "offset": offset}
+def obtener_resource_id_dinamico() -> str:
+    """
+    Visita la pagina HTML del dataset y extrae dinamicamente el resource_id
+    actualizado desde el enlace de la API de datastore_search.
+    """
+    print(f"Obteniendo resource_id dinamicamente desde: {URL_DATASET_WEB} ...", flush=True)
+    respuesta = requests.get(URL_DATASET_WEB, headers=CABECERAS, timeout=TIMEOUT_PETICION)
+    respuesta.raise_for_status()
+    html = respuesta.text
+
+    # Buscar patrones como: datastore_search?resource_id=5d3c0ea2-d1f5-4006-94bf-f55e18c5b20d
+    coincidencia = re.search(r"datastore_search\?resource_id=([a-f0-9\-]{36})", html)
+    if not coincidencia:
+        # Fallback alternativo buscando en formato JSON embebido o atributos data
+        coincidencia = re.search(r"resource_id['\"]?\s*[:=]\s*['\"]([a-f0-9\-]{36})['\"]", html)
+        
+    if not coincidencia:
+        raise RuntimeError("No se pudo extraer automaticamente el resource_id de la pagina del dataset.")
+
+    resource_id = coincidencia.group(1)
+    print(f"-> Resource ID detectado con exito: {resource_id}", flush=True)
+    return resource_id
+
+
+def _consultar_datastore(resource_id: str, offset: int = 0, limit: int = 1, sort_field: str = None) -> dict:
+    parametros = {"resource_id": resource_id, "limit": limit, "offset": offset}
     if sort_field:
         parametros["sort"] = f"{sort_field} desc"
         
@@ -81,11 +102,6 @@ def _consultar_datastore(offset: int = 0, limit: int = 1, sort_field: str = None
     if not cuerpo.get("success"):
         raise RuntimeError(f"La API de datos abiertos del BID devolvio un error: {cuerpo}")
     return cuerpo["result"]
-
-
-def descubrir_columnas() -> list:
-    resultado = _consultar_datastore(offset=0, limit=1)
-    return [campo["id"] for campo in resultado.get("fields", []) if campo["id"] != "_id"]
 
 
 def emparejar_columnas(columnas_reales: list) -> dict:
@@ -100,9 +116,6 @@ def emparejar_columnas(columnas_reales: list) -> dict:
     return emparejado
 
 
-# ------------------------------------------------------------------
-# Normalizacion de valores
-# ------------------------------------------------------------------
 def _extraer_valor_plano(registro: dict, columna: str):
     if not columna:
         return None
@@ -152,15 +165,14 @@ def _generar_slug(texto: str) -> str:
 def construir_registro(registro: dict, mapeo: dict) -> dict:
     titulo = _extraer_valor_plano(registro, mapeo.get("titulo")) or "Sin titulo"
     referencia = _extraer_valor_plano(registro, mapeo.get("referencia"))
-    codigo_unico = f"BID-{_generar_slug(referencia or titulo)}"
+    codigo_unico = f"BID-{_generar_slug(referencia or '')}-{_generar_slug(titulo)}"
 
     tipo_aviso = _extraer_valor_plano(registro, mapeo.get("tipo"))
 
     fecha_publicacion = _parsear_fecha(registro.get(mapeo.get("fecha_publicacion"))) if mapeo.get("fecha_publicacion") else None
-    fecha_limite = _parsear_fecha(registro.get(mapeo.get("fecha_limite"))) if mapeo.get("fecha_limite") else None
 
     return {
-        "codigo_unico": codigo_unico,
+        "codigo_unico": codigo_unico[:150],
         "fuente_origen": FUENTE,
         "tipo_aviso": tipo_aviso,
         "titulo": titulo,
@@ -169,9 +181,9 @@ def construir_registro(registro: dict, mapeo: dict) -> dict:
         "organismo": _extraer_valor_plano(registro, mapeo.get("organismo")),
         "categoria": None,
         "url_oficial": _extraer_valor_plano(registro, mapeo.get("url")) or URL_FICHA_GENERICA,
-        "url_documento": None,
+        "url_documento": _extraer_valor_plano(registro, mapeo.get("url")),
         "fecha_publicacion": fecha_publicacion.isoformat() if fecha_publicacion else None,
-        "fecha_limite": fecha_limite.isoformat() if fecha_limite else None,
+        "fecha_limite": None,
     }
 
 
@@ -208,9 +220,6 @@ def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> 
     return a_subir
 
 
-# ------------------------------------------------------------------
-# Ejecucion principal
-# ------------------------------------------------------------------
 def ejecutar_sincronizacion():
     hoy = date.today()
     desde = hoy - timedelta(days=DIAS_ATRAS)
@@ -219,10 +228,16 @@ def ejecutar_sincronizacion():
     print("SINCRONIZACION DE LICITACIONES INTERNACIONALES - BID (IADB)", flush=True)
     print("=" * 100, flush=True)
     print(f"Ventana: {desde} .. {hoy}", flush=True)
-    print(f"Fuente: {ENDPOINT_DATASTORE_SEARCH}?resource_id={RESOURCE_ID}", flush=True)
 
     try:
-        resultado_inicial = _consultar_datastore(offset=0, limit=1)
+        # Obtener dinámicamente el resource_id actual en cada ejecución
+        resource_id_actual = obtener_resource_id_dinamico()
+    except Exception as error:
+        print(f"Error obteniendo el resource_id de forma dinamica: {error}", flush=True)
+        return
+
+    try:
+        resultado_inicial = _consultar_datastore(resource_id_actual, offset=0, limit=1)
         columnas_reales = [campo["id"] for campo in resultado_inicial.get("fields", []) if campo["id"] != "_id"]
     except Exception as error:
         print(f"Error consultando la API de datos abiertos del BID: {error}", flush=True)
@@ -236,22 +251,18 @@ def ejecutar_sincronizacion():
         print(f"  {concepto:20} -> {mapeo.get(concepto) or 'NO ENCONTRADA'}", flush=True)
 
     if "titulo" not in mapeo:
-        print(
-            "\nNo se ha podido identificar la columna de titulo. Abortando.",
-            flush=True,
-        )
+        print("\nNo se ha podido identificar la columna de titulo. Abortando.", flush=True)
         return
 
-    columna_fecha_orden = mapeo.get("fecha_publicacion") or mapeo.get("fecha_limite")
+    columna_fecha_orden = mapeo.get("fecha_publicacion")
 
-    # ---------------- Descarga ordenada desde la API ----------------
     candidatos = []
     offset = 0
 
     print(f"\nDescargando registros ordenados por '{columna_fecha_orden}' (descendente)...", flush=True)
     while offset < MAX_REGISTROS_SEGURIDAD:
         try:
-            resultado = _consultar_datastore(offset=offset, limit=TAMANO_PAGINA, sort_field=columna_fecha_orden)
+            resultado = _consultar_datastore(resource_id_actual, offset=offset, limit=TAMANO_PAGINA, sort_field=columna_fecha_orden)
         except Exception as error:
             print(f"    Error consultando la pagina en offset={offset}: {error}", flush=True)
             break
@@ -269,12 +280,13 @@ def ejecutar_sincronizacion():
         time.sleep(PAUSA_ENTRE_PAGINAS_SEGUNDOS)
 
     print(f"\nTotal registros descargados: {len(candidatos)}", flush=True)
-    # Diagnóstico rápido de fechas
-    fechas_muestra = [r.get(columna_fecha_orden) for r in candidatos[:5]]
-    print(f"Las 5 fechas más recientes en la API del BID son: {fechas_muestra}")
 
     if not candidatos:
         return
+
+    # Diagnóstico rápido de fechas
+    fechas_muestra = [r.get(columna_fecha_orden) for r in candidatos[:5]]
+    print(f"Las 5 fechas más recientes en la API del BID son: {fechas_muestra}", flush=True)
 
     # Filtrar estrictamente por la ventana de días requerida
     if columna_fecha_orden:
