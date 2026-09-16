@@ -17,7 +17,7 @@ la pagina descargada no contiene ni un solo aviso, solo el marcado
 alrededor de donde se monta el informe).
 
 Pero el BID publica esos MISMOS datos -- el propio "Procurement Notices"
-yang alimenta ese informe -- como conjunto de datos abiertos en su portal
+que alimenta ese informe -- como conjunto de datos abiertos en su portal
 CKAN (data.iadb.org), bajo licencia Creative Commons Attribution 4.0:
 
     https://data.iadb.org/dataset/project-procurement-bidding-notices-and-notification-of-contract-awards
@@ -124,19 +124,18 @@ CANDIDATOS_POR_CONCEPTO = {
     "tipo": ["type", "notice_type", "category"],
     "organismo": ["agency", "executing_agency", "borrower", "organization", "buyer", "client"],
 }
-# Ver docstring: rellenar aqui a mano tras revisar los logs de una
-# primera ejecucion si el emparejamiento automatico se equivoca con
-# alguna columna, p. ej. {"fecha_limite": "nombre_real_exacto"}.
+
+# CORREGIDO: Ahora son strings (cadenas de texto plano), no listas.
 MAPEO_CONCEPTOS_FORZADO = {
-    "referencia": ["noticeid"],
-    "titulo": ["noticetitle"],
-    "descripcion": ["process_desc"],
-    "pais": ["countryname"],
-    "fecha_publicacion": ["publicationdate"],
-    "fecha_limite": ["deadline"],
-    "url": ["proyecturl"],
-    "tipo": ["type"],
-    "organismo": ["projectname"],
+    "referencia": "noticeid",
+    "titulo": "noticetitle",
+    "descripcion": "process_desc",
+    "pais": "countryname",
+    "fecha_publicacion": "publicationdate",
+    "fecha_limite": "deadline",
+    "url": "proyecturl",
+    "tipo": "type",
+    "organismo": "projectname",
 }
 
 
