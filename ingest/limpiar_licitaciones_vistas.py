@@ -52,7 +52,7 @@ def ejecutar_limpieza():
     for i in range(0, len(ids), 100):
         supabase.table("licitaciones_internacionales").delete().in_("id", ids[i:i + 100]).execute()
 
-    print(f"\n✅ Eliminadas {len(candidatas)} licitaciones vistas caducadas.", flush=True)
+    print(f"\nEliminadas {len(candidatas)} licitaciones vistas caducadas.", flush=True)
 
 
 if __name__ == "__main__":

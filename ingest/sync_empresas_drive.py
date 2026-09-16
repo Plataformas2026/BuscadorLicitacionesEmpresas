@@ -274,7 +274,7 @@ def leer_empresas(buffer_excel: io.BytesIO) -> list:
 
     faltantes = [c for c in list(MAPEO_EMPRESAS.values()) + [COLUMNA_ID_EMPRESA] if c not in df.columns]
     if faltantes:
-        print(f"⚠️ No se han encontrado estas columnas en '{HOJA_EMPRESAS}': {faltantes}", flush=True)
+        print(f"Aviso: no se han encontrado estas columnas en '{HOJA_EMPRESAS}': {faltantes}", flush=True)
 
     empresas = []
     ids_generados = 0
@@ -340,7 +340,7 @@ def leer_referencias(buffer_excel: io.BytesIO, indice_nombres_empresa: dict) -> 
 
     faltantes = [c for c in MAPEO_REFERENCIAS.values() if c not in df.columns]
     if faltantes:
-        print(f"⚠️ No se han encontrado estas columnas en '{HOJA_REFERENCIAS}': {faltantes}", flush=True)
+        print(f"Aviso: no se han encontrado estas columnas en '{HOJA_REFERENCIAS}': {faltantes}", flush=True)
 
     referencias = []
     sin_match = 0
@@ -501,7 +501,7 @@ def ejecutar_sincronizacion():
                 insertadas += len(lote)
                 print(f"Progreso referencias: {insertadas}/{len(referencias)}...", flush=True)
             except Exception as error:
-                print(f"⚠️ Error insertando lote de referencias {i // tamano_lote + 1}: {error}", flush=True)
+                print(f"Error insertando lote de referencias {i // tamano_lote + 1}: {error}", flush=True)
         print(f"Referencias sincronizadas: {insertadas}/{len(referencias)}", flush=True)
 
     guardar_ultima_modificacion(supabase, modificado_en)

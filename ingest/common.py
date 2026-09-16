@@ -91,10 +91,10 @@ def subir_en_lotes(supabase: Client, tabla: str, on_conflict: str, registros: li
                 print(f"Progreso: {subidos}/{total} registros sincronizados en '{tabla}'...", flush=True)
                 break
             except Exception as error:
-                print(f"⚠️ Intento {intento}/{max_intentos} fallido para el lote {numero_lote} de '{tabla}': {error}", flush=True)
+                print(f"Aviso: intento {intento}/{max_intentos} fallido para el lote {numero_lote} de '{tabla}': {error}", flush=True)
                 if intento < max_intentos:
                     time.sleep(2 * intento)
                 else:
-                    print(f"❌ Error definitivo subiendo el lote {numero_lote} de '{tabla}'.", flush=True)
+                    print(f"Error definitivo subiendo el lote {numero_lote} de '{tabla}'.", flush=True)
 
     return subidos
