@@ -14,61 +14,62 @@ caf.com bloquea el acceso a TODAS las herramientas de navegacion usadas
 para investigar este script -- no se ha podido descargar ni una sola
 pagina para inspeccionar su HTML real. Google SI tiene la pagina
 indexada con contenido de 2026, lo que confirma que es HTML servido
-normal (no depende de JavaScript, a diferencia del caso del BID) y que
-un `requests.get()` corriente deberia funcionar -- pero el parseo de
-abajo esta basado UNICAMENTE en fragmentos de texto de resultados de
-busqueda, nunca en una inspeccion directa del marcado HTML/CSS real. Por
-eso se apoya en patrones de TEXTO en vez de en clases CSS concretas.
+normal y que un `requests.get()` corriente deberia funcionar -- pero el
+parseo de abajo esta basado UNICAMENTE en fragmentos de texto de
+resultados de busqueda, nunca en una inspeccion directa del marcado
+HTML/CSS real.
 
 **Ejecuta este script una vez a mano (workflow_dispatch) y revisa el
 log "Convocatorias reconocidas en la pagina N" antes de fiarte del cron
 automatico.**
 
-SOBRE verify=False (desactivar la verificacion del certificado SSL)
-------------------------------------------------------------------------
-Se mantiene tal cual se pidio, pero con una advertencia: esto deshabilita
-la proteccion frente a certificados falsificados/intermediarios
-(ataques de tipo "man in the middle") para TODAS las peticiones de este
-script, no solo para esquivar un error puntual. Los runners de GitHub
-Actions traen un almacen de certificados (ca-certificates) actualizado
-de serie, asi que si el problema de SSL solo se vio en un entorno local
-(por ejemplo, tras un proxy corporativo que reemplaza certificados), es
-muy probable que en GitHub Actions ni siquiera haga falta -- y si el
-problema SI se reproduce alli, merece la pena averiguar la causa real
-(¿certificado de caf.com mal configurado? ¿cadena de certificacion
-incompleta?) en vez de desactivar la verificacion de forma permanente.
-Si mas adelante se confirma que no hace falta en GitHub Actions, basta
-con quitar `verify=False` de las dos llamadas a requests.get().
+SOBRE verify=False: se mantiene (ver turnos anteriores) -- deshabilita
+la verificacion del certificado SSL para todas las peticiones de este
+script. Si el problema que motivo añadirlo solo se dio en un entorno
+local con proxy corporativo, probablemente no haga falta en GitHub
+Actions (trae certificados al dia); si se reproduce alli tambien,
+merece la pena investigar la causa real en vez de dejarlo desactivado
+de forma permanente.
 
-QUE CAMBIA EN ESTA VERSION (a partir de una revision propia)
-------------------------------------------------------------------
-1. Ventana de "ultimos DIAS_ATRAS dias" (3, igual que AfDB/BID) sobre
-   `fecha_publicacion` -- aplicada DESPUES de leer la ficha de cada
-   candidata (es el unico punto en el que se conoce esa fecha; el
-   listado solo trae la fecha de CIERRE, nunca la de publicacion -- ver
-   mas abajo). Si ninguna candidata cae dentro de la ventana, el script
-   termina de forma ordenada sin subir nada.
-2. Extraccion de pais: se busca por nombre de pais miembro de CAF
-   (texto de la tarjeta, titulo o descripcion, en ese orden) -- ver
-   PAISES_CAF y _extraer_pais(). Sigue pudiendo quedar a None si
-   ninguno de esos textos menciona un pais reconocible.
-3. Fecha de publicacion vs. fecha limite: "Convocatoria del X al Y" se
-   interpreta como X = apertura del plazo (fecha_publicacion) e
-   Y = cierre (fecha_limite) -- se mantiene igual que antes porque es
-   la lectura mas consistente con todos los ejemplos reales revisados,
-   pero se ha reforzado el parseo (ver _parsear_rango_fechas_es) para
-   que nunca se pierda una fecha de apertura solo por caer en el
-   futuro respecto a hoy: no hay ninguna comprobacion que descarte
-   fechas futuras, se guardan tal cual se leen.
+CAMBIO DE ESTRATEGIA: TABLA AUXILIAR EN VEZ DE VENTANA DE DIAS
+--------------------------------------------------------------------
+El portal de CAF no expone una fecha de publicacion fiable por tarjeta
+(solo la de cierre), y el volumen de convocatorias abiertas es
+manejable -- asi que, en vez de filtrar por "ultimos N dias" (lo que
+podia descartar convocatorias legitimas solo porque su fecha de
+publicacion no se pudo leer bien), este script ahora:
 
-SIGUE SIN HABER PAGINACION CON PARADA TEMPRANA
-----------------------------------------------------
-El listado de CAF no expone una fecha de PUBLICACION por tarjeta (solo
-la de cierre), asi que no se puede saber si conviene parar de paginar
-solo mirando el listado. Se sigue recorriendo un numero acotado de
-paginas (MAX_PAGINAS_SEGURIDAD) leyendo TODAS las convocatorias
-abiertas, y el filtro de "ultimos 3 dias" se aplica despues, ya con la
-fecha de publicacion real de cada ficha.
+  1. Rastrea TODAS las convocatorias actualmente abiertas del listado
+     (sin ventana de fechas).
+  2. Las registra/actualiza en la tabla auxiliar `caf_convocatorias_activas`
+     (ver sql/schema.sql) -- un upsert barato con lo que ya se sabe por
+     el listado (titulo, URL, fecha de cierre), SIN leer la ficha ni
+     generar ningun embedding todavia.
+  3. Solo las que sean REALMENTE NUEVAS en esa tabla (columna `visto` a
+     False) pasan a la fase cara: leer su ficha, calcular su embedding
+     y sincronizarlas con `licitaciones_internacionales`. Las que ya
+     estaban registradas como vistas se saltan por completo -- no se
+     vuelven a cargar ni a re-procesar en cada ejecucion.
+  4. Al arrancar cada ejecucion, se eliminan de la tabla auxiliar las
+     convocatorias cuya fecha de cierre ya ha pasado.
+
+Esta tabla auxiliar es de uso EXCLUSIVO de este script -- nunca se
+borra ni se modifica nada en `licitaciones_internacionales` a partir de
+su ciclo de vida; esa tabla y su logica de embeddings/matching quedan
+totalmente intactas, tal como se pidio. Si una convocatoria deja de
+estar en la tabla auxiliar (por caducar) pero ya se habia sincronizado
+antes con `licitaciones_internacionales`, su registro en la tabla
+principal permanece igual que siempre.
+
+Limitacion aceptada de este diseño: una convocatoria marcada como
+"vista" ya no se vuelve a leer su ficha en ejecuciones posteriores, asi
+que si CAF ampliara su fecha de cierre despues de la primera
+sincronizacion, este script no lo detectaria (la fecha de cierre que
+lleva la tabla auxiliar SI se refresca en cada ejecucion desde el
+listado -- ver mas arriba -- pero la ficha completa, con su
+descripcion, no se vuelve a leer). Es el mismo compromiso que se pidio
+explicitamente: evitar releer y regenerar embeddings de lo que ya se
+conoce.
 
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
 Ejecucion local:      python ingesta_caf.py
@@ -77,7 +78,7 @@ Ejecucion programada: ver .github/workflows/sincronizar_caf.yml
 import re
 import time
 import unicodedata
-from datetime import date, timedelta
+from datetime import date, datetime, timezone
 
 import requests
 import urllib3
@@ -97,9 +98,9 @@ BASE_URL = "https://www.caf.com"
 LISTADO_URL = BASE_URL + "/es/trabaja-con-nosotros/convocatorias/"
 
 FUENTE = "CAF"
-DIAS_ATRAS = 3
+TABLA_AUXILIAR = "caf_convocatorias_activas"
 MAX_PAGINAS_SEGURIDAD = 15
-MAX_DETALLES_POR_EJECUCION = 150
+MAX_DETALLES_POR_EJECUCION = 150   # tope sobre las NUEVAS (no sobre el total de abiertas rastreadas)
 PAUSA_ENTRE_PAGINAS_SEGUNDOS = 0.8
 PAUSA_ENTRE_DETALLES_SEGUNDOS = 0.4
 TIMEOUT_PETICION = 30
@@ -126,10 +127,6 @@ PATRON_RANGO_FICHA = re.compile(
     re.IGNORECASE,
 )
 
-# Paises miembro de CAF (mas los mencionados con mas frecuencia en sus
-# convocatorias) -- ver _extraer_pais(). Lista de mejor esfuerzo, no
-# oficial/exhaustiva: si falta algun pais donde CAF tambien opere,
-# añadirlo aqui es la unica forma de que se reconozca.
 PAISES_CAF = [
     "Argentina", "Barbados", "Bolivia", "Brasil", "Chile", "Colombia",
     "Costa Rica", "Ecuador", "El Salvador", "España", "Guatemala",
@@ -148,13 +145,6 @@ _PAISES_NORMALIZADOS = [(_normalizar_texto(p), p) for p in PAISES_CAF]
 
 
 def _extraer_pais(*fuentes_de_texto) -> str:
-    """
-    Busca, en el orden de `fuentes_de_texto` (se pasa primero el texto
-    de la tarjeta del listado, luego el titulo, luego la descripcion),
-    el primer nombre de pais miembro de CAF que aparezca como palabra
-    completa (evita falsos positivos por subcadena, p. ej. que "Chile"
-    coincidiera dentro de otra palabra).
-    """
     for texto in fuentes_de_texto:
         if not texto:
             continue
@@ -185,17 +175,6 @@ def _parsear_fecha_es(texto: str):
 
 
 def _parsear_rango_fechas_es(texto_inicio: str, texto_fin: str):
-    """
-    "Convocatoria del X al Y" -> X = apertura del plazo
-    (fecha_publicacion), Y = cierre (fecha_limite). Caso real
-    confirmado: cuando ambas fechas caen en el mismo año, el texto de
-    INICIO no repite el año ("del 25 de agosto al 18 de octubre de
-    2026"), asi que se le presta el del fin si le falta. No se aplica
-    ninguna comprobacion de "fecha pasada/futura": si la apertura del
-    plazo cae en el futuro respecto a hoy, se guarda tal cual -- es un
-    dato legitimo (una convocatoria que se anuncia pero abre mas
-    adelante), no un error.
-    """
     fecha_fin = _parsear_fecha_es(texto_fin)
     if not fecha_fin:
         return None, None
@@ -209,10 +188,6 @@ def _parsear_rango_fechas_es(texto_inicio: str, texto_fin: str):
             dia, mes_texto = coincidencia_dia_mes.groups()
             mes = MESES_ES.get(mes_texto.lower())
             if mes:
-                # Si el mes de inicio es POSTERIOR al de cierre (p. ej.
-                # "del 20 de diciembre al 15 de enero de 2027"), el rango
-                # cruza fin de año: el inicio es del año ANTERIOR al del
-                # cierre, no el mismo (caso real encontrado al probarlo).
                 anio_inicio = fecha_fin.year - 1 if mes > fecha_fin.month else fecha_fin.year
                 try:
                     fecha_inicio = date(anio_inicio, mes, int(dia))
@@ -233,6 +208,10 @@ def obtener_pagina(pagina: int) -> str:
     print(f"    HTTP: {respuesta.status_code}", flush=True)
     respuesta.raise_for_status()
     return respuesta.text
+
+
+def _generar_slug_de_url(url: str) -> str:
+    return url.rstrip("/").split("/")[-1][:120] or "sin-referencia"
 
 
 def extraer_convocatorias_de_pagina(html: str) -> list:
@@ -271,9 +250,12 @@ def extraer_convocatorias_de_pagina(html: str) -> list:
         if coincidencia_cierre:
             fecha_cierre_listado = _parsear_fecha_es(coincidencia_cierre.group(1))
 
+        url_oficial = BASE_URL + ruta if ruta.startswith("/") else ruta
+
         convocatorias.append({
+            "codigo_unico": f"CAF-{_generar_slug_de_url(url_oficial)}",
             "titulo": titulo,
-            "url_oficial": BASE_URL + ruta if ruta.startswith("/") else ruta,
+            "url_oficial": url_oficial,
             "cerrada_segun_listado": cerrada,
             "fecha_limite_listado": fecha_cierre_listado,
             "texto_tarjeta": texto_tarjeta,
@@ -320,12 +302,76 @@ def obtener_detalle_convocatoria(url: str) -> dict:
 
 
 # ------------------------------------------------------------------
+# Tabla auxiliar: ciclo de vida de las convocatorias activas
+# ------------------------------------------------------------------
+def limpiar_convocatorias_caducadas(supabase, hoy: date) -> int:
+    """Elimina de la tabla auxiliar (NUNCA de licitaciones_internacionales) lo que ya cerro."""
+    respuesta_previa = (
+        supabase.table(TABLA_AUXILIAR)
+        .select("codigo_unico")
+        .lt("fecha_limite", hoy.isoformat())
+        .execute()
+    )
+    caducadas = respuesta_previa.data or []
+    if not caducadas:
+        return 0
+
+    supabase.table(TABLA_AUXILIAR).delete().lt("fecha_limite", hoy.isoformat()).execute()
+    print(
+        f"Eliminadas {len(caducadas)} convocatorias caducadas de la tabla auxiliar "
+        f"(fecha_limite anterior a {hoy.isoformat()}).",
+        flush=True,
+    )
+    return len(caducadas)
+
+
+def refrescar_tabla_auxiliar(supabase, candidatos: list) -> dict:
+    """
+    Upsert barato (sin leer fichas) de TODAS las convocatorias abiertas
+    detectadas en el listado -- mantiene fecha_limite y
+    ultima_comprobacion al dia incluso para las ya vistas, para que la
+    limpieza de caducadas sea fiable sin tener que releer su ficha.
+    `visto` se conserva tal cual estuviera; solo es False para las que
+    no existian todavia en la tabla. Devuelve, por codigo_unico, el
+    estado ANTES de este refresco (para poder distinguir las nuevas).
+    """
+    if not candidatos:
+        return {}
+
+    codigos = [c["codigo_unico"] for c in candidatos]
+    respuesta_existentes = (
+        supabase.table(TABLA_AUXILIAR).select("codigo_unico, visto").in_("codigo_unico", codigos).execute()
+    )
+    visto_por_codigo = {f["codigo_unico"]: bool(f["visto"]) for f in (respuesta_existentes.data or [])}
+
+    ahora = datetime.now(timezone.utc).isoformat()
+    filas = []
+    for c in candidatos:
+        codigo = c["codigo_unico"]
+        fecha_limite = c.get("fecha_limite_listado")
+        filas.append({
+            "codigo_unico": codigo,
+            "titulo": c["titulo"],
+            "url_oficial": c["url_oficial"],
+            "fecha_limite": fecha_limite.isoformat() if fecha_limite else None,
+            "visto": visto_por_codigo.get(codigo, False),
+            "ultima_comprobacion": ahora,
+        })
+
+    supabase.table(TABLA_AUXILIAR).upsert(filas, on_conflict="codigo_unico").execute()
+
+    return visto_por_codigo
+
+
+def marcar_como_vistas(supabase, codigos: list):
+    if not codigos:
+        return
+    supabase.table(TABLA_AUXILIAR).update({"visto": True}).in_("codigo_unico", codigos).execute()
+
+
+# ------------------------------------------------------------------
 # Normalizacion al esquema de `licitaciones_internacionales`
 # ------------------------------------------------------------------
-def _generar_slug_de_url(url: str) -> str:
-    return url.rstrip("/").split("/")[-1][:120] or "sin-referencia"
-
-
 def construir_registro(convocatoria: dict) -> dict:
     fecha_publicacion = convocatoria.get("fecha_publicacion")
     fecha_limite = convocatoria.get("fecha_limite") or convocatoria.get("fecha_limite_listado")
@@ -337,7 +383,7 @@ def construir_registro(convocatoria: dict) -> dict:
     )
 
     return {
-        "codigo_unico": f"CAF-{_generar_slug_de_url(convocatoria['url_oficial'])}",
+        "codigo_unico": convocatoria["codigo_unico"],
         "fuente_origen": FUENTE,
         "tipo_aviso": "Convocatoria",
         "titulo": convocatoria["titulo"],
@@ -353,7 +399,7 @@ def construir_registro(convocatoria: dict) -> dict:
 
 
 # ------------------------------------------------------------------
-# Decidir que subir
+# Decidir que subir a licitaciones_internacionales
 # ------------------------------------------------------------------
 def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> list:
     a_subir = []
@@ -392,14 +438,17 @@ def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> 
 # ------------------------------------------------------------------
 def ejecutar_sincronizacion():
     hoy = date.today()
-    desde = hoy - timedelta(days=DIAS_ATRAS)
 
     print("=" * 100, flush=True)
     print("SINCRONIZACION DE LICITACIONES INTERNACIONALES - CAF", flush=True)
     print("=" * 100, flush=True)
     print(f"Fuente: {LISTADO_URL}", flush=True)
-    print(f"Ventana de publicacion: {desde} .. {hoy}", flush=True)
 
+    supabase = obtener_cliente_supabase()
+
+    limpiar_convocatorias_caducadas(supabase, hoy)
+
+    # --- Rastreo completo de convocatorias abiertas (sin ventana de dias) ---
     candidatos = []
     pagina = 0
 
@@ -428,63 +477,52 @@ def ejecutar_sincronizacion():
         pagina += 1
         time.sleep(PAUSA_ENTRE_PAGINAS_SEGUNDOS)
 
-    candidatos = list({c["url_oficial"]: c for c in candidatos}.values())
-    print(f"\nConvocatorias abiertas candidatas (todas las paginas): {len(candidatos)}", flush=True)
+    candidatos = list({c["codigo_unico"]: c for c in candidatos}.values())
+    print(f"\nConvocatorias abiertas rastreadas (todas las paginas): {len(candidatos)}", flush=True)
 
     if not candidatos:
         return
 
-    if len(candidatos) > MAX_DETALLES_POR_EJECUCION:
+    # --- Refresco barato de la tabla auxiliar + deteccion de novedades ---
+    visto_antes = refrescar_tabla_auxiliar(supabase, candidatos)
+    nuevas = [c for c in candidatos if not visto_antes.get(c["codigo_unico"], False)]
+
+    print(
+        f"Ya registradas como vistas (se saltan, no se releen ni se regeneran embeddings): "
+        f"{len(candidatos) - len(nuevas)}",
+        flush=True,
+    )
+    print(f"Nuevas (no vistas todavia): {len(nuevas)}", flush=True)
+
+    if not nuevas:
+        print("No hay convocatorias nuevas -- todas las abiertas ya estaban registradas como vistas.", flush=True)
+        return
+
+    if len(nuevas) > MAX_DETALLES_POR_EJECUCION:
         print(
-            f"Aviso: hay mas candidatas ({len(candidatos)}) que el tope por ejecucion "
+            f"Aviso: hay mas novedades ({len(nuevas)}) que el tope por ejecucion "
             f"({MAX_DETALLES_POR_EJECUCION}); se procesan las primeras y el resto se recogera "
-            "en la siguiente sincronizacion.",
+            "en la siguiente sincronizacion (siguen sin 'visto' en la tabla auxiliar).",
             flush=True,
         )
-        candidatos = candidatos[:MAX_DETALLES_POR_EJECUCION]
+        nuevas = nuevas[:MAX_DETALLES_POR_EJECUCION]
 
-    print("\nDescargando la ficha de cada convocatoria candidata...", flush=True)
-    en_ventana = []
-    fuera_de_ventana = 0
-    sin_fecha = 0
-
-    for indice, convocatoria in enumerate(candidatos, start=1):
-        print(f"  [{indice}/{len(candidatos)}] {convocatoria['titulo'][:90]}", flush=True)
+    print("\nDescargando la ficha de cada convocatoria nueva...", flush=True)
+    normalizados = []
+    for indice, convocatoria in enumerate(nuevas, start=1):
+        print(f"  [{indice}/{len(nuevas)}] {convocatoria['titulo'][:90]}", flush=True)
 
         detalle = obtener_detalle_convocatoria(convocatoria["url_oficial"])
         convocatoria["descripcion"] = detalle["descripcion"]
         convocatoria["fecha_publicacion"] = detalle["fecha_publicacion"]
         convocatoria["fecha_limite"] = detalle["fecha_limite"]
 
-        # Ventana de "ultimos DIAS_ATRAS dias" sobre fecha_publicacion --
-        # solo se puede aplicar aqui, tras leer la ficha (ver docstring
-        # del modulo: el listado no trae fecha de publicacion).
-        fecha_publicacion = convocatoria["fecha_publicacion"]
-        if fecha_publicacion is None:
-            sin_fecha += 1
-        elif fecha_publicacion < desde:
-            fuera_de_ventana += 1
-        else:
-            en_ventana.append(convocatoria)
-
+        normalizados.append(construir_registro(convocatoria))
         time.sleep(PAUSA_ENTRE_DETALLES_SEGUNDOS)
 
-    print(
-        f"\nDentro de la ventana de {DIAS_ATRAS} dias: {len(en_ventana)}  "
-        f"(fuera de la ventana: {fuera_de_ventana}  ·  sin fecha de publicacion detectada: {sin_fecha})",
-        flush=True,
-    )
-
-    if not en_ventana:
-        print("No hay convocatorias publicadas en la ventana de dias configurada.", flush=True)
-        return
-
-    normalizados = [construir_registro(c) for c in en_ventana]
     normalizados = list({n["codigo_unico"]: n for n in normalizados}.values())
 
-    supabase = obtener_cliente_supabase()
-
-    print("\nComparando con lo ya existente en Supabase...", flush=True)
+    print("\nComparando con lo ya existente en Supabase (tabla principal)...", flush=True)
     registros_existentes = obtener_registros_existentes(
         supabase,
         tabla="licitaciones_internacionales",
@@ -495,14 +533,19 @@ def ejecutar_sincronizacion():
 
     lote_final = preparar_lote_para_subir(normalizados, registros_existentes)
 
-    if not lote_final:
-        print("No hay convocatorias nuevas ni cambios que sincronizar.", flush=True)
-        return
+    if lote_final:
+        subidas = subir_en_lotes(
+            supabase, "licitaciones_internacionales", "codigo_unico", lote_final, tamano_lote=LOTE_ENVIO_SUPABASE
+        )
+        print(f"\nSincronizacion CAF completada: {subidas}/{len(lote_final)} registros subidos.", flush=True)
+    else:
+        print("\nNo hay cambios que subir a licitaciones_internacionales.", flush=True)
 
-    subidas = subir_en_lotes(
-        supabase, "licitaciones_internacionales", "codigo_unico", lote_final, tamano_lote=LOTE_ENVIO_SUPABASE
-    )
-    print(f"\nSincronizacion CAF completada: {subidas}/{len(lote_final)} registros subidos.", flush=True)
+    # Se marcan como vistas TODAS las procesadas en este lote (tanto si se
+    # subieron de verdad como si ya estaban igual en la tabla principal):
+    # en ambos casos ya se han comprobado y no deben tratarse como
+    # candidatas nuevas en la siguiente ejecucion.
+    marcar_como_vistas(supabase, [c["codigo_unico"] for c in nuevas])
 
 
 if __name__ == "__main__":
