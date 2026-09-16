@@ -10,56 +10,65 @@ Supabase, con EXACTAMENTE los mismos campos que AfDB/BID.
 
 AVISO DE FIABILIDAD -- LEE ESTO ANTES DE DEJARLO EN EL CRON AUTOMATICO
 --------------------------------------------------------------------------
-A diferencia del scraper de AfDB (que se construyo viendo el HTML real
-de la pagina), caf.com bloquea el acceso a TODAS las herramientas de
-navegacion usadas para investigar este script -- no se ha podido
-descargar ni una sola pagina para inspeccionar su HTML real. Este
-bloqueo aparenta ser especifico de esas herramientas y no de peticiones
-HTTP normales: Google SI tiene la pagina indexada, con contenido de
-fechas de 2026 (octubre 2026), lo que confirma que es HTML servido
-normal -- no un Power BI ni nada que dependa de JavaScript, a
-diferencia del caso del BID -- y que un `requests.get()` corriente
-(como hace este script) deberia funcionar igual que le funciona a
-Google. Pero el parseo de abajo esta basado UNICAMENTE en los
-fragmentos de texto visibles en los resultados de busqueda, nunca en
-una inspeccion directa del marcado HTML/CSS real.
-
-Por eso el reconocimiento de cada "tarjeta" de convocatoria se apoya en
-patrones de TEXTO (expresiones regulares sobre el texto ya renderizado,
-ver extraer_convocatorias_de_pagina) en vez de en nombres de clase CSS
-concretos, que no se han podido verificar. Patrones de texto confirmados
-contra fragmentos reales de la pagina real:
-  - Cada convocatoria enlaza a una URL con forma
-    /es/trabaja-con-nosotros/convocatorias/<slug>
-  - En el listado, cada tarjeta muestra "Cierre: <fecha>" y el estado
-    ("Convocatoria abierta" / "Convocatoria cerrada")
-  - En la ficha de cada convocatoria aparece "Convocatoria del <fecha
-    inicio> al <fecha cierre>", que da la fecha de publicacion Y de
-    cierre a la vez, mas fiable que el "Cierre:" abreviado del listado
+caf.com bloquea el acceso a TODAS las herramientas de navegacion usadas
+para investigar este script -- no se ha podido descargar ni una sola
+pagina para inspeccionar su HTML real. Google SI tiene la pagina
+indexada con contenido de 2026, lo que confirma que es HTML servido
+normal (no depende de JavaScript, a diferencia del caso del BID) y que
+un `requests.get()` corriente deberia funcionar -- pero el parseo de
+abajo esta basado UNICAMENTE en fragmentos de texto de resultados de
+busqueda, nunca en una inspeccion directa del marcado HTML/CSS real. Por
+eso se apoya en patrones de TEXTO en vez de en clases CSS concretas.
 
 **Ejecuta este script una vez a mano (workflow_dispatch) y revisa el
 log "Convocatorias reconocidas en la pagina N" antes de fiarte del cron
-automatico.** Si sale 0 en todas las paginas, lo mas probable es que el
-marcado real no coincida con estos patrones de texto -- revisa
-PATRON_ENLACE_CONVOCATORIA y las funciones de extraccion de este
-modulo con el HTML real (el propio log de "HTML de depuracion" que
-imprime este script si no reconoce nada te dara pistas).
+automatico.**
 
-"Convocatorias" en caf.com mezcla licitaciones/consultorias con
-programas de becas, concursos de innovacion y convocatorias de
-investigacion -- no se excluye ningun tipo aqui (mismo criterio que se
-acordo para AfDB: se captura todo, y el filtrado de relevancia se deja
-a la busqueda semantica y los filtros de la app, no a la ingesta).
+SOBRE verify=False (desactivar la verificacion del certificado SSL)
+------------------------------------------------------------------------
+Se mantiene tal cual se pidio, pero con una advertencia: esto deshabilita
+la proteccion frente a certificados falsificados/intermediarios
+(ataques de tipo "man in the middle") para TODAS las peticiones de este
+script, no solo para esquivar un error puntual. Los runners de GitHub
+Actions traen un almacen de certificados (ca-certificates) actualizado
+de serie, asi que si el problema de SSL solo se vio en un entorno local
+(por ejemplo, tras un proxy corporativo que reemplaza certificados), es
+muy probable que en GitHub Actions ni siquiera haga falta -- y si el
+problema SI se reproduce alli, merece la pena averiguar la causa real
+(¿certificado de caf.com mal configurado? ¿cadena de certificacion
+incompleta?) en vez de desactivar la verificacion de forma permanente.
+Si mas adelante se confirma que no hace falta en GitHub Actions, basta
+con quitar `verify=False` de las dos llamadas a requests.get().
 
-SIN VENTANA DE "ULTIMOS N DIAS"
------------------------------------
-A diferencia de AfDB/BID, el listado de CAF no expone de forma fiable
-una fecha de PUBLICACION por la que paginar y parar pronto -- solo la
-fecha de CIERRE por tarjeta. Por eso este script no aplica una ventana
-de dias: recorre un numero acotado de paginas del listado
-(MAX_PAGINAS_SEGURIDAD) y sube todo lo que encuentre y siga "abierto";
-la comparacion con lo ya existente en Supabase (misma logica que
-AfDB/BID) evita reprocesar lo que no ha cambiado.
+QUE CAMBIA EN ESTA VERSION (a partir de una revision propia)
+------------------------------------------------------------------
+1. Ventana de "ultimos DIAS_ATRAS dias" (3, igual que AfDB/BID) sobre
+   `fecha_publicacion` -- aplicada DESPUES de leer la ficha de cada
+   candidata (es el unico punto en el que se conoce esa fecha; el
+   listado solo trae la fecha de CIERRE, nunca la de publicacion -- ver
+   mas abajo). Si ninguna candidata cae dentro de la ventana, el script
+   termina de forma ordenada sin subir nada.
+2. Extraccion de pais: se busca por nombre de pais miembro de CAF
+   (texto de la tarjeta, titulo o descripcion, en ese orden) -- ver
+   PAISES_CAF y _extraer_pais(). Sigue pudiendo quedar a None si
+   ninguno de esos textos menciona un pais reconocible.
+3. Fecha de publicacion vs. fecha limite: "Convocatoria del X al Y" se
+   interpreta como X = apertura del plazo (fecha_publicacion) e
+   Y = cierre (fecha_limite) -- se mantiene igual que antes porque es
+   la lectura mas consistente con todos los ejemplos reales revisados,
+   pero se ha reforzado el parseo (ver _parsear_rango_fechas_es) para
+   que nunca se pierda una fecha de apertura solo por caer en el
+   futuro respecto a hoy: no hay ninguna comprobacion que descarte
+   fechas futuras, se guardan tal cual se leen.
+
+SIGUE SIN HABER PAGINACION CON PARADA TEMPRANA
+----------------------------------------------------
+El listado de CAF no expone una fecha de PUBLICACION por tarjeta (solo
+la de cierre), asi que no se puede saber si conviene parar de paginar
+solo mirando el listado. Se sigue recorriendo un numero acotado de
+paginas (MAX_PAGINAS_SEGURIDAD) leyendo TODAS las convocatorias
+abiertas, y el filtro de "ultimos 3 dias" se aplica despues, ya con la
+fecha de publicacion real de cada ficha.
 
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
 Ejecucion local:      python ingesta_caf.py
@@ -67,9 +76,11 @@ Ejecucion programada: ver .github/workflows/sincronizar_caf.yml
 """
 import re
 import time
-from datetime import date
+import unicodedata
+from datetime import date, timedelta
 
 import requests
+import urllib3
 from bs4 import BeautifulSoup
 
 from common import (
@@ -78,15 +89,15 @@ from common import (
     obtener_registros_existentes,
     subir_en_lotes,
 )
-import urllib3
 
-# Desactivar las advertencias de seguridad por certificado no verificado
+# Ver aviso "SOBRE verify=False" en el docstring del modulo.
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BASE_URL = "https://www.caf.com"
 LISTADO_URL = BASE_URL + "/es/trabaja-con-nosotros/convocatorias/"
 
 FUENTE = "CAF"
+DIAS_ATRAS = 3
 MAX_PAGINAS_SEGURIDAD = 15
 MAX_DETALLES_POR_EJECUCION = 150
 PAUSA_ENTRE_PAGINAS_SEGUNDOS = 0.8
@@ -96,7 +107,7 @@ LOTE_ENVIO_SUPABASE = 15
 
 CABECERAS = {"User-Agent": "Mozilla/5.0 (compatible; LicitacionesEmpresasBot/1.0)"}
 
-CAMPOS_COMPARABLES = ("titulo", "descripcion", "fecha_limite")
+CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "fecha_publicacion", "fecha_limite")
 
 PATRON_ENLACE_CONVOCATORIA = re.compile(r"^/es/trabaja-con-nosotros/convocatorias/[a-z0-9\-]+/?$")
 
@@ -114,6 +125,44 @@ PATRON_RANGO_FICHA = re.compile(
     r"convocatoria\s+del\s+(.{4,30}?)\s+al\s+(.{4,30}?\d{4})",
     re.IGNORECASE,
 )
+
+# Paises miembro de CAF (mas los mencionados con mas frecuencia en sus
+# convocatorias) -- ver _extraer_pais(). Lista de mejor esfuerzo, no
+# oficial/exhaustiva: si falta algun pais donde CAF tambien opere,
+# añadirlo aqui es la unica forma de que se reconozca.
+PAISES_CAF = [
+    "Argentina", "Barbados", "Bolivia", "Brasil", "Chile", "Colombia",
+    "Costa Rica", "Ecuador", "El Salvador", "España", "Guatemala",
+    "Honduras", "Jamaica", "México", "Nicaragua", "Panamá", "Paraguay",
+    "Perú", "Portugal", "República Dominicana", "Trinidad y Tobago",
+    "Uruguay", "Venezuela",
+]
+
+
+def _normalizar_texto(texto: str) -> str:
+    texto = (texto or "").lower()
+    return "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
+
+
+_PAISES_NORMALIZADOS = [(_normalizar_texto(p), p) for p in PAISES_CAF]
+
+
+def _extraer_pais(*fuentes_de_texto) -> str:
+    """
+    Busca, en el orden de `fuentes_de_texto` (se pasa primero el texto
+    de la tarjeta del listado, luego el titulo, luego la descripcion),
+    el primer nombre de pais miembro de CAF que aparezca como palabra
+    completa (evita falsos positivos por subcadena, p. ej. que "Chile"
+    coincidiera dentro de otra palabra).
+    """
+    for texto in fuentes_de_texto:
+        if not texto:
+            continue
+        texto_norm = _normalizar_texto(texto)
+        for pais_norm, pais_original in _PAISES_NORMALIZADOS:
+            if re.search(rf"\b{re.escape(pais_norm)}\b", texto_norm):
+                return pais_original
+    return None
 
 
 # ------------------------------------------------------------------
@@ -137,11 +186,15 @@ def _parsear_fecha_es(texto: str):
 
 def _parsear_rango_fechas_es(texto_inicio: str, texto_fin: str):
     """
-    "Convocatoria del X al Y" -- caso real confirmado: cuando ambas
-    fechas caen en el mismo año, el texto de INICIO no repite el año
-    ("del 25 de agosto al 18 de octubre de 2026": el año solo aparece
-    una vez, al final). Se parsea primero el fin (que siempre trae el
-    año) y, si el inicio no tiene uno propio, se le presta el del fin.
+    "Convocatoria del X al Y" -> X = apertura del plazo
+    (fecha_publicacion), Y = cierre (fecha_limite). Caso real
+    confirmado: cuando ambas fechas caen en el mismo año, el texto de
+    INICIO no repite el año ("del 25 de agosto al 18 de octubre de
+    2026"), asi que se le presta el del fin si le falta. No se aplica
+    ninguna comprobacion de "fecha pasada/futura": si la apertura del
+    plazo cae en el futuro respecto a hoy, se guarda tal cual -- es un
+    dato legitimo (una convocatoria que se anuncia pero abre mas
+    adelante), no un error.
     """
     fecha_fin = _parsear_fecha_es(texto_fin)
     if not fecha_fin:
@@ -156,8 +209,13 @@ def _parsear_rango_fechas_es(texto_inicio: str, texto_fin: str):
             dia, mes_texto = coincidencia_dia_mes.groups()
             mes = MESES_ES.get(mes_texto.lower())
             if mes:
+                # Si el mes de inicio es POSTERIOR al de cierre (p. ej.
+                # "del 20 de diciembre al 15 de enero de 2027"), el rango
+                # cruza fin de año: el inicio es del año ANTERIOR al del
+                # cierre, no el mismo (caso real encontrado al probarlo).
+                anio_inicio = fecha_fin.year - 1 if mes > fecha_fin.month else fecha_fin.year
                 try:
-                    fecha_inicio = date(fecha_fin.year, mes, int(dia))
+                    fecha_inicio = date(anio_inicio, mes, int(dia))
                 except ValueError:
                     fecha_inicio = None
 
@@ -169,7 +227,6 @@ def _parsear_rango_fechas_es(texto_inicio: str, texto_fin: str):
 # ------------------------------------------------------------------
 def obtener_pagina(pagina: int) -> str:
     print(f"--> Descargando pagina {pagina} del listado de convocatorias CAF...", flush=True)
-    # Se añade verify=False para evitar el error de certificado SSL
     respuesta = requests.get(
         LISTADO_URL, params={"page": pagina}, timeout=TIMEOUT_PETICION, headers=CABECERAS, verify=False
     )
@@ -179,12 +236,6 @@ def obtener_pagina(pagina: int) -> str:
 
 
 def extraer_convocatorias_de_pagina(html: str) -> list:
-    """
-    Ver aviso de fiabilidad en el docstring del modulo: el reconocimiento
-    se apoya en el patron de URL (muy fiable, confirmado contra muchos
-    ejemplos reales) mas patrones de texto sobre el contenedor de cada
-    enlace, no en clases CSS (que no se han podido verificar).
-    """
     soup = BeautifulSoup(html, "html.parser")
     contenedor = soup.find("main") or soup.find(id="content") or soup
 
@@ -202,9 +253,6 @@ def extraer_convocatorias_de_pagina(html: str) -> list:
             continue
         vistos.add(titulo)
 
-        # Se sube por el arbol buscando el contenedor de la tarjeta (el
-        # propio <a> normalmente solo tiene el titulo; el resto de datos
-        # de la tarjeta -fecha de cierre, estado- estan en un ancestro).
         texto_tarjeta = ""
         nodo = enlace
         for _ in range(5):
@@ -228,6 +276,7 @@ def extraer_convocatorias_de_pagina(html: str) -> list:
             "url_oficial": BASE_URL + ruta if ruta.startswith("/") else ruta,
             "cerrada_segun_listado": cerrada,
             "fecha_limite_listado": fecha_cierre_listado,
+            "texto_tarjeta": texto_tarjeta,
         })
 
     return convocatorias
@@ -247,7 +296,6 @@ def extraer_descripcion_detalle(soup: BeautifulSoup):
 
 def obtener_detalle_convocatoria(url: str) -> dict:
     try:
-        # Se añade verify=False aquí también
         respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=CABECERAS, verify=False)
         respuesta.raise_for_status()
     except Exception as error:
@@ -280,9 +328,13 @@ def _generar_slug_de_url(url: str) -> str:
 
 def construir_registro(convocatoria: dict) -> dict:
     fecha_publicacion = convocatoria.get("fecha_publicacion")
-    # La ficha (mas fiable, trae el rango completo) tiene prioridad; si no
-    # se pudo leer, se cae al "Cierre:" abreviado que ya traia el listado.
     fecha_limite = convocatoria.get("fecha_limite") or convocatoria.get("fecha_limite_listado")
+
+    pais = _extraer_pais(
+        convocatoria.get("texto_tarjeta"),
+        convocatoria.get("titulo"),
+        convocatoria.get("descripcion"),
+    )
 
     return {
         "codigo_unico": f"CAF-{_generar_slug_de_url(convocatoria['url_oficial'])}",
@@ -290,8 +342,8 @@ def construir_registro(convocatoria: dict) -> dict:
         "tipo_aviso": "Convocatoria",
         "titulo": convocatoria["titulo"],
         "descripcion": convocatoria.get("descripcion"),
-        "pais": None,       # no se ha podido confirmar de forma fiable un campo de pais por tarjeta (ver docstring)
-        "organismo": "CAF", # organismo unico y conocido para toda esta fuente
+        "pais": pais,
+        "organismo": "CAF",
         "categoria": None,
         "url_oficial": convocatoria["url_oficial"],
         "url_documento": None,
@@ -307,7 +359,10 @@ def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> 
     a_subir = []
     for datos in normalizados:
         existente = registros_existentes.get(datos["codigo_unico"])
-        texto_completo = f"Titulo: {datos['titulo']}\n{datos.get('descripcion') or ''}"
+        texto_completo = (
+            f"Titulo: {datos['titulo']}\n{datos.get('descripcion') or ''}\n"
+            f"Pais: {datos.get('pais') or 'No especificado'}"
+        )
 
         if existente is None:
             datos["texto_completo"] = texto_completo
@@ -336,10 +391,14 @@ def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> 
 # Ejecucion principal
 # ------------------------------------------------------------------
 def ejecutar_sincronizacion():
+    hoy = date.today()
+    desde = hoy - timedelta(days=DIAS_ATRAS)
+
     print("=" * 100, flush=True)
     print("SINCRONIZACION DE LICITACIONES INTERNACIONALES - CAF", flush=True)
     print("=" * 100, flush=True)
     print(f"Fuente: {LISTADO_URL}", flush=True)
+    print(f"Ventana de publicacion: {desde} .. {hoy}", flush=True)
 
     candidatos = []
     pagina = 0
@@ -358,9 +417,9 @@ def ejecutar_sincronizacion():
             if pagina == 0:
                 print(
                     "\nNo se ha reconocido ninguna convocatoria en la primera pagina. El marcado "
-                    "real probablemente no coincide con los patrones de texto de este script (ver "
-                    "aviso de fiabilidad en el docstring del modulo) -- revisa "
-                    "PATRON_ENLACE_CONVOCATORIA y extraer_convocatorias_de_pagina contra el HTML real.",
+                    "real probablemente no coincide con los patrones de texto de este script -- "
+                    "revisa PATRON_ENLACE_CONVOCATORIA y extraer_convocatorias_de_pagina contra el "
+                    "HTML real.",
                     flush=True,
                 )
             break
@@ -385,7 +444,10 @@ def ejecutar_sincronizacion():
         candidatos = candidatos[:MAX_DETALLES_POR_EJECUCION]
 
     print("\nDescargando la ficha de cada convocatoria candidata...", flush=True)
-    normalizados = []
+    en_ventana = []
+    fuera_de_ventana = 0
+    sin_fecha = 0
+
     for indice, convocatoria in enumerate(candidatos, start=1):
         print(f"  [{indice}/{len(candidatos)}] {convocatoria['titulo'][:90]}", flush=True)
 
@@ -394,9 +456,30 @@ def ejecutar_sincronizacion():
         convocatoria["fecha_publicacion"] = detalle["fecha_publicacion"]
         convocatoria["fecha_limite"] = detalle["fecha_limite"]
 
-        normalizados.append(construir_registro(convocatoria))
+        # Ventana de "ultimos DIAS_ATRAS dias" sobre fecha_publicacion --
+        # solo se puede aplicar aqui, tras leer la ficha (ver docstring
+        # del modulo: el listado no trae fecha de publicacion).
+        fecha_publicacion = convocatoria["fecha_publicacion"]
+        if fecha_publicacion is None:
+            sin_fecha += 1
+        elif fecha_publicacion < desde:
+            fuera_de_ventana += 1
+        else:
+            en_ventana.append(convocatoria)
+
         time.sleep(PAUSA_ENTRE_DETALLES_SEGUNDOS)
 
+    print(
+        f"\nDentro de la ventana de {DIAS_ATRAS} dias: {len(en_ventana)}  "
+        f"(fuera de la ventana: {fuera_de_ventana}  ·  sin fecha de publicacion detectada: {sin_fecha})",
+        flush=True,
+    )
+
+    if not en_ventana:
+        print("No hay convocatorias publicadas en la ventana de dias configurada.", flush=True)
+        return
+
+    normalizados = [construir_registro(c) for c in en_ventana]
     normalizados = list({n["codigo_unico"]: n for n in normalizados}.values())
 
     supabase = obtener_cliente_supabase()
