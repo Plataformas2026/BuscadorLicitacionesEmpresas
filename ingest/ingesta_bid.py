@@ -17,7 +17,7 @@ la pagina descargada no contiene ni un solo aviso, solo el marcado
 alrededor de donde se monta el informe).
 
 Pero el BID publica esos MISMOS datos -- el propio "Procurement Notices"
-que alimenta ese informe -- como conjunto de datos abiertos en su portal
+yang alimenta ese informe -- como conjunto de datos abiertos en su portal
 CKAN (data.iadb.org), bajo licencia Creative Commons Attribution 4.0:
 
     https://data.iadb.org/dataset/project-procurement-bidding-notices-and-notification-of-contract-awards
@@ -144,7 +144,6 @@ MAPEO_CONCEPTOS_FORZADO = {
 # Llamadas a la API de Datastore (CKAN) -- sin clave, de lectura
 # ------------------------------------------------------------------
 def _consultar_datastore(offset: int = 0, limit: int = 1) -> dict:
-    # Eliminamos el parámetro 'sort' de la URL porque la API del BID da error 409
     parametros = {"resource_id": RESOURCE_ID, "limit": limit, "offset": offset}
     respuesta = requests.get(ENDPOINT_DATASTORE_SEARCH, params=parametros, timeout=TIMEOUT_PETICION, headers=CABECERAS)
     respuesta.raise_for_status()
@@ -174,12 +173,17 @@ def emparejar_columnas(columnas_reales: list) -> dict:
 # ------------------------------------------------------------------
 # Normalizacion de valores
 # ------------------------------------------------------------------
-def _valor_texto(registro: dict, columna: str):
+def _extraer_valor_plano(registro: dict, columna: str):
+    """Extrae un valor de forma segura, manejando si viene como string, número o lista."""
     if not columna:
         return None
     valor = registro.get(columna)
     if valor is None:
         return None
+    if isinstance(valor, list):
+        if not valor:
+            return None
+        valor = valor[0]
     texto = str(valor).strip()
     if not texto or texto.lower() in ("nan", "none", "null"):
         return None
@@ -187,9 +191,13 @@ def _valor_texto(registro: dict, columna: str):
 
 
 def _parsear_fecha(valor):
-    """Defensivo a proposito: un export CSV->CKAN puede traer la fecha en varios formatos."""
+    """Defensivo a proposito: un export CSV->CKAN puede traer la fecha en varios formatos o listas."""
     if valor is None:
         return None
+    if isinstance(valor, list):
+        if not valor:
+            return None
+        valor = valor[0]
     texto = str(valor).strip()
     if not texto or texto.lower() in ("nan", "none", "null"):
         return None
@@ -217,11 +225,11 @@ def _generar_slug(texto: str) -> str:
 # Normalizacion al esquema de `licitaciones_internacionales`
 # ------------------------------------------------------------------
 def construir_registro(registro: dict, mapeo: dict) -> dict:
-    titulo = _valor_texto(registro, mapeo.get("titulo")) or "Sin titulo"
-    referencia = _valor_texto(registro, mapeo.get("referencia"))
+    titulo = _extraer_valor_plano(registro, mapeo.get("titulo")) or "Sin titulo"
+    referencia = _extraer_valor_plano(registro, mapeo.get("referencia"))
     codigo_unico = f"BID-{_generar_slug(referencia or titulo)}"
 
-    tipo_aviso = _valor_texto(registro, mapeo.get("tipo"))  # strip() ya aplicado en _valor_texto
+    tipo_aviso = _extraer_valor_plano(registro, mapeo.get("tipo"))
 
     fecha_publicacion = _parsear_fecha(registro.get(mapeo.get("fecha_publicacion"))) if mapeo.get("fecha_publicacion") else None
     fecha_limite = _parsear_fecha(registro.get(mapeo.get("fecha_limite"))) if mapeo.get("fecha_limite") else None
@@ -231,11 +239,11 @@ def construir_registro(registro: dict, mapeo: dict) -> dict:
         "fuente_origen": FUENTE,
         "tipo_aviso": tipo_aviso,
         "titulo": titulo,
-        "descripcion": _valor_texto(registro, mapeo.get("descripcion")),
-        "pais": _valor_texto(registro, mapeo.get("pais")),
-        "organismo": _valor_texto(registro, mapeo.get("organismo")),
+        "descripcion": _extraer_valor_plano(registro, mapeo.get("descripcion")),
+        "pais": _extraer_valor_plano(registro, mapeo.get("pais")),
+        "organismo": _extraer_valor_plano(registro, mapeo.get("organismo")),
         "categoria": None,
-        "url_oficial": _valor_texto(registro, mapeo.get("url")) or URL_FICHA_GENERICA,
+        "url_oficial": _extraer_valor_plano(registro, mapeo.get("url")) or URL_FICHA_GENERICA,
         "url_documento": None,
         "fecha_publicacion": fecha_publicacion.isoformat() if fecha_publicacion else None,
         "fecha_limite": fecha_limite.isoformat() if fecha_limite else None,
@@ -341,7 +349,6 @@ def ejecutar_sincronizacion():
 
         candidatos.extend(registros)
         
-        # Si traemos menos registros que el tamaño de página, ya hemos terminado de barrer la tabla
         if len(registros) < TAMANO_PAGINA:
             break
 
@@ -355,14 +362,12 @@ def ejecutar_sincronizacion():
 
     # Si tenemos columna de fecha, ordenamos en Python y filtramos por la ventana de días
     if columna_fecha_orden:
-        # Ordenar en memoria de Python por fecha de publicación descendente
         candidatos = sorted(
             candidatos,
-            key=lambda x: str(x.get(columna_fecha_orden) or ""),
+            key=lambda x: str(_parsear_fecha(x.get(columna_fecha_orden)) or date.min),
             reverse=True
         )
         
-        # Filtrar por la ventana de días establecida (desde .. hoy)
         candidatos_en_ventana = []
         for registro in candidatos:
             fecha_referencia = _parsear_fecha(registro.get(columna_fecha_orden))
