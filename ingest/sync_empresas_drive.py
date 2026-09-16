@@ -150,8 +150,8 @@ CAMPOS_COMPARABLES_EMPRESAS = (
 # Mapeo explícito de alias (Variante normalizada -> Nombre exacto en Dossier Completo)
 # ------------------------------------------------------------------
 ALIAS_EMPRESAS = {
-    "canarias tecnologica y si": "CTSI (Canarias Tecnológica y Sistemas de Información)",
-    "ctsi (canarias tecnologica y sistemas de informacion)": "CTSI (Canarias Tecnológica y Sistemas de Información)",
+    "canarias tecnologica y si": "CANARIAS TECNOLÓGICA Y SI",
+    "ctsi (canarias tecnologica y sistemas de informacion)": "CANARIAS TECNOLÓGICA Y SI",
     "cocosolutions": "COCO SOLUTIONS",
     "coco solutions": "COCO SOLUTIONS",
     "grupo evm": "GRUPO EVM",
