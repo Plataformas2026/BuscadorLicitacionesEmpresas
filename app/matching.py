@@ -172,6 +172,43 @@ def _hay_solapamiento(texto_a: str, texto_b: str, minimo: int = 2) -> bool:
     return len(_palabras_significativas(texto_a) & _palabras_significativas(texto_b)) >= minimo
 
 
+def _terminos_comunes(texto_a: str, texto_b: str, maximo: int = 6) -> list:
+    """Palabras significativas presentes en ambos textos -- evidencia concreta de POR QUÉ solapan, no solo un sí/no."""
+    if not texto_a or not texto_b:
+        return []
+    comunes = _palabras_significativas(texto_a) & _palabras_significativas(texto_b)
+    return sorted(comunes)[:maximo]
+
+
+def _recortar(texto: str, longitud: int = 140) -> str:
+    texto = texto or ""
+    return texto if len(texto) <= longitud else texto[:longitud].rstrip() + "…"
+
+
+def _construir_resumen(similarity, señales: list) -> str:
+    """
+    Primera frase de la explicación: sintetiza el nivel de encaje y, sobre
+    todo, DE QUÉ depende -- si no hay coincidencias concretas en ningún
+    campo, lo dice explícitamente en vez de ocultarlo detrás de un
+    porcentaje, para poder argumentar (o descartar) la recomendación con
+    conocimiento de causa.
+    """
+    pct = round(similarity * 100, 1) if similarity is not None else None
+    pct_texto = f" ({pct}% de afinidad semántica)" if pct is not None else ""
+
+    if señales:
+        return f"Se recomienda esta empresa por coincidencias concretas en: {', '.join(señales)}{pct_texto}."
+    if pct is not None:
+        return (
+            f"Se recomienda por similitud semántica general del perfil de la empresa con el objeto "
+            f"de la licitación{pct_texto}; no se han encontrado coincidencias explícitas en proyectos "
+            f"tipo, descripción de actividad, preferencias de licitación, ubicación geográfica ni "
+            f"referencias anteriores -- conviene revisar el perfil completo antes de apoyarse solo en "
+            f"esta señal."
+        )
+    return "Coincidencia detectada por similitud semántica general del perfil de la empresa."
+
+
 def explicar_coincidencia(
     texto_licitacion: str,
     pais_licitacion: str,
@@ -179,48 +216,48 @@ def explicar_coincidencia(
     referencias_empresa: list = None,
 ) -> list:
     """
-    Devuelve una lista de frases (bullets) explicando por qué esta
-    empresa encaja con la licitación, basada en datos concretos:
-      - nivel de similitud semántica
-      - proyectos tipo de la empresa que coinciden con el objeto de la licitación
-      - descripción de actividad de la empresa frente a la licitación
-      - preferencias de licitación declaradas por la empresa
-      - coincidencia de país / zona geográfica
-      - palabras clave de la empresa presentes en el texto de la licitación
-      - licitaciones antiguas parecidas a las que ya se ha presentado la empresa
-      - sector/subsector, como contexto
+    Devuelve una lista de frases (bullets) que ARGUMENTAN por qué esta
+    empresa encaja con la licitación, con evidencia concreta en vez de
+    afirmaciones genéricas: términos comunes explícitos (no solo "hay
+    solapamiento"), proyectos tipo citados por nombre, referencias
+    antiguas con su resultado, etc. El primer elemento es siempre un
+    resumen honesto de en qué se basa la recomendación (ver
+    _construir_resumen) -- incluido el caso en que no hay ninguna
+    coincidencia concreta y la recomendación depende solo de la
+    similitud semántica.
     """
-    motivos = []
+    motivos_detalle = []
+    señales = []
     texto_norm = _normalizar(texto_licitacion)
-
-    similarity = empresa.get("similarity")
-    if similarity is not None:
-        pct = round(similarity * 100, 1)
-        if similarity >= 0.35:
-            nivel = "muy alta"
-        elif similarity >= 0.25:
-            nivel = "alta"
-        elif similarity >= 0.18:
-            nivel = "media"
-        else:
-            nivel = "orientativa"
-        motivos.append(f"Afinidad semántica {nivel} con el objeto de la licitación ({pct}%).")
 
     proyectos_coincidentes = [
         p for p in (empresa.get("proyectos_tipo") or [])
         if p and _hay_solapamiento(p, texto_licitacion, minimo=1)
     ]
     if proyectos_coincidentes:
-        motivos.append(
-            "Coincide con proyectos tipo ya realizados por la empresa: "
+        motivos_detalle.append(
+            "Ha ejecutado proyectos del mismo tipo que el objeto de esta licitación: "
             + "; ".join(proyectos_coincidentes[:3]) + "."
         )
+        señales.append("proyectos tipo ya realizados")
 
-    if empresa.get("descripcion_actividad") and _hay_solapamiento(empresa["descripcion_actividad"], texto_licitacion, minimo=2):
-        motivos.append("La actividad habitual de la empresa coincide con el objeto de la licitación.")
+    if empresa.get("descripcion_actividad"):
+        comunes = _terminos_comunes(empresa["descripcion_actividad"], texto_licitacion)
+        if comunes:
+            motivos_detalle.append(
+                f"Su descripción de actividad («{_recortar(empresa['descripcion_actividad'])}») "
+                f"comparte términos concretos con la licitación: {', '.join(comunes)}."
+            )
+            señales.append("descripción de actividad")
 
-    if empresa.get("preferencias_licitaciones") and _hay_solapamiento(empresa["preferencias_licitaciones"], texto_licitacion, minimo=1):
-        motivos.append(f"Encaja con las preferencias de licitación declaradas por la empresa: {empresa['preferencias_licitaciones']}.")
+    if empresa.get("preferencias_licitaciones"):
+        comunes = _terminos_comunes(empresa["preferencias_licitaciones"], texto_licitacion)
+        if comunes:
+            motivos_detalle.append(
+                f"Sus preferencias de licitación declaradas («{empresa['preferencias_licitaciones']}») "
+                f"coinciden en: {', '.join(comunes)}."
+            )
+            señales.append("preferencias de licitación declaradas")
 
     paises_empresa = set(_normalizar(p) for p in (empresa.get("experiencia_paises") or []))
     paises_interes_empresa = set(_normalizar(p) for p in (empresa.get("paises_interes") or []))
@@ -229,20 +266,25 @@ def explicar_coincidencia(
     if pais_licitacion:
         pais_norm = _normalizar(pais_licitacion)
         if pais_norm in paises_empresa:
-            motivos.append(f"Experiencia previa acreditada en {pais_licitacion}.")
+            motivos_detalle.append(f"Experiencia previa acreditada en {pais_licitacion}.")
+            señales.append("ubicación geográfica")
         elif pais_norm in paises_interes_empresa:
-            motivos.append(f"La empresa tiene interés declarado en {pais_licitacion}.")
+            motivos_detalle.append(f"La empresa tiene interés declarado en {pais_licitacion}.")
+            señales.append("ubicación geográfica")
         elif any(pais_norm in z or z in pais_norm for z in zonas_empresa):
-            motivos.append(f"La empresa tiene interés en la zona geográfica de {pais_licitacion}.")
+            motivos_detalle.append(f"La empresa tiene interés en la zona geográfica de {pais_licitacion}.")
+            señales.append("ubicación geográfica")
         elif ambito_geografico_norm and pais_norm in ambito_geografico_norm:
-            motivos.append(f"El ámbito geográfico de operación de la empresa menciona {pais_licitacion}.")
+            motivos_detalle.append(f"El ámbito geográfico de operación de la empresa menciona {pais_licitacion}.")
+            señales.append("ubicación geográfica")
 
     palabras_coincidentes = [
         palabra for palabra in (empresa.get("palabras_clave") or [])
         if palabra and _normalizar(palabra) in texto_norm
     ]
     if palabras_coincidentes:
-        motivos.append("Palabras clave de la empresa presentes en la licitación: " + ", ".join(palabras_coincidentes) + ".")
+        motivos_detalle.append("Palabras clave de la empresa presentes en la licitación: " + ", ".join(palabras_coincidentes) + ".")
+        señales.append("palabras clave")
 
     for referencia in (referencias_empresa or []):
         titulo_referencia = referencia.get("titulo")
@@ -254,59 +296,49 @@ def explicar_coincidencia(
                 sufijo = " (no adjudicada)"
             else:
                 sufijo = ""
-            titulo_recortado = titulo_referencia if len(titulo_referencia) <= 100 else titulo_referencia[:100] + "…"
-            motivos.append(f"Ya se presentó a una licitación similar: \"{titulo_recortado}\"{sufijo}.")
+            motivos_detalle.append(f"Ya se presentó a una licitación similar: \"{_recortar(titulo_referencia, 100)}\"{sufijo}.")
+            señales.append("historial de licitaciones similares")
             break  # una sola referencia antigua basta como señal; evita repetir el mismo motivo
 
     if empresa.get("sector"):
         detalle_sector = empresa["sector"]
-        if empresa.get("subsector"):
+        # Evita el "Sector X (Sector X)" cuando subsector y sector son literalmente el mismo texto.
+        if empresa.get("subsector") and _normalizar(empresa["subsector"]) != _normalizar(empresa["sector"]):
             detalle_sector += f" ({empresa['subsector']})"
-        motivos.append(f"Sector de actividad: {detalle_sector}.")
+        # El sector solo cuenta como coincidencia CONCRETA si de verdad solapa con
+        # el texto de la licitación -- si no, se muestra como mero dato de
+        # contexto, sin sumar al resumen inicial de "coincidencias concretas"
+        # (antes se contaba siempre, aunque no tuviera relación real).
+        if _hay_solapamiento(empresa["sector"], texto_licitacion, minimo=1):
+            motivos_detalle.append(f"Su sector de actividad ({detalle_sector}) coincide temáticamente con el objeto de la licitación.")
+            señales.append("sector de actividad")
+        else:
+            motivos_detalle.append(f"Sector de actividad de la empresa: {detalle_sector}.")
 
-    if not motivos:
-        motivos.append("Coincidencia detectada por similitud semántica general del perfil de la empresa.")
-
-    return motivos
+    resumen = _construir_resumen(empresa.get("similarity"), señales)
+    return [resumen] + motivos_detalle
 
 
-def construir_comparacion_lugares(pais_licitacion: str, empresa: dict) -> pd.DataFrame:
+def obtener_lugares_empresa(empresa: dict) -> list:
     """
-    Tabla visual: lugar de la licitación frente a los 4 campos
-    geográficos de la empresa ya definidos en el Directorio de Empresas
-    (Experiencia países, Zona geográfica de interés, Países de interés,
-    Ámbito geográfico) -- para ver de un vistazo si conviene por
-    ubicación, no solo por afinidad semántica.
+    Los 4 campos geográficos de la empresa, ya definidos en el Directorio
+    de Empresas (Experiencia países, Zona geográfica de interés, Países
+    de interés, Ámbito geográfico), como pares (etiqueta, texto) listos
+    para mostrarse en texto plano -- sin tabla ni columna de
+    coincidencia: esa valoración ya la dan los bullets de
+    explicar_coincidencia() de forma más específica.
     """
-    pais_norm = _normalizar(pais_licitacion) if pais_licitacion else ""
-
-    def _fila(etiqueta, valor):
+    def _texto(valor):
         if isinstance(valor, list):
-            texto = ", ".join(v for v in valor if v)
-            valores_norm = [_normalizar(v) for v in valor if v]
-            coincide = bool(pais_norm) and any(
-                pais_norm == v or pais_norm in v or v in pais_norm for v in valores_norm
-            )
-        else:
-            texto = valor or ""
-            coincide = bool(pais_norm) and bool(texto) and pais_norm in _normalizar(texto)
+            return ", ".join(v for v in valor if v) or "No especificado"
+        return valor or "No especificado"
 
-        if not texto:
-            estado = "Sin datos"
-        elif coincide:
-            estado = "Coincide"
-        else:
-            estado = "No coincide"
-
-        return {"Campo de la empresa": etiqueta, "Valor declarado": texto or "No especificado", "Respecto al lugar de la licitación": estado}
-
-    filas = [
-        _fila("Experiencia países", empresa.get("experiencia_paises") or []),
-        _fila("Zona geográfica de interés", empresa.get("zona_geografica_interes") or []),
-        _fila("Países de interés", empresa.get("paises_interes") or []),
-        _fila("Ámbito geográfico", empresa.get("ambito_geografico")),
+    return [
+        ("Experiencia países", _texto(empresa.get("experiencia_paises"))),
+        ("Zona geográfica de interés", _texto(empresa.get("zona_geografica_interes"))),
+        ("Países de interés", _texto(empresa.get("paises_interes"))),
+        ("Ámbito geográfico", _texto(empresa.get("ambito_geografico"))),
     ]
-    return pd.DataFrame(filas)
 
 
 def formatear_tabla_coincidencias(coincidencias: list) -> pd.DataFrame:
@@ -442,8 +474,5 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
                             st.markdown(f"- {motivo}")
 
                         st.caption(f"Lugar de la licitación: {pais_licitacion or 'No especificado'}")
-                        st.dataframe(
-                            construir_comparacion_lugares(pais_licitacion, empresa),
-                            hide_index=True,
-                            use_container_width=True,
-                        )
+                        for etiqueta, valor in obtener_lugares_empresa(empresa):
+                            st.caption(f"{etiqueta}: {valor}")
