@@ -7,73 +7,9 @@ Sincroniza avisos de licitacion del Banco Interamericano de Desarrollo
 con EXACTAMENTE los mismos campos que ya se usan para la fuente AfDB
 (ver ingest/ingesta_afdb.py) -- ninguna columna nueva en el esquema.
 
-FUENTE REAL: NO es scraping del Power BI
--------------------------------------------
-La pagina que se referencio (.../avisos-de-adquisiciones) muestra los
-avisos dentro de un informe de Power BI incrustado: un hueco que se
-rellena con JavaScript en el navegador ya en marcha, así que no hay
-ningun dato en el HTML que se pueda scrapear (se comprobo expresamente:
-la pagina descargada no contiene ni un solo aviso, solo el marcado
-alrededor de donde se monta el informe).
-
-Pero el BID publica esos MISMOS datos -- el propio "Procurement Notices"
-que alimenta ese informe -- como conjunto de datos abiertos en su portal
-CKAN (data.iadb.org), bajo licencia Creative Commons Attribution 4.0:
-
-    https://data.iadb.org/dataset/project-procurement-bidding-notices-and-notification-of-contract-awards
-
-CKAN expone ese recurso mediante una API REST publica y SIN CLAVE
-(keyless), pensada precisamente para este uso -- consumo programatico de
-terceros, no solo descarga manual de un CSV. La propia pagina del
-dataset enlaza esta URL bajo una columna literalmente llamada "API", y
-ya existen herramientas de terceros publicadas que la consumen de la
-misma forma (p. ej. github.com/pipeworx-io/mcp-idb). El robots.txt de
-data.iadb.org bloquea /api/ para RASTREADORES DE BUSQUEDA (evita que
-Google indexe respuestas JSON en bruto) -- no es una prohibicion de uso
-programatico legitimo, que es exactamente para lo que existe esta API.
-
-    Resource ID usado ("Procurement Notices"): 856aabfd-2c6a-48fb-a8b8-19f3ff443618
-    Endpoint:  https://data.iadb.org/api/3/action/datastore_search
-
-DESCUBRIMIENTO DE COLUMNAS EN TIEMPO DE EJECUCION -- LEE ESTO
-------------------------------------------------------------------
-No ha sido posible inspeccionar en vivo el JSON real que devuelve esta
-API durante el desarrollo de este script (las herramientas de
-navegacion usadas para investigarla no pudieron completar la llamada).
-Por eso este script NO da por hecho los nombres exactos de las columnas
-de la tabla remota. En cada ejecucion:
-  1. Pide un registro de muestra y lee `result.fields`, un metadato que
-     CKAN SIEMPRE devuelve junto a los datos: la lista real de columnas
-     de la tabla, tal cual esta hoy.
-  2. Empareja cada columna real con el concepto que hace falta (titulo,
-     descripcion, pais, fecha de publicacion, fecha de cierre, enlace,
-     tipo de aviso, organismo, referencia) por coincidencia de nombre
-     (ver CANDIDATOS_POR_CONCEPTO), y lo deja bien visible en los logs
-     de cada ejecucion.
-  3. Si un concepto importante (sobre todo "titulo") no se ha podido
-     emparejar, avisa con claridad y no sube nada, en vez de fallar en
-     silencio o inventar datos.
-
-**Antes de dejarlo en el cron automatico**: ejecuta este script una vez
-a mano (workflow_dispatch) y revisa el log "Emparejamiento concepto ->
-columna real". Si alguna columna se ha emparejado mal (o no se ha
-emparejado), corrigelo a mano en MAPEO_CONCEPTOS_FORZADO -- tiene
-prioridad sobre el emparejamiento automatico.
-
-Otros dos hallazgos documentados por terceros que ya consumen esta
-misma API (ver enlace de mcp-idb arriba), aplicados aqui de forma
-defensiva:
-  - La columna "type" (tipo de aviso) trae espacios en blanco finales
-    inconsistentes ("AWARD", "AWARD ", "AWARD    " son 3 valores
-    distintos en el dato en crudo) -- por eso TODOS los valores de
-    texto se limpian con strip() antes de guardarlos.
-  - Las URLs de descarga directa (/files/download/<id>) estan detras de
-    un reto anti-bot de AWS WAF -- este script nunca las usa; todo pasa
-    por la API de Datastore.
-
-Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
-Ejecucion local:     python ingesta_bid.py
-Ejecucion programada: ver .github/workflows/sincronizar_bid.yml
+FUENTE REAL: API REST de CKAN (data.iadb.org)
+Resource ID ("Procurement Notices"): 856aabfd-2c6a-48fb-a8b8-19f3ff443618
+Endpoint:  https://data.iadb.org/api/3/action/datastore_search
 """
 import re
 import time
@@ -90,17 +26,14 @@ from common import (
 
 BASE_URL_CKAN = "https://data.iadb.org"
 ENDPOINT_DATASTORE_SEARCH = BASE_URL_CKAN + "/api/3/action/datastore_search"
-RESOURCE_ID = "856aabfd-2c6a-48fb-a8b8-19f3ff443618"  # "Procurement Notices"
+RESOURCE_ID = "856aabfd-2c6a-48fb-a8b8-19f3ff443618"
 
-# URL a la que se manda al usuario cuando un aviso no trae su propio
-# enlace directo (ver docstring: no todos los recursos CKAN incluyen una
-# columna de URL por registro) -- la pagina humana equivalente.
 URL_FICHA_GENERICA = "https://www.iadb.org/es/como-trabajar-juntos/adquisiciones/adquisiciones-para-proyectos/avisos-de-adquisiciones"
 
 FUENTE = "BID"
-DIAS_ATRAS = 3                       # mismo criterio que AfDB: "ultimos 3 dias"
+DIAS_ATRAS = 3                       # Últimos 3 días
 TAMANO_PAGINA = 200
-MAX_REGISTROS_SEGURIDAD = 5000        # red de seguridad de paginacion
+MAX_REGISTROS_SEGURIDAD = 1000        # Suficiente para barrer los más recientes ordenados
 PAUSA_ENTRE_PAGINAS_SEGUNDOS = 0.4
 TIMEOUT_PETICION = 30
 LOTE_ENVIO_SUPABASE = 15
@@ -109,10 +42,6 @@ CABECERAS = {"User-Agent": "Mozilla/5.0 (compatible; LicitacionesEmpresasBot/1.0
 
 CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "fecha_limite", "tipo_aviso")
 
-# Concepto que necesitamos -> fragmentos de nombre de columna real que lo
-# identificarian (se busca por SUBSTRING sobre el nombre de columna en
-# minusculas, en el orden de la tabla). Ver aviso en el docstring del
-# modulo: esto se resuelve en tiempo de ejecucion, no son nombres fijos.
 CANDIDATOS_POR_CONCEPTO = {
     "referencia": ["notice_id", "noticeid", "reference_no", "reference", "referencia", "notice_no", "notice_number", "id"],
     "titulo": ["title", "titulo", "notice_title", "project_name", "name"],
@@ -139,10 +68,13 @@ MAPEO_CONCEPTOS_FORZADO = {
 
 
 # ------------------------------------------------------------------
-# Llamadas a la API de Datastore (CKAN) -- sin clave, de lectura
+# Llamadas a la API de Datastore (CKAN) con ordenación nativa
 # ------------------------------------------------------------------
-def _consultar_datastore(offset: int = 0, limit: int = 1) -> dict:
+def _consultar_datastore(offset: int = 0, limit: int = 1, sort_field: str = None) -> dict:
     parametros = {"resource_id": RESOURCE_ID, "limit": limit, "offset": offset}
+    if sort_field:
+        parametros["sort"] = f"{sort_field} desc"
+        
     respuesta = requests.get(ENDPOINT_DATASTORE_SEARCH, params=parametros, timeout=TIMEOUT_PETICION, headers=CABECERAS)
     respuesta.raise_for_status()
     cuerpo = respuesta.json()
@@ -217,9 +149,6 @@ def _generar_slug(texto: str) -> str:
     return (slug or "sin-referencia")[:120]
 
 
-# ------------------------------------------------------------------
-# Normalizacion al esquema de `licitaciones_internacionales`
-# ------------------------------------------------------------------
 def construir_registro(registro: dict, mapeo: dict) -> dict:
     titulo = _extraer_valor_plano(registro, mapeo.get("titulo")) or "Sin titulo"
     referencia = _extraer_valor_plano(registro, mapeo.get("referencia"))
@@ -246,9 +175,6 @@ def construir_registro(registro: dict, mapeo: dict) -> dict:
     }
 
 
-# ------------------------------------------------------------------
-# Decidir que subir
-# ------------------------------------------------------------------
 def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> list:
     a_subir = []
     for datos in normalizados:
@@ -297,14 +223,12 @@ def ejecutar_sincronizacion():
 
     try:
         resultado_inicial = _consultar_datastore(offset=0, limit=1)
-        total_registros_tabla = resultado_inicial.get("total", 0)
         columnas_reales = [campo["id"] for campo in resultado_inicial.get("fields", []) if campo["id"] != "_id"]
     except Exception as error:
         print(f"Error consultando la API de datos abiertos del BID: {error}", flush=True)
         return
 
-    print(f"\nTotal registros en la tabla remota del BID: {total_registros_tabla}", flush=True)
-    print(f"Columnas reales detectadas en el recurso ({len(columnas_reales)}): {columnas_reales}", flush=True)
+    print(f"\nColumnas reales detectadas en el recurso ({len(columnas_reales)}): {columnas_reales}", flush=True)
 
     mapeo = emparejar_columnas(columnas_reales)
     print("\nEmparejamiento concepto -> columna real:", flush=True)
@@ -313,31 +237,21 @@ def ejecutar_sincronizacion():
 
     if "titulo" not in mapeo:
         print(
-            "\nNo se ha podido identificar la columna de titulo entre las columnas reales. "
-            "Revisa CANDIDATOS_POR_CONCEPTO/MAPEO_CONCEPTOS_FORZADO en este script con los "
-            "nombres reales de arriba. Se aborta esta sincronizacion sin subir nada.",
+            "\nNo se ha podido identificar la columna de titulo. Abortando.",
             flush=True,
         )
         return
 
     columna_fecha_orden = mapeo.get("fecha_publicacion") or mapeo.get("fecha_limite")
-    if not columna_fecha_orden:
-        print(
-            "\nAviso: no se ha identificado ninguna columna de fecha -- no se puede aplicar la "
-            f"ventana de {DIAS_ATRAS} dias.",
-            flush=True,
-        )
 
-    # ---------------- Paginacion desde el FINAL (registros más recientes) ----------------
-    # Como CKAN devuelve por defecto los registros antiguos primero (_id ascendente),
-    # calculamos el offset para empezar a descargar desde los más recientes al final de la tabla.
-    offset = max(0, total_registros_tabla - MAX_REGISTROS_SEGURIDAD) if total_registros_tabla > MAX_REGISTROS_SEGURIDAD else 0
+    # ---------------- Descarga ordenada desde la API ----------------
     candidatos = []
+    offset = 0
 
-    print(f"\nDescargando registros recientes desde el offset {offset} hasta el final...", flush=True)
-    while offset < total_registros_tabla and len(candidatos) < MAX_REGISTROS_SEGURIDAD:
+    print(f"\nDescargando registros ordenados por '{columna_fecha_orden}' (descendente)...", flush=True)
+    while offset < MAX_REGISTROS_SEGURIDAD:
         try:
-            resultado = _consultar_datastore(offset=offset, limit=TAMANO_PAGINA)
+            resultado = _consultar_datastore(offset=offset, limit=TAMANO_PAGINA, sort_field=columna_fecha_orden)
         except Exception as error:
             print(f"    Error consultando la pagina en offset={offset}: {error}", flush=True)
             break
@@ -347,6 +261,10 @@ def ejecutar_sincronizacion():
             break
 
         candidatos.extend(registros)
+        
+        if len(registros) < TAMANO_PAGINA:
+            break
+
         offset += TAMANO_PAGINA
         time.sleep(PAUSA_ENTRE_PAGINAS_SEGUNDOS)
 
@@ -355,14 +273,8 @@ def ejecutar_sincronizacion():
     if not candidatos:
         return
 
-    # Ordenar en memoria por fecha descendente y filtrar por la ventana de días
+    # Filtrar estrictamente por la ventana de días requerida
     if columna_fecha_orden:
-        candidatos = sorted(
-            candidatos,
-            key=lambda x: str(_parsear_fecha(x.get(columna_fecha_orden)) or date.min),
-            reverse=True
-        )
-        
         candidatos_en_ventana = []
         for registro in candidatos:
             fecha_referencia = _parsear_fecha(registro.get(columna_fecha_orden))
@@ -373,6 +285,7 @@ def ejecutar_sincronizacion():
     print(f"\nAvisos candidatos en la ventana ({desde} a {hoy}): {len(candidatos)}", flush=True)
 
     if not candidatos:
+        print("No hay avisos nuevos dentro de la ventana de fechas.", flush=True)
         return
 
     normalizados = [construir_registro(registro, mapeo) for registro in candidatos]
