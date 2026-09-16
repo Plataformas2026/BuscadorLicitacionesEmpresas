@@ -143,10 +143,9 @@ MAPEO_CONCEPTOS_FORZADO = {
 # ------------------------------------------------------------------
 # Llamadas a la API de Datastore (CKAN) -- sin clave, de lectura
 # ------------------------------------------------------------------
-def _consultar_datastore(offset: int = 0, limit: int = 1, sort: str = None) -> dict:
+def _consultar_datastore(offset: int = 0, limit: int = 1) -> dict:
+    # Eliminamos el parámetro 'sort' de la URL porque la API del BID da error 409
     parametros = {"resource_id": RESOURCE_ID, "limit": limit, "offset": offset}
-    if sort:
-        parametros["sort"] = sort
     respuesta = requests.get(ENDPOINT_DATASTORE_SEARCH, params=parametros, timeout=TIMEOUT_PETICION, headers=CABECERAS)
     respuesta.raise_for_status()
     cuerpo = respuesta.json()
@@ -323,16 +322,14 @@ def ejecutar_sincronizacion():
             "por fecha; conviene revisar el emparejamiento antes de confiar en el cron automatico.",
             flush=True,
         )
-
-    # ---------------- Paginacion con parada temprana (mismo patron que AfDB) ----------------
+    # ---------------- Paginacion segura sin usar 'sort' en la API ----------------
     candidatos = []
     offset = 0
-    detener = False
 
-    while offset < MAX_REGISTROS_SEGURIDAD and not detener:
-        orden = f"{columna_fecha_orden} desc" if columna_fecha_orden else None
+    print("\nDescargando registros de la API del BID...", flush=True)
+    while offset < MAX_REGISTROS_SEGURIDAD:
         try:
-            resultado = _consultar_datastore(offset=offset, limit=TAMANO_PAGINA, sort=orden)
+            resultado = _consultar_datastore(offset=offset, limit=TAMANO_PAGINA)
         except Exception as error:
             print(f"    Error consultando la pagina en offset={offset}: {error}", flush=True)
             break
@@ -341,16 +338,41 @@ def ejecutar_sincronizacion():
         if not registros:
             break
 
-        for registro in registros:
-            if columna_fecha_orden:
-                fecha_referencia = _parsear_fecha(registro.get(columna_fecha_orden))
-                if fecha_referencia and fecha_referencia < desde:
-                    detener = True
-                    continue
-            candidatos.append(registro)
+        candidatos.extend(registros)
+        
+        # Si traemos menos registros que el tamaño de página, ya hemos terminado de barrer la tabla
+        if len(registros) < TAMANO_PAGINA:
+            break
 
         offset += TAMANO_PAGINA
         time.sleep(PAUSA_ENTRE_PAGINAS_SEGUNDOS)
+
+    print(f"\nTotal registros descargados: {len(candidatos)}", flush=True)
+
+    if not candidatos:
+        return
+
+    # Si tenemos columna de fecha, ordenamos en Python y filtramos por la ventana de días
+    if columna_fecha_orden:
+        # Ordenar en memoria de Python por fecha de publicación descendente
+        candidatos = sorted(
+            candidatos,
+            key=lambda x: str(x.get(columna_fecha_orden) or ""),
+            reverse=True
+        )
+        
+        # Filtrar por la ventana de días establecida (desde .. hoy)
+        candidatos_en_ventana = []
+        for registro in candidatos:
+            fecha_referencia = _parsear_fecha(registro.get(columna_fecha_orden))
+            if fecha_referencia and fecha_referencia >= desde:
+                candidatos_en_ventana.append(registro)
+        candidatos = candidatos_en_ventana
+
+    print(f"Avisos candidatos en la ventana ({desde} a {hoy}): {len(candidatos)}", flush=True)
+
+    if not candidatos:
+        return
 
         if not columna_fecha_orden:
             break  # sin columna de fecha no se puede acotar la ventana: una sola pagina y fin
