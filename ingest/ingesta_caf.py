@@ -78,6 +78,10 @@ from common import (
     obtener_registros_existentes,
     subir_en_lotes,
 )
+import urllib3
+
+# Desactivar las advertencias de seguridad por certificado no verificado
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BASE_URL = "https://www.caf.com"
 LISTADO_URL = BASE_URL + "/es/trabaja-con-nosotros/convocatorias/"
@@ -165,8 +169,9 @@ def _parsear_rango_fechas_es(texto_inicio: str, texto_fin: str):
 # ------------------------------------------------------------------
 def obtener_pagina(pagina: int) -> str:
     print(f"--> Descargando pagina {pagina} del listado de convocatorias CAF...", flush=True)
+    # Se añade verify=False para evitar el error de certificado SSL
     respuesta = requests.get(
-        LISTADO_URL, params={"page": pagina}, timeout=TIMEOUT_PETICION, headers=CABECERAS
+        LISTADO_URL, params={"page": pagina}, timeout=TIMEOUT_PETICION, headers=CABECERAS, verify=False
     )
     print(f"    HTTP: {respuesta.status_code}", flush=True)
     respuesta.raise_for_status()
@@ -242,7 +247,8 @@ def extraer_descripcion_detalle(soup: BeautifulSoup):
 
 def obtener_detalle_convocatoria(url: str) -> dict:
     try:
-        respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=CABECERAS)
+        # Se añade verify=False aquí también
+        respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=CABECERAS, verify=False)
         respuesta.raise_for_status()
     except Exception as error:
         print(f"      Error descargando la ficha: {error}", flush=True)
