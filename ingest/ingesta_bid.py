@@ -135,7 +135,7 @@ MAPEO_CONCEPTOS_FORZADO = {
     "fecha_publicacion": ["publicationdate"],
     "fecha_limite": ["deadline"],
     "url": ["proyecturl"],
-    "tipo": ["type""],
+    "tipo": ["type"],
     "organismo": ["projectname"],
 }
 
