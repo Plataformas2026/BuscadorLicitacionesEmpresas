@@ -78,10 +78,32 @@ def listar_todas(supabase: Client) -> list:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def obtener_lugares_disponibles(_supabase: Client) -> list:
-    """Opciones del filtro "Lugar", calculadas a partir de los datos reales (columna `pais`)."""
-    respuesta = _supabase.table("licitaciones_internacionales").select("pais").execute()
-    lugares = {f["pais"] for f in (respuesta.data or []) if f.get("pais")}
-    return sorted(lugares)
+    """Opciones del filtro "Lugar", calculadas a partir de las columnas `pais` y `paises` (text[]).
+    Devuelve una lista ordenada de países únicos.
+    """
+    respuesta = (
+        _supabase.table("licitaciones_internacionales")
+        .select("pais, paises")
+        .execute()
+    )
+
+    lugares = set()
+
+    for fila in respuesta.data or []:
+        # 1. Procesar la columna 'pais' (texto)
+        pais = fila.get("pais")
+        if pais and isinstance(pais, str) and pais.strip():
+            lugares.add(pais.strip())
+
+        # 2. Procesar la columna 'paises' (array de texto: text[])
+        lista_paises = fila.get("paises")
+        if lista_paises and isinstance(lista_paises, list):
+            for p in lista_paises:
+                if p and isinstance(p, str) and p.strip():
+                    lugares.add(p.strip())
+
+    # Devuelve una lista ordenada alfabéticamente de los países únicos
+    return sorted(list(lugares))
 
 
 def marcar_visto(supabase: Client, codigo_unico: str, valor: bool):
