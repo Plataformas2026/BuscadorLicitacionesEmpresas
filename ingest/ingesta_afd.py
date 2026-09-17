@@ -171,33 +171,32 @@ def extraer_avisos_de_pagina(html: str):
 
 def extraer_descripcion_y_categoria(soup: BeautifulSoup):
     """
-    Extrae la descripción de 'Eligibilité des Soumissionaires' 
-    y la categoría limpia (ej. 'Services de conseil en recherche') 
-    buscando el bloque posterior a Contacto que comienza con números.
+    Extrae la descripción directamente del contenido interno del <td valign="top" align="left"> 
+    adyacente a 'Eligibilité des Soumissionaires' y la categoría limpia basada en el código CPV.
     """
     descripcion = None
     categoria = None
 
-    # 1. Extracción de Descripción exacta desde la fila de la tabla
-    for fila in soup.find_all("tr"):
-        celdas = fila.find_all("td")
-        if len(celdas) >= 2:
-            texto_etiqueta = celdas[0].get_text(strip=True)
-            if "eligibilit" in texto_etiqueta.lower():
-                descripcion = celdas[1].get_text(separator="\n", strip=True)
+    # 1. Extracción robusta de la Descripción
+    for td in soup.find_all("td"):
+        texto_td = td.get_text(strip=True)
+        # Buscamos la celda que contiene la etiqueta de elegibilidad
+        if "eligibilit" in texto_td.lower():
+            # El contenido buscado está exactamente en el siguiente hermano <td>
+            siguiente_td = td.find_next_sibling("td")
+            if siguiente_td:
+                descripcion = siguiente_td.get_text(separator="\n", strip=True)
                 break
 
-    # 2. Extracción de Categoría (Buscando un enlace o texto que comience con dígitos y un guion)
-    # Recorremos todos los enlaces del documento para ver si alguno coincide con el patrón CPV
+    # 2. Extracción de Categoría (Buscando enlace que comience con dígitos y guion)
     for a in soup.find_all("a", href=True):
         texto_enlace = a.get_text(separator=" ", strip=True)
-        # Patrón: número de varios dígitos seguido de guion y texto (ej. 73210000 - Servicios...)
         match_cpv = re.match(r"^\d{6,10}\s*-\s*(.+)$", texto_enlace)
         if match_cpv:
             categoria = match_cpv.group(1).strip()
             break
 
-    # Fallback alternativo si el enlace no sigue exactamente el patrón anterior pero está en la sección Missions
+    # Fallback si no se encontró en un enlace directo
     if not categoria:
         h3_elements = soup.find_all("h3")
         for h3 in h3_elements:
@@ -207,7 +206,6 @@ def extraer_descripcion_y_categoria(soup: BeautifulSoup):
                     siguiente_fila = siguiente_tr.find_next_sibling("tr")
                     if siguiente_fila:
                         texto_celda = siguiente_fila.get_text(separator=" ", strip=True)
-                        # Limpiamos el código numérico inicial si lo tiene
                         texto_limpio = re.sub(r"^\d{6,10}\s*-\s*", "", texto_celda).strip()
                         if texto_limpio:
                             categoria = texto_limpio
@@ -433,7 +431,7 @@ def ejecutar_sincronizacion():
 
     subidas = subir_en_lotes(
         supabase,
-        "licitouncements_internacionales" if False else "licitaciones_internacionales",
+        "licitaciones_internacionales",
         "codigo_unico",
         lote_final,
         tamano_lote=LOTE_ENVIO_SUPABASE,
