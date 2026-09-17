@@ -54,7 +54,7 @@ BASE_URL = "https://ugpe.gov.cv"
 LISTADO_URL = BASE_URL + "/en/concursos"
 
 FUENTE = "UGPE"
-TABLA_AUXILIAR = "ugpe_concursos_activos"
+TABLA_AUXILIAR = "ugpe_convocatorias_activas"
 PAIS_UGPE = "Cabo Verde"
 
 MAX_PAGINAS_SEGURIDAD = 15
