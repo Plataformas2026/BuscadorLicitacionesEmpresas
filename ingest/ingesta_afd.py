@@ -1,22 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-ingesta_afd_dgmarket.py
--------------------------
+ingesta_afd.py
+----------------
 Sincroniza avisos de contratación de la Agencia Francesa de Desarrollo (AFD)
-desde su portal en dgMarket directamente contra la tabla `licitaciones_internacionales` de Supabase.
-
-Estructura de la fuente (dgMarket AFD):
-    https://afd.dgmarket.com/tender/search.do?offset=N
+a través de dgMarket directamente contra la tabla `licitaciones_internacionales` de Supabase.
 
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
-Ejecución local:     python ingesta_afd_dgmarket.py
-Ejecución programada: ver .github/workflows/sincronizar_afd.yml
+Ejecución local:      python ingesta_afd.py
 """
 
 import re
 import time
 from datetime import date, datetime, timedelta
-from urllib.parse import unquote
 
 import requests
 from bs4 import BeautifulSoup
@@ -33,8 +28,8 @@ from common import (
 # CONFIGURACION
 # ============================================================
 
-BASE_URL = "https://tenders-afd.dgmarket.com"
-LISTADO_URL = BASE_URL + "/" 
+BASE_URL = "https://afd.dgmarket.com"
+LISTADO_URL = BASE_URL + "/tenders/brandedNoticeList.do"
 
 FUENTE = "AFD"
 
@@ -42,7 +37,7 @@ DIAS_ATRAS = 3
 
 MAX_PAGINAS_SEGURIDAD = 60
 
-PAUSA_ENTRE_PAGINAS_SEGUNDOS = 0.8
+PAUSA_ENTRE_PAGINAS_SEGUNDOS = 0.5
 PAUSA_ENTRE_DETALLES_SEGUNDOS = 0.4
 
 TIMEOUT_PETICION = 30
@@ -50,21 +45,13 @@ TIMEOUT_PETICION = 30
 LOTE_ENVIO_SUPABASE = 15
 
 CABECERAS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-    "Referer": "https://tenders-afd.dgmarket.com/"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-
-# ============================================================
-# PATRONES
-# ============================================================
-
-# Formato de fecha en dgMarket: "Sept 17, 2026" o similares
-PATRON_FECHA_LISTADO = re.compile(
-    r"[A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}"
-)
+MESES_INGLES = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+    "Jul": 7, "Aug": 8, "Sep": 9, "Sept": 9, "Oct": 10, "Nov": 11, "Dec": 12
+}
 
 
 # ============================================================
@@ -75,7 +62,6 @@ CAMPOS_COMPARABLES = (
     "titulo",
     "descripcion",
     "pais",
-    "categoria",
     "url_documento",
     "fecha_limite",
 )
@@ -87,24 +73,17 @@ CAMPOS_COMPARABLES = (
 
 def obtener_pagina(offset: int) -> str:
     print(
-        f"--> Descargando offset {offset} del listado de AFD (dgMarket)...",
+        f"--> Descargando listado de AFD (offset {offset})...",
         flush=True
     )
-
     respuesta = requests.get(
         LISTADO_URL,
         params={"offset": offset},
         timeout=TIMEOUT_PETICION,
         headers=CABECERAS,
     )
-
-    print(
-        f"    HTTP: {respuesta.status_code}",
-        flush=True
-    )
-
+    print(f"    HTTP: {respuesta.status_code}", flush=True)
     respuesta.raise_for_status()
-
     return respuesta.text
 
 
@@ -115,16 +94,22 @@ def obtener_pagina(offset: int) -> str:
 def _parsear_fecha_dgmarket(texto_fecha: str):
     if not texto_fecha:
         return None
+    try:
+        limpio = texto_fecha.replace(",", "").strip()
+        partes = limpio.split()
+        if len(partes) == 3:
+            mes_str, dia_str, anio_str = partes[0], partes[1], partes[2]
+            mes = MESES_INGLES.get(mes_str.capitalize())
+            if mes:
+                return date(int(anio_str), mes, int(dia_str))
+    except Exception:
+        pass
     
-    texto_limpio = texto_fecha.strip()
-    formatos = ["%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d-%b-%Y"]
-    
-    for fmt in formatos:
+    for fmt in ["%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d-%b-%Y"]:
         try:
-            return datetime.strptime(texto_limpio, fmt).date()
+            return datetime.strptime(texto_fecha.strip(), fmt).date()
         except ValueError:
             continue
-            
     return None
 
 
@@ -133,62 +118,38 @@ def _parsear_fecha_dgmarket(texto_fecha: str):
 # ============================================================
 
 def extraer_avisos_de_pagina(html: str):
-    """
-    Extrae avisos de la tabla de resultados de dgMarket.
-    Estructura típica:
-    <table id="notice" ...>
-      <tr class="...">
-        <td class="country"> Côte d'Ivoire </td>
-        <td> <a href="/tender/114841109">Título...</a> </td>
-        <td class="published"> Sept 17, 2026 </td>
-        <td class="deadline"> Sept 30, 2026 </td>
-      </tr>
-    </table>
-    """
     soup = BeautifulSoup(html, "html.parser")
     tabla = soup.find("table", id="notice") or soup.find("table", class_="simple")
-    
     if not tabla:
         return []
 
     avisos = []
     vistos = set()
-
     filas = tabla.find("tbody").find_all("tr") if tabla.find("tbody") else tabla.find_all("tr")
 
     for fila in filas:
         try:
-            # 1. País
             td_pais = fila.find("td", class_="country")
             pais = td_pais.get_text(strip=True) if td_pais else None
 
-            # 2. Título y URL oficial
             enlace = fila.find("a", href=True)
             if not enlace:
                 continue
             titulo = enlace.get_text(strip=True)
             href = enlace["href"]
-
             if not titulo or not href:
                 continue
 
             url_oficial = href if href.startswith("http") else BASE_URL + href
-
             if url_oficial in vistos:
                 continue
             vistos.add(url_oficial)
 
-            # 3. Fecha de Publicación
             td_pub = fila.find("td", class_="published")
-            fecha_publicacion = None
-            if td_pub:
-                fecha_publicacion = _parsear_fecha_dgmarket(td_pub.get_text(strip=True))
+            fecha_publicacion = _parsear_fecha_dgmarket(td_pub.get_text(strip=True)) if td_pub else None
 
-            # 4. Fecha Límite
             td_deadline = fila.find("td", class_="deadline")
-            fecha_limite = None
-            if td_deadline:
-                fecha_limite = _parsear_fecha_dgmarket(td_deadline.get_text(strip=True))
+            fecha_limite = _parsear_fecha_dgmarket(td_deadline.get_text(strip=True)) if td_deadline else None
 
             avisos.append({
                 "titulo": titulo,
@@ -197,19 +158,35 @@ def extraer_avisos_de_pagina(html: str):
                 "fecha_limite": fecha_limite,
                 "url_oficial": url_oficial,
             })
-
-        except Exception as e:
-            print(f"    Error procesando fila de dgMarket: {e}", flush=True)
+        except Exception:
             continue
 
     return avisos
 
 
 # ============================================================
-# FICHA DEL AVISO (DETALLE)
+# FICHA DEL AVISO Y DOCUMENTO
 # ============================================================
 
-def extraer_detalle_aviso(url: str) -> dict:
+def extraer_descripcion_detalle(soup: BeautifulSoup):
+    contenedor = soup.find("main") or soup.find(id="content") or soup
+    for parrafo in contenedor.find_all("p"):
+        texto = parrafo.get_text(strip=True)
+        if len(texto) > 80:
+            return texto
+    return None
+
+
+def extraer_url_documento(soup: BeautifulSoup):
+    contenedor = soup.find("main") or soup.find(id="content") or soup
+    for enlace in contenedor.find_all("a", href=True):
+        href = enlace["href"]
+        if href.lower().endswith((".pdf", ".docx", ".doc")):
+            return href if href.startswith("http") else BASE_URL + href
+    return None
+
+
+def obtener_detalle_aviso(url: str) -> dict:
     try:
         respuesta = requests.get(
             url,
@@ -218,63 +195,16 @@ def extraer_detalle_aviso(url: str) -> dict:
         )
         respuesta.raise_for_status()
     except Exception as error:
-        print(
-            f"      Error descargando la ficha: {error}",
-            flush=True
-        )
+        print(f"     Error descargando la ficha: {error}", flush=True)
         return {
             "descripcion": None,
-            "categoria": None,
             "url_documento": None,
         }
 
     soup = BeautifulSoup(respuesta.text, "html.parser")
-
-    # Extracción de la descripción / elegibilidad de los soumissionnaires
-    descripcion = None
-    texto_elegibilidad = None
-    
-    # Buscar bloques de texto relevantes en el detalle de dgMarket
-    for elem in soup.find_all(["p", "div", "td"]):
-        texto = elem.get_text(strip=True)
-        if "Eligibilité des Soumissionaires" in texto or "Eligibility of Bidders" in texto:
-            texto_elegibilidad = texto.replace("Eligibilité des Soumissionaires:", "").replace("Eligibility of Bidders:", "").strip()
-            break
-
-    if not texto_elegibilidad:
-        # Si no encuentra un bloque específico, buscar párrafos descriptivos largos
-        parrafos = []
-        for p in soup.find_all("p"):
-            t = p.get_text(strip=True)
-            if len(t) > 60 and "dgMarket" not in t:
-                parrafos.append(t)
-        if parrafos:
-            descripcion = "\n\n".join(parrafos[:3])
-    else:
-        descripcion = texto_elegibilidad
-
-    # Extracción de categoría (Missions / Sector)
-    categoria = None
-    for tr in soup.find_all("tr"):
-        texto_tr = tr.get_text(separator=" ", strip=True)
-        if "Sector" in texto_tr or "Missions" in texto_tr or "Category" in texto_tr:
-            tds = tr.find_all("td")
-            if len(tds) > 1:
-                categoria = tds[1].get_text(strip=True)
-                break
-
-    # Extracción de URL de documento adjunto si existe
-    url_documento = None
-    for enlace in soup.find_all("a", href=True):
-        href = enlace["href"]
-        if href.lower().endswith((".pdf", ".docx", ".doc", ".zip")):
-            url_documento = href if href.startswith("http") else BASE_URL + href
-            break
-
     return {
-        "descripcion": descripcion,
-        "categoria": categoria,
-        "url_documento": url_documento,
+        "descripcion": extraer_descripcion_detalle(soup),
+        "url_documento": extraer_url_documento(soup),
     }
 
 
@@ -283,21 +213,21 @@ def extraer_detalle_aviso(url: str) -> dict:
 # ============================================================
 
 def construir_registro(aviso: dict) -> dict:
-    match_id = re.search(r"/tender/(\d+)", aviso["url_oficial"])
-    tender_id = match_id.group(1) if match_id else abs(hash(aviso["url_oficial"]))
+    match_slug = re.search(r"/tender/(\d+)", aviso["url_oficial"])
+    slug = match_slug.group(1) if match_slug else aviso["url_oficial"].rstrip("/").split("/")[-1]
 
     fecha_publicacion = aviso.get("fecha_publicacion")
     fecha_limite = aviso.get("fecha_limite")
 
     return {
-        "codigo_unico": f"AFD-{tender_id}",
+        "codigo_unico": f"AFD-{slug}",
         "fuente_origen": FUENTE,
-        "tipo_aviso": "Avis de Marché / Appel d'Offres",
+        "tipo_aviso": "Licitación",
         "titulo": aviso["titulo"],
         "descripcion": aviso.get("descripcion"),
         "pais": aviso.get("pais"),
-        "organismo": "Agence Française de Développement (AFD)",
-        "categoria": aviso.get("categoria"),
+        "organismo": "Agence Française de Développement",
+        "categoria": None,
         "url_oficial": aviso["url_oficial"],
         "url_documento": aviso.get("url_documento"),
         "fecha_publicacion": (
@@ -327,15 +257,12 @@ def preparar_lote_para_subir(
         if datos is None:
             continue
 
-        existente = registros_existentes.get(
-            datos["codigo_unico"]
-        )
+        existente = registros_existentes.get(datos["codigo_unico"])
 
         texto_completo = (
             f"Titulo: {datos['titulo']}\n"
-            f"Descripcion: {datos.get('descripcion') or ''}\n"
-            f"Pais: {datos.get('pais') or 'No especificado'}\n"
-            f"Categoria: {datos.get('categoria') or 'No especificada'}"
+            f"{datos.get('descripcion') or ''}\n"
+            f"Pais: {datos.get('pais') or 'No especificado'}"
         )
 
         if existente is None:
@@ -372,7 +299,7 @@ def ejecutar_sincronizacion():
     desde = hoy - timedelta(days=DIAS_ATRAS)
 
     print("=" * 100, flush=True)
-    print("SINCRONIZACION DE LICITACIONES INTERNACIONALES - AFD (dgMarket)", flush=True)
+    print("SINCRONIZACION DE LICITACIONES INTERNACIONALES - AFD", flush=True)
     print("=" * 100, flush=True)
     print(f"Ventana: {desde} .. {hoy}", flush=True)
     print(f"Fuente: {LISTADO_URL}", flush=True)
@@ -380,33 +307,28 @@ def ejecutar_sincronizacion():
     candidatos = []
     offset = 0
     detener = False
-    incremento_offset = 20  # dgMarket suele paginar de 20 en 20 o similar
+    incremento_offset = 20
 
-    while (
-        offset < (MAX_PAGINAS_SEGURIDAD * incremento_offset)
-        and not detener
-    ):
+    while offset < (MAX_PAGINAS_SEGURIDAD * incremento_offset) and not detener:
         try:
             html = obtener_pagina(offset)
         except Exception as error:
-            print(f"    Error descargando el offset {offset}: {error}", flush=True)
+            print(f"    Error descargando la página con offset {offset}: {error}", flush=True)
             break
 
         avisos = extraer_avisos_de_pagina(html)
-
         if not avisos:
-            print("    No se han reconocido avisos en este offset. Fin del listado.", flush=True)
+            print("    No se encontraron avisos en esta página. Fin.", flush=True)
             break
 
         for aviso in avisos:
             fecha = aviso.get("fecha_publicacion")
-
             if fecha and fecha < desde:
                 print(f"    Llegamos a {fecha}, anterior a {desde}. Fin del escaneo.", flush=True)
                 detener = True
-                continue
-
-            candidatos.append(aviso)
+                break
+            if fecha and fecha >= desde:
+                candidatos.append(aviso)
 
         if detener:
             break
@@ -419,32 +341,24 @@ def ejecutar_sincronizacion():
     if not candidatos:
         return
 
-    print("\nDescargando ficha de cada candidato (detalle, descripción y documentos)...", flush=True)
+    print("\nDescargando ficha de cada candidato (descripción + documento adjunto)...", flush=True)
 
     normalizados = []
-
     for indice, aviso in enumerate(candidatos, start=1):
         print(f"  [{indice}/{len(candidatos)}] {aviso['titulo'][:90]}", flush=True)
 
-        detalle = extraer_detalle_aviso(aviso["url_oficial"])
-
+        detalle = obtener_detalle_aviso(aviso["url_oficial"])
         aviso["descripcion"] = detalle["descripcion"]
-        aviso["categoria"] = detalle["categoria"]
         aviso["url_documento"] = detalle["url_documento"]
 
         registro = construir_registro(aviso)
-
         if registro is not None:
             normalizados.append(registro)
 
         time.sleep(PAUSA_ENTRE_DETALLES_SEGUNDOS)
 
-    # Deduplicar
     normalizados = list(
-        {
-            n["codigo_unico"]: n
-            for n in normalizados
-        }.values()
+        {n["codigo_unico"]: n for n in normalizados}.values()
     )
 
     supabase = obtener_cliente_supabase()
@@ -459,10 +373,7 @@ def ejecutar_sincronizacion():
         claves=[n["codigo_unico"] for n in normalizados],
     )
 
-    lote_final = preparar_lote_para_subir(
-        normalizados,
-        registros_existentes
-    )
+    lote_final = preparar_lote_para_subir(normalizados, registros_existentes)
 
     if not lote_final:
         print("No hay avisos nuevos ni cambios que sincronizar.", flush=True)
