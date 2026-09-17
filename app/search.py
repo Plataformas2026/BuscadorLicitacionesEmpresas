@@ -320,7 +320,7 @@ def _vista_guardados(supabase: Client):
 
 def render_tab1(supabase: Client, encoder: SentenceTransformer):
     st.subheader("Buscador de Licitaciones")
-    st.caption("Fuente activa en esta primera versión: Banco Africano de Desarrollo (AfDB).")
+    # st.caption("Fuente activa en esta primera versión: Banco Africano de Desarrollo (AfDB).")
 
     vista = st.radio(
         "Vista",
