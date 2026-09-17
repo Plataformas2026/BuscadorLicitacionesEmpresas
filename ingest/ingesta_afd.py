@@ -2,7 +2,7 @@
 """
 ingesta_afd.py
 ----------------
-Sincroniza avisos de contratación de la Agencia Francesa de Desarrollo (AFD)
+Sincroniza avisos de contratación de la Agencia Française de Développement (AFD)
 a través de dgMarket directamente contra la tabla `licitaciones_internacionales` de Supabase.
 
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
@@ -62,6 +62,7 @@ CAMPOS_COMPARABLES = (
     "titulo",
     "descripcion",
     "pais",
+    "categoria",
     "url_documento",
     "fecha_limite",
 )
@@ -168,13 +169,62 @@ def extraer_avisos_de_pagina(html: str):
 # FICHA DEL AVISO Y DOCUMENTO
 # ============================================================
 
-def extraer_descripcion_detalle(soup: BeautifulSoup):
-    contenedor = soup.find("main") or soup.find(id="content") or soup
-    for parrafo in contenedor.find_all("p"):
-        texto = parrafo.get_text(strip=True)
-        if len(texto) > 80:
-            return texto
-    return None
+def extraer_descripcion_y_categoria(soup: BeautifulSoup):
+    """
+    Extrae la descripción desde la fila 'Eligibilité des Soumissionaires' 
+    y la categoría desde la sección 'Missions'.
+    """
+    descripcion = None
+    categoria = None
+
+    # 1. Extracción de la descripción exacta a partir de "Eligibilité des Soumissionaires"
+    for fila in soup.find_all("tr"):
+        celdas = fila.find_all("td")
+        if len(celdas) >= 2:
+            texto_etiqueta = celdas[0].get_text(strip=True)
+            if "eligibilit" in texto_etiqueta.lower():
+                # Obtenemos el texto conservando los saltos de línea internos (<br>)
+                descripcion = celdas[1].get_text(separator="\n", strip=True)
+                break
+
+    # Si no se encontró por la etiqueta exacta, buscamos en el texto general del bloque principal
+    if not descripcion:
+        contenedor = soup.find("main") or soup.find(id="content") or soup
+        texto_completo_pagina = contenedor.get_text(separator="\n")
+        match_eligibilidad = re.search(
+            r"(Eligibilit[ée]\s+des\s+Soumissionaires[^:\n]*:.*?)(?=\n\s*\n[A-ZÀ-ÖØ-Þ]|\Z)",
+            texto_completo_pagina,
+            re.IGNORECASE | re.DOTALL
+        )
+        if match_eligibilidad:
+            descripcion = match_eligibilidad.group(1).strip()
+
+    # 2. Extracción de Categoría basada en la sección "Missions"
+    h3_elements = soup.find_all("h3")
+    for h3 in h3_elements:
+        if "missions" in h3.get_text(strip=True).lower():
+            # Buscar el siguiente contenedor o lista ul cercana
+            siguiente_tr = h3.find_parent("tr")
+            if siguiente_tr:
+                siguiente_fila = siguiente_tr.find_next_sibling("tr")
+                if siguiente_fila:
+                    ul = siguiente_fila.find("ul")
+                    if ul:
+                        categoria = ul.get_text(separator=" ", strip=True)
+                        break
+
+    # Fallback para categoría si no se halló mediante la estructura de tabla anterior
+    if not categoria:
+        for h3 in h3_elements:
+            if "missions" in h3.get_text(strip=True).lower():
+                padre = h3.find_parent()
+                if padre:
+                    ul = padre.find_next("ul")
+                    if ul:
+                        categoria = ul.get_text(separator=" ", strip=True)
+                        break
+
+    return descripcion, categoria
 
 
 def extraer_url_documento(soup: BeautifulSoup):
@@ -183,6 +233,13 @@ def extraer_url_documento(soup: BeautifulSoup):
         href = enlace["href"]
         if href.lower().endswith((".pdf", ".docx", ".doc")):
             return href if href.startswith("http") else BASE_URL + href
+    
+    # Búsqueda específica en la zona de documentos adjuntos vista en el HTML
+    for a in soup.find_all("a", href=True):
+        if "biddingDocumentsList.do" in a["href"] or "download" in a["href"].lower():
+            href = a["href"]
+            return href if href.startswith("http") else BASE_URL + href
+
     return None
 
 
@@ -198,13 +255,18 @@ def obtener_detalle_aviso(url: str) -> dict:
         print(f"     Error descargando la ficha: {error}", flush=True)
         return {
             "descripcion": None,
+            "categoria": None,
             "url_documento": None,
         }
 
     soup = BeautifulSoup(respuesta.text, "html.parser")
+    descripcion, categoria = extraer_descripcion_y_categoria(soup)
+    url_documento = extraer_url_documento(soup)
+
     return {
-        "descripcion": extraer_descripcion_detalle(soup),
-        "url_documento": extraer_url_documento(soup),
+        "descripcion": descripcion,
+        "categoria": categoria,
+        "url_documento": url_documento,
     }
 
 
@@ -227,7 +289,7 @@ def construir_registro(aviso: dict) -> dict:
         "descripcion": aviso.get("descripcion"),
         "pais": aviso.get("pais"),
         "organismo": "Agence Française de Développement",
-        "categoria": None,
+        "categoria": aviso.get("categoria"),
         "url_oficial": aviso["url_oficial"],
         "url_documento": aviso.get("url_documento"),
         "fecha_publicacion": (
@@ -262,7 +324,8 @@ def preparar_lote_para_subir(
         texto_completo = (
             f"Titulo: {datos['titulo']}\n"
             f"{datos.get('descripcion') or ''}\n"
-            f"Pais: {datos.get('pais') or 'No especificado'}"
+            f"Pais: {datos.get('pais') or 'No especificado'}\n"
+            f"Categoria: {datos.get('categoria') or 'No especificada'}"
         )
 
         if existente is None:
@@ -341,7 +404,7 @@ def ejecutar_sincronizacion():
     if not candidatos:
         return
 
-    print("\nDescargando ficha de cada candidato (descripción + documento adjunto)...", flush=True)
+    print("\nDescargando ficha de cada candidato (descripción + categoría + documento adjunto)...", flush=True)
 
     normalizados = []
     for indice, aviso in enumerate(candidatos, start=1):
@@ -349,6 +412,7 @@ def ejecutar_sincronizacion():
 
         detalle = obtener_detalle_aviso(aviso["url_oficial"])
         aviso["descripcion"] = detalle["descripcion"]
+        aviso["categoria"] = detalle["categoria"]
         aviso["url_documento"] = detalle["url_documento"]
 
         registro = construir_registro(aviso)
