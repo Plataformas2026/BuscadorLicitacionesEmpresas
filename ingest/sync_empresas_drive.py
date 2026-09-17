@@ -435,7 +435,7 @@ def leer_referencias(buffer_excel: io.BytesIO, indice_nombres_empresa: dict) -> 
         referencia["id_empresa"] = id_empresa
         if not id_empresa:
             sin_match += 1
-            print(f"⚠️ [SIN MATCH] Empresa en referencia: '{nombre_excel}' -> Motivo: {motivo}", flush=True)
+            print(f"[SIN MATCH] Empresa en referencia: '{nombre_excel}' -> Motivo: {motivo}", flush=True)
 
         referencias.append(referencia)
 

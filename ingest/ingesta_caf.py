@@ -71,6 +71,18 @@ descripcion, no se vuelve a leer). Es el mismo compromiso que se pidio
 explicitamente: evitar releer y regenerar embeddings de lo que ya se
 conoce.
 
+MULTIPLES PAISES POR CONVOCATORIA
+--------------------------------------
+Un aviso de CAF suele mencionar varios países a la vez (p. ej. una
+convocatoria regional). `_extraer_paises()` devuelve TODOS los que
+encuentre (antes solo se guardaba el primero). Se guardan en la nueva
+columna `paises` (array) de `licitaciones_internacionales` -- la
+columna `pais` (texto, singular) se conserva intacta con el primer país
+encontrado, exactamente el mismo criterio que antes, para no romper
+nada de lo que ya dependa de ese valor único (filtro "Lugar" de
+app/search.py, comparación de país en app/matching.py). `paises` es
+puramente aditiva: de momento no la lee ni la muestra ninguna pantalla.
+
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
 Ejecucion local:      python ingesta_caf.py
 Ejecucion programada: ver .github/workflows/sincronizar_caf.yml
@@ -108,7 +120,7 @@ LOTE_ENVIO_SUPABASE = 15
 
 CABECERAS = {"User-Agent": "Mozilla/5.0 (compatible; LicitacionesEmpresasBot/1.0)"}
 
-CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "fecha_publicacion", "fecha_limite")
+CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "paises", "fecha_publicacion", "fecha_limite")
 
 PATRON_ENLACE_CONVOCATORIA = re.compile(r"^/es/trabaja-con-nosotros/convocatorias/[a-z0-9\-]+/?$")
 
@@ -144,15 +156,29 @@ def _normalizar_texto(texto: str) -> str:
 _PAISES_NORMALIZADOS = [(_normalizar_texto(p), p) for p in PAISES_CAF]
 
 
-def _extraer_pais(*fuentes_de_texto) -> str:
+def _extraer_paises(*fuentes_de_texto) -> list:
+    """
+    Devuelve TODOS los países miembro de CAF mencionados (no solo el
+    primero), sin duplicados, recorriendo `fuentes_de_texto` en orden
+    (tarjeta del listado, título, descripción) -- el primer elemento de
+    la lista devuelta es exactamente el mismo país que devolvía la
+    versión anterior de esta función (mismo orden de búsqueda), así que
+    sigue sirviendo tal cual como "país principal" para lo que ya
+    dependía de un único valor.
+    """
+    encontrados = []
+    vistos = set()
     for texto in fuentes_de_texto:
         if not texto:
             continue
         texto_norm = _normalizar_texto(texto)
         for pais_norm, pais_original in _PAISES_NORMALIZADOS:
+            if pais_original in vistos:
+                continue
             if re.search(rf"\b{re.escape(pais_norm)}\b", texto_norm):
-                return pais_original
-    return None
+                encontrados.append(pais_original)
+                vistos.add(pais_original)
+    return encontrados
 
 
 # ------------------------------------------------------------------
@@ -376,11 +402,12 @@ def construir_registro(convocatoria: dict) -> dict:
     fecha_publicacion = convocatoria.get("fecha_publicacion")
     fecha_limite = convocatoria.get("fecha_limite") or convocatoria.get("fecha_limite_listado")
 
-    pais = _extraer_pais(
+    paises = _extraer_paises(
         convocatoria.get("texto_tarjeta"),
         convocatoria.get("titulo"),
         convocatoria.get("descripcion"),
     )
+    pais_principal = paises[0] if paises else None
 
     return {
         "codigo_unico": convocatoria["codigo_unico"],
@@ -388,7 +415,8 @@ def construir_registro(convocatoria: dict) -> dict:
         "tipo_aviso": "Convocatoria",
         "titulo": convocatoria["titulo"],
         "descripcion": convocatoria.get("descripcion"),
-        "pais": pais,
+        "pais": pais_principal,
+        "paises": paises,
         "organismo": "CAF",
         "categoria": None,
         "url_oficial": convocatoria["url_oficial"],

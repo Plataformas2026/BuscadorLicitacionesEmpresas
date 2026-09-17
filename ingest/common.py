@@ -55,23 +55,51 @@ def obtener_registros_existentes(supabase: Client, tabla: str, columna_clave: st
     Consulta solo los registros de `tabla` cuya `columna_clave` está en
     `claves` (en vez de traer la tabla entera), devolviendo un
     diccionario {clave: fila}.
+
+    El troceo se hace por LONGITUD ACUMULADA estimada de la URL, no solo
+    por cantidad de claves: un codigo_unico puede llegar a 120-150
+    caracteres (los slugs de títulos largos de BID/CAF), así que un
+    número fijo de claves por lote (p. ej. 300) podía seguir generando
+    una URL de decenas de miles de caracteres -- muy por encima de los
+    límites habituales (~4000-8000 caracteres) de proxies/servidores, y
+    causando un HTTP 400 -- si las claves eran largas. Ahora cada lote
+    se cierra al llegar a MAX_CLAVES_POR_LOTE o MAX_CARACTERES_POR_LOTE,
+    lo que ocurra antes.
     """
     registros = {}
     if not claves:
         return registros
 
-    tamano_lote_in = 300
+    MAX_CLAVES_POR_LOTE = 200
+    MAX_CARACTERES_POR_LOTE = 3000
+
     claves_unicas = list(dict.fromkeys(claves))
 
-    for i in range(0, len(claves_unicas), tamano_lote_in):
-        trozo = claves_unicas[i:i + tamano_lote_in]
+    def _consultar_lote(lote):
+        if not lote:
+            return
         respuesta = (
             supabase.table(tabla)
             .select(", ".join(columnas))
-            .in_(columna_clave, trozo)
+            .in_(columna_clave, lote)
             .execute()
         )
         registros.update({fila[columna_clave]: fila for fila in respuesta.data})
+
+    lote_actual = []
+    longitud_actual = 0
+    for clave in claves_unicas:
+        longitud_clave = len(str(clave)) + 3  # +3: coma y comillas de la codificación en la URL
+        if lote_actual and (
+            len(lote_actual) >= MAX_CLAVES_POR_LOTE or longitud_actual + longitud_clave > MAX_CARACTERES_POR_LOTE
+        ):
+            _consultar_lote(lote_actual)
+            lote_actual = []
+            longitud_actual = 0
+        lote_actual.append(clave)
+        longitud_actual += longitud_clave
+
+    _consultar_lote(lote_actual)
 
     return registros
 
