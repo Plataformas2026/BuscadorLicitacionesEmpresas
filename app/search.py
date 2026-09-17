@@ -27,7 +27,7 @@ from sentence_transformers import SentenceTransformer
 from supabase import Client
 
 COLUMNAS_LISTADO = (
-    "codigo_unico, fuente_origen, tipo_aviso, titulo, descripcion, pais, "
+    "codigo_unico, fuente_origen, tipo_aviso, titulo, descripcion, pais, paises, "
     "organismo, categoria, url_oficial, url_documento, fecha_publicacion, "
     "fecha_limite, es_novedad, es_actualizada, visto, visto_en, guardado, guardado_en"
 )
@@ -78,32 +78,10 @@ def listar_todas(supabase: Client) -> list:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def obtener_lugares_disponibles(_supabase: Client) -> list:
-    """Opciones del filtro "Lugar", calculadas a partir de las columnas `pais` y `paises` (text[]).
-    Devuelve una lista ordenada de países únicos.
-    """
-    respuesta = (
-        _supabase.table("licitaciones_internacionales")
-        .select("pais, paises")
-        .execute()
-    )
-
-    lugares = set()
-
-    for fila in respuesta.data or []:
-        # 1. Procesar la columna 'pais' (texto)
-        pais = fila.get("pais")
-        if pais and isinstance(pais, str) and pais.strip():
-            lugares.add(pais.strip())
-
-        # 2. Procesar la columna 'paises' (array de texto: text[])
-        lista_paises = fila.get("paises")
-        if lista_paises and isinstance(lista_paises, list):
-            for p in lista_paises:
-                if p and isinstance(p, str) and p.strip():
-                    lugares.add(p.strip())
-
-    # Devuelve una lista ordenada alfabéticamente de los países únicos
-    return sorted(list(lugares))
+    """Opciones del filtro "Lugar", calculadas a partir de los datos reales (columna `pais`)."""
+    respuesta = _supabase.table("licitaciones_internacionales").select("pais").execute()
+    lugares = {f["pais"] for f in (respuesta.data or []) if f.get("pais")}
+    return sorted(lugares)
 
 
 def marcar_visto(supabase: Client, codigo_unico: str, valor: bool):
@@ -156,17 +134,32 @@ def _tabla_licitaciones(supabase: Client, resultados: list, contexto: str):
     if not resultados:
         return
 
-    filas = [{
-        "codigo_unico": r["codigo_unico"],
-        "Visto": bool(r.get("visto")),
-        "Guardado": bool(r.get("guardado")),
-        "Título": r.get("titulo") or "Sin título",
-        "Fuente": r.get("fuente_origen") or "No especificada",
-        "Lugar": r.get("pais") or "No especificado",
-        "Publicación": r.get("fecha_publicacion") or "No especificada",
-        "Cierre": r.get("fecha_limite") or "No especificada",
-        "Enlace": r.get("url_oficial") or "",
-    } for r in resultados]
+    filas = []
+    for r in resultados:
+        # Combinar 'pais' y 'paises' para mostrar una cadena limpia y sin duplicados en la tabla
+        conjunto_paises = set()
+        if r.get("pais") and isinstance(r.get("pais"), str):
+            conjunto_paises.add(r.get("pais").strip())
+        
+        lista_paises = r.get("paises")
+        if isinstance(lista_paises, list):
+            for p in lista_paises:
+                if p and isinstance(p, str) and p.strip():
+                    conjunto_paises.add(p.strip())
+
+        texto_lugar = ", ".join(sorted(conjunto_paises)) if conjunto_paises else "No especificado"
+
+        filas.append({
+            "codigo_unico": r["codigo_unico"],
+            "Visto": bool(r.get("visto")),
+            "Guardado": bool(r.get("guardado")),
+            "Título": r.get("titulo") or "Sin título",
+            "Fuente": r.get("fuente_origen") or "No especificada",
+            "Lugar": texto_lugar,
+            "Publicación": r.get("fecha_publicacion") or "No especificada",
+            "Cierre": r.get("fecha_limite") or "No especificada",
+            "Enlace": r.get("url_oficial") or "",
+        })
 
     df_base = pd.DataFrame(filas)
 
@@ -259,7 +252,19 @@ def _vista_buscar(supabase: Client, encoder: SentenceTransformer):
             if filtro_fuente:
                 resultados = [r for r in resultados if r.get("fuente_origen") in filtro_fuente]
             if filtro_lugar:
-                resultados = [r for r in resultados if r.get("pais") in filtro_lugar]
+                resultados_filtrados = []
+                for r in resultados:
+                    paises_licitacion = set()
+                    if r.get("pais"):
+                        paises_licitacion.add(r.get("pais").strip())
+                    lista_paises = r.get("paises")
+                    if isinstance(lista_paises, list):
+                        for p in lista_paises:
+                            if p and isinstance(p, str):
+                                paises_licitacion.add(p.strip())
+                    if any(f in paises_licitacion for f in filtro_lugar):
+                        resultados_filtrados.append(r)
+                resultados = resultados_filtrados
 
             fecha_minima = filtro_fecha_cierre.isoformat()
             resultados = [
