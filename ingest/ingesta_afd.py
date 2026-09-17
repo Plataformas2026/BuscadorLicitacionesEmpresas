@@ -33,7 +33,7 @@ LISTADO_URL = BASE_URL + "/tenders/brandedNoticeList.do"
 
 FUENTE = "AFD"
 
-DIAS_ATRAS = 3
+DIAS_ATRAS = 1
 
 MAX_PAGINAS_SEGURIDAD = 60
 
