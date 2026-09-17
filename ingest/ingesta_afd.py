@@ -33,7 +33,7 @@ LISTADO_URL = BASE_URL + "/tenders/brandedNoticeList.do"
 
 FUENTE = "AFD"
 
-DIAS_ATRAS = 1
+DIAS_ATRAS = 3
 
 MAX_PAGINAS_SEGURIDAD = 60
 
@@ -171,58 +171,47 @@ def extraer_avisos_de_pagina(html: str):
 
 def extraer_descripcion_y_categoria(soup: BeautifulSoup):
     """
-    Extrae la descripción desde la fila 'Eligibilité des Soumissionaires' 
-    y la categoría desde la sección 'Missions'.
+    Extrae la descripción de 'Eligibilité des Soumissionaires' 
+    y la categoría limpia (ej. 'Services de conseil en recherche') 
+    buscando el bloque posterior a Contacto que comienza con números.
     """
     descripcion = None
     categoria = None
 
-    # 1. Extracción de la descripción exacta a partir de "Eligibilité des Soumissionaires"
+    # 1. Extracción de Descripción exacta desde la fila de la tabla
     for fila in soup.find_all("tr"):
         celdas = fila.find_all("td")
         if len(celdas) >= 2:
             texto_etiqueta = celdas[0].get_text(strip=True)
             if "eligibilit" in texto_etiqueta.lower():
-                # Obtenemos el texto conservando los saltos de línea internos (<br>)
                 descripcion = celdas[1].get_text(separator="\n", strip=True)
                 break
 
-    # Si no se encontró por la etiqueta exacta, buscamos en el texto general del bloque principal
-    if not descripcion:
-        contenedor = soup.find("main") or soup.find(id="content") or soup
-        texto_completo_pagina = contenedor.get_text(separator="\n")
-        match_eligibilidad = re.search(
-            r"(Eligibilit[ée]\s+des\s+Soumissionaires[^:\n]*:.*?)(?=\n\s*\n[A-ZÀ-ÖØ-Þ]|\Z)",
-            texto_completo_pagina,
-            re.IGNORECASE | re.DOTALL
-        )
-        if match_eligibilidad:
-            descripcion = match_eligibilidad.group(1).strip()
+    # 2. Extracción de Categoría (Buscando un enlace o texto que comience con dígitos y un guion)
+    # Recorremos todos los enlaces del documento para ver si alguno coincide con el patrón CPV
+    for a in soup.find_all("a", href=True):
+        texto_enlace = a.get_text(separator=" ", strip=True)
+        # Patrón: número de varios dígitos seguido de guion y texto (ej. 73210000 - Servicios...)
+        match_cpv = re.match(r"^\d{6,10}\s*-\s*(.+)$", texto_enlace)
+        if match_cpv:
+            categoria = match_cpv.group(1).strip()
+            break
 
-    # 2. Extracción de Categoría basada en la sección "Missions"
-    h3_elements = soup.find_all("h3")
-    for h3 in h3_elements:
-        if "missions" in h3.get_text(strip=True).lower():
-            # Buscar el siguiente contenedor o lista ul cercana
-            siguiente_tr = h3.find_parent("tr")
-            if siguiente_tr:
-                siguiente_fila = siguiente_tr.find_next_sibling("tr")
-                if siguiente_fila:
-                    ul = siguiente_fila.find("ul")
-                    if ul:
-                        categoria = ul.get_text(separator=" ", strip=True)
-                        break
-
-    # Fallback para categoría si no se halló mediante la estructura de tabla anterior
+    # Fallback alternativo si el enlace no sigue exactamente el patrón anterior pero está en la sección Missions
     if not categoria:
+        h3_elements = soup.find_all("h3")
         for h3 in h3_elements:
             if "missions" in h3.get_text(strip=True).lower():
-                padre = h3.find_parent()
-                if padre:
-                    ul = padre.find_next("ul")
-                    if ul:
-                        categoria = ul.get_text(separator=" ", strip=True)
-                        break
+                siguiente_tr = h3.find_parent("tr")
+                if siguiente_tr:
+                    siguiente_fila = siguiente_tr.find_next_sibling("tr")
+                    if siguiente_fila:
+                        texto_celda = siguiente_fila.get_text(separator=" ", strip=True)
+                        # Limpiamos el código numérico inicial si lo tiene
+                        texto_limpio = re.sub(r"^\d{6,10}\s*-\s*", "", texto_celda).strip()
+                        if texto_limpio:
+                            categoria = texto_limpio
+                            break
 
     return descripcion, categoria
 
@@ -234,7 +223,6 @@ def extraer_url_documento(soup: BeautifulSoup):
         if href.lower().endswith((".pdf", ".docx", ".doc")):
             return href if href.startswith("http") else BASE_URL + href
     
-    # Búsqueda específica en la zona de documentos adjuntos vista en el HTML
     for a in soup.find_all("a", href=True):
         if "biddingDocumentsList.do" in a["href"] or "download" in a["href"].lower():
             href = a["href"]
@@ -445,7 +433,7 @@ def ejecutar_sincronizacion():
 
     subidas = subir_en_lotes(
         supabase,
-        "licitaciones_internacionales",
+        "licitouncements_internacionales" if False else "licitaciones_internacionales",
         "codigo_unico",
         lote_final,
         tamano_lote=LOTE_ENVIO_SUPABASE,
