@@ -350,12 +350,16 @@ def limpiar_concursos_caducados(supabase, hoy: date) -> int:
 def refrescar_tabla_auxiliar(supabase, candidatos: list) -> dict:
     """
     Upsert rápido de todos los concursos activos encontrados en el listado.
+    Deduplica los candidatos por código único para evitar conflictos de Postgres.
     Devuelve el estado 'visto' anterior por codigo_unico para detectar novedades.
     """
     if not candidatos:
         return {}
 
-    codigos = [c["codigo_unico"] for c in candidatos]
+    # Blindaje: asegurar que no haya códigos únicos duplicados en la lista a insertar
+    candidatos_unicos = list({c["codigo_unico"]: c for c in candidatos}.values())
+
+    codigos = [c["codigo_unico"] for c in candidatos_unicos]
     respuesta_existentes = (
         supabase.table(TABLA_AUXILIAR).select("codigo_unico, visto").in_("codigo_unico", codigos).execute()
     )
@@ -363,7 +367,7 @@ def refrescar_tabla_auxiliar(supabase, candidatos: list) -> dict:
 
     ahora = datetime.now(timezone.utc).isoformat()
     filas = []
-    for c in candidatos:
+    for c in candidatos_unicos:
         codigo = c["codigo_unico"]
         fecha_limite = c.get("fecha_limite_aux")
         filas.append({
@@ -377,7 +381,6 @@ def refrescar_tabla_auxiliar(supabase, candidatos: list) -> dict:
 
     supabase.table(TABLA_AUXILIAR).upsert(filas, on_conflict="codigo_unico").execute()
     return visto_por_codigo
-
 
 def marcar_como_vistas(supabase, codigos: list):
     if not codigos:
