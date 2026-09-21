@@ -260,30 +260,30 @@ def obtener_coincidencias_texto_libre(
     return respuesta.data or []
 
 
-def obtener_referencias_por_empresas(supabase: Client, ids_empresa: list) -> dict:
+def obtener_referencias_por_empresas(supabase: Client, numeros_internos: list) -> dict:
     """
     Trae, en UNA sola consulta por lote (nunca una por empresa), los
     títulos de licitaciones antiguas de todas las empresas candidatas --
     la hoja "REFERENCIAS P BÚSQUEDAS" del Excel, ya cargada en
     `empresas_referencias` (ver ingest/sync_empresas_drive.py). Se
-    agrupan por id_empresa para que explicar_coincidencia() solo tenga
-    que consultar un diccionario en memoria.
+    agrupan por numero_interno para que explicar_coincidencia() solo
+    tenga que consultar un diccionario en memoria.
     """
-    ids_empresa = [i for i in (ids_empresa or []) if i]
-    if not ids_empresa:
+    numeros_internos = [i for i in (numeros_internos or []) if i]
+    if not numeros_internos:
         return {}
 
     respuesta = (
         supabase.table("empresas_referencias")
-        .select("id_empresa, titulo, resultado_normalizado")
-        .in_("id_empresa", ids_empresa)
+        .select("numero_interno, titulo, resultado_normalizado")
+        .in_("numero_interno", numeros_internos)
         .execute()
     )
 
     agrupado = {}
     for fila in respuesta.data or []:
         if fila.get("titulo"):
-            agrupado.setdefault(fila["id_empresa"], []).append(fila)
+            agrupado.setdefault(fila["numero_interno"], []).append(fila)
     return agrupado
 
 
@@ -619,7 +619,7 @@ def formatear_tabla_coincidencias(coincidencias: list) -> pd.DataFrame:
     return pd.DataFrame({
         "Relevancia (%)": (df["similarity"] * 100).round(1),
         "Empresa": df["nombre_empresa"],
-        "ID": df["id_empresa"],
+        "Nº interno": df["numero_interno"],
         "Sector": df["sector"].fillna("No especificado"),
         "Tipo": df["tipo_empresa"].fillna("No especificado"),
     })
@@ -728,18 +728,18 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
 
                 # Una sola consulta por lote para el historial de referencias de
                 # TODAS las empresas candidatas (nunca N+1).
-                ids_empresa = [e["id_empresa"] for e in coincidencias if e.get("id_empresa")]
+                ids_empresa = [e["numero_interno"] for e in coincidencias if e.get("numero_interno")]
                 referencias_por_empresa = obtener_referencias_por_empresas(supabase, ids_empresa)
 
                 for empresa in coincidencias:
                     with st.container(border=True):
                         col_nombre, col_score = st.columns([4, 1])
                         with col_nombre:
-                            st.markdown(f"**{empresa['nombre_empresa']}**  ·  `{empresa['id_empresa']}`")
+                            st.markdown(f"**{empresa['nombre_empresa']}**  ·  `{empresa['numero_interno']}`")
                         with col_score:
                             st.markdown(f"**{round(empresa['similarity'] * 100, 1)}%**")
 
-                        referencias_empresa = referencias_por_empresa.get(empresa["id_empresa"], [])
+                        referencias_empresa = referencias_por_empresa.get(empresa["numero_interno"], [])
                         motivos = explicar_coincidencia(texto_licitacion, pais_licitacion, empresa, referencias_empresa, encoder)
                         for motivo in motivos:
                             st.markdown(f"- {motivo}")

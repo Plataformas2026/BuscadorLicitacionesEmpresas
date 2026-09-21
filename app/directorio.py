@@ -27,7 +27,7 @@ from supabase import Client
 IDIOMAS_SOPORTADOS = {"es", "en", "fr", "pt"}
 
 COLUMNAS_TARJETA = (
-    "id_empresa, numero_interno, nombre_empresa, sector, subsector, tipo_empresa, "
+    "numero_interno, nombre_empresa, sector, subsector, tipo_empresa, "
     "web, experiencia_paises, zona_geografica_interes, paises_interes, ambito_geografico"
 )
 
@@ -47,17 +47,17 @@ CAMPOS_TECNICOS_OCULTOS = {
 @st.cache_data(ttl=1800, show_spinner=False)
 def obtener_opciones_filtro(_supabase: Client) -> dict:
     """
-    Opciones EXCLUSIVAMENTE para ID / Sector / Subsector / Tipo de
+    Opciones EXCLUSIVAMENTE para Nº interno / Sector / Subsector / Tipo de
     empresa / CNAE, calculadas a partir de los datos reales (no hay una
     lista cerrada de antemano, sobre todo para CNAE).
     """
     respuesta = _supabase.rpc("obtener_opciones_filtro_empresas", {}).execute()
     fila = (respuesta.data or [{}])[0] if respuesta.data else {}
 
-    respuesta_ids = _supabase.table("empresas").select("id_empresa").order("id_empresa").execute()
+    respuesta_numeros = _supabase.table("empresas").select("numero_interno").order("numero_interno").execute()
 
     return {
-        "ids": [f["id_empresa"] for f in (respuesta_ids.data or [])],
+        "numeros_internos": [f["numero_interno"] for f in (respuesta_numeros.data or [])],
         "sectores": fila.get("sectores") or [],
         "subsectores": fila.get("subsectores") or [],
         "tipos": fila.get("tipos") or [],
@@ -67,7 +67,7 @@ def obtener_opciones_filtro(_supabase: Client) -> dict:
 
 def listar_empresas(
     supabase: Client,
-    id_empresa: list = None,
+    numero_interno: list = None,
     sector: list = None,
     subsector: list = None,
     tipo: list = None,
@@ -75,8 +75,8 @@ def listar_empresas(
 ) -> list:
     consulta = supabase.table("empresas").select(COLUMNAS_TARJETA)
 
-    if id_empresa:
-        consulta = consulta.in_("id_empresa", id_empresa)
+    if numero_interno:
+        consulta = consulta.in_("numero_interno", numero_interno)
 
     if sector:
         consulta = consulta.in_("sector", sector)
@@ -127,15 +127,34 @@ def buscar_semantica_empresas(
     return respuesta.data or [], idioma
 
 
-def obtener_ficha_empresa(supabase: Client, id_empresa: str) -> dict:
-    respuesta = supabase.table("empresas").select("*").eq("id_empresa", id_empresa).limit(1).execute()
+def obtener_ficha_empresa(supabase: Client, numero_interno: str) -> dict:
+    respuesta = supabase.table("empresas").select("*").eq("numero_interno", numero_interno).limit(1).execute()
     datos = respuesta.data or []
     return datos[0] if datos else {}
 
 
-def obtener_referencias_empresa(supabase: Client, id_empresa: str) -> list:
-    respuesta = supabase.rpc("obtener_referencias_empresa", {"id_empresa_buscado": id_empresa}).execute()
-    return respuesta.data or []
+# Campos que se muestran en la tabla de referencias de la ficha (ver
+# _mostrar_ficha más abajo). Filtro defensivo: descarta cualquier fila
+# que la RPC devuelva sin ningún dato relleno en estos campos -- solo
+# tenía el nombre de la empresa, no aporta ninguna referencia real. La
+# ingesta (ver ingest/sync_empresas_drive.py, _referencia_totalmente_vacia)
+# ya evita guardar filas así desde la próxima sincronización; este
+# filtro cubre también lo que ya estuviera guardado de antes, para que
+# el contador de la ficha sea exacto de inmediato.
+CAMPOS_REFERENCIA_MOSTRADOS = (
+    "sector", "tipo_proyecto", "agencia_ejecutora", "titulo", "fecha", "importe", "resultado",
+)
+
+
+def obtener_referencias_empresa(supabase: Client, numero_interno: str) -> list:
+    respuesta = supabase.rpc(
+        "obtener_referencias_empresa", {"numero_interno_buscado": numero_interno}
+    ).execute()
+    referencias = respuesta.data or []
+    return [
+        r for r in referencias
+        if any(r.get(campo) for campo in CAMPOS_REFERENCIA_MOSTRADOS)
+    ]
 
 
 # ------------------------------------------------------------------
@@ -189,16 +208,16 @@ def _renderizar_tarjeta(empresa: dict):
         st.markdown(f"**Países de interés:** {_resumen_campo(empresa.get('paises_interes'))}")
         st.markdown(f"**Ámbito geográfico:** {_resumen_campo(empresa.get('ambito_geografico'))}")
 
-        if st.button("Ver ficha", key=f"tab3_ver_{empresa['id_empresa']}", use_container_width=True):
-            st.session_state.tab3_empresa_seleccionada = empresa["id_empresa"]
+        if st.button("Ver ficha", key=f"tab3_ver_{empresa['numero_interno']}", use_container_width=True):
+            st.session_state.tab3_empresa_seleccionada = empresa["numero_interno"]
             st.rerun()
 
 
 # ------------------------------------------------------------------
 # Ficha de la empresa (dos columnas)
 # ------------------------------------------------------------------
-def _mostrar_ficha(supabase: Client, id_empresa: str):
-    empresa = obtener_ficha_empresa(supabase, id_empresa)
+def _mostrar_ficha(supabase: Client, numero_interno: str):
+    empresa = obtener_ficha_empresa(supabase, numero_interno)
     if not empresa:
         st.warning("No se ha encontrado esta empresa (puede que se haya retirado en la última sincronización).")
         if st.button("← Volver al directorio", key="tab3_volver_sin_ficha"):
@@ -212,7 +231,7 @@ def _mostrar_ficha(supabase: Client, id_empresa: str):
 
     st.markdown(f"## {empresa.get('nombre_empresa') or 'Empresa sin nombre'}")
     url_web = _normalizar_url(empresa.get("web"))
-    pie = f"ID: `{empresa.get('id_empresa')}` · Nº interno: `{empresa.get('numero_interno')}`"
+    pie = f"Nº interno: `{empresa.get('numero_interno')}`"
     if url_web:
         pie += f" · [{url_web}]({url_web})"
     st.caption(pie)
@@ -236,7 +255,7 @@ def _mostrar_ficha(supabase: Client, id_empresa: str):
 
     with col_der:
         st.markdown("#### Referencias de licitaciones")
-        referencias = obtener_referencias_empresa(supabase, id_empresa)
+        referencias = obtener_referencias_empresa(supabase, numero_interno)
         if not referencias:
             st.info("No hay referencias registradas para esta empresa en la hoja de referencias del Excel.")
         else:
@@ -283,10 +302,10 @@ def render_tab3(supabase: Client, encoder: SentenceTransformer):
     col_id, col_sector, col_subsector, col_tipo, col_cnae = st.columns(5)
   
     with col_id:
-        filtro_id = st.multiselect(
-            "ID",
-            opciones["ids"],
-            key="tab3_filtro_id",
+        filtro_numero_interno = st.multiselect(
+            "Nº interno",
+            opciones["numeros_internos"],
+            key="tab3_filtro_numero_interno",
         )
     
     with col_sector:
@@ -328,7 +347,7 @@ def render_tab3(supabase: Client, encoder: SentenceTransformer):
             else:
                 resultados = listar_empresas(
                     supabase,
-                    id_empresa=filtro_id or None,
+                    numero_interno=filtro_numero_interno or None,
                     sector=filtro_sector or None,
                     subsector=filtro_subsector or None,
                     tipo=filtro_tipo or None,
@@ -339,10 +358,10 @@ def render_tab3(supabase: Client, encoder: SentenceTransformer):
             # Con texto de búsqueda, los filtros se aplican COMO REFINAMIENTO
             # sobre los resultados semánticos (para poder combinar ambos).
             if consulta_texto.strip():
-              if filtro_id:
+              if filtro_numero_interno:
                   resultados = [
                       r for r in resultados
-                      if r.get("id_empresa") in filtro_id
+                      if r.get("numero_interno") in filtro_numero_interno
                   ]
           
               if filtro_sector:
