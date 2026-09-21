@@ -114,9 +114,33 @@ MAPEO_EMPRESAS = {
     "palabras_clave_fr": "PALABRAS CLAVE EN FRANCÉS",
     "palabras_clave_pt": "PALABRAS CLAVE EN PORTUGUÉS",
 }
-COLUMNA_NUMERO_INTERNO = "Unnamed: 0"   # columna A, sin cabecera
 COLUMNA_ID_EMPRESA = "ID"
-COLUMNA_NOTAS_LIBRES = "Unnamed: 26"    # comentarios sueltos del analista, sin cabecera
+
+# COLUMNA_NUMERO_INTERNO/COLUMNA_NOTAS_LIBRES: ROTURA REAL DETECTADA Y CORREGIDA
+# -------------------------------------------------------------------------------
+# Hasta la version de BBDD_Empresas_260909.xlsx, la columna A y la
+# columna AA de "DOSSIER COMPLETO" no tenian texto de cabecera, asi que
+# pandas las bautizaba automaticamente como "Unnamed: 0" / "Unnamed: 26"
+# -- y el script buscaba esos nombres literales. En
+# BBDD_Empresas_260918.xlsx esas dos celdas de cabecera SI tienen texto
+# ("ID empresas TB" y "importe mínimo / máximo"), asi que pandas ya NO
+# genera "Unnamed: 0"/"Unnamed: 26": esos nombres dejan de existir en
+# el DataFrame, `_valor_texto` no encuentra la columna (devuelve None
+# para TODA fila, en silencio, sin ningun error) y `numero_interno`
+# sale vacio en todas las filas -- exactamente la condicion que hace
+# que leer_empresas() descarte TODAS las filas (ver el "continue" mas
+# abajo) y no sincronice ninguna empresa. Se comprobo directamente
+# contra los dos ficheros: los DATOS de ambas columnas son identicos
+# entre versiones (mismos numeros/"P.1"/"C.1"/"CC.2" en A, mismas notas
+# en AA), solo cambio si la celda de cabecera tiene texto o no.
+#
+# Para que esto no se vuelva a romper la proxima vez que alguien
+# escriba algo en esas celdas de cabecera (o lo borre), estas dos
+# columnas ya NO se buscan por nombre: se resuelven por POSICION (ver
+# _columna_por_posicion), que es estable independientemente de que
+# texto de cabecera tengan hoy.
+INDICE_COLUMNA_NUMERO_INTERNO = 0    # columna A: numero/codigo interno de fila (a veces "P.1"/"C.1"/"CC.2" para entidades publicas o clusteres)
+INDICE_COLUMNA_NOTAS_LIBRES = 26     # columna AA: notas sueltas del analista (en 260918 son comentarios de importe minimo/maximo por empresa)
 
 MAPEO_REFERENCIAS = {
     "sector": "SECTOR",
@@ -300,6 +324,22 @@ def _leer_hoja(buffer_excel: io.BytesIO, hoja: str, fila_cabecera: int) -> pd.Da
     return df
 
 
+def _columna_por_posicion(df: pd.DataFrame, indice: int, descripcion: str):
+    """Devuelve el nombre REAL que tiene HOY la columna en la posicion
+    `indice` (0 = columna A), sea cual sea su texto de cabecera -- ver
+    aviso "ROTURA REAL DETECTADA Y CORREGIDA" junto a
+    INDICE_COLUMNA_NUMERO_INTERNO. Devuelve None (sin lanzar excepcion)
+    si la hoja no llega a tener tantas columnas."""
+    if indice < len(df.columns):
+        return df.columns[indice]
+    print(
+        f"Aviso: la hoja '{HOJA_EMPRESAS}' no tiene columna en la posicion "
+        f"{indice + 1} (se esperaba ahi la columna de {descripcion}).",
+        flush=True,
+    )
+    return None
+
+
 # ------------------------------------------------------------------
 # Lectura de "DOSSIER COMPLETO" -> empresas
 # ------------------------------------------------------------------
@@ -308,7 +348,16 @@ def leer_empresas(buffer_excel: io.BytesIO) -> list:
     if df.empty:
         return []
 
+    columna_numero_interno = _columna_por_posicion(
+        df, INDICE_COLUMNA_NUMERO_INTERNO, "numero_interno"
+    )
+    columna_notas_libres = _columna_por_posicion(
+        df, INDICE_COLUMNA_NOTAS_LIBRES, "notas_libres"
+    )
+
     faltantes = [c for c in list(MAPEO_EMPRESAS.values()) + [COLUMNA_ID_EMPRESA] if c not in df.columns]
+    if columna_numero_interno is None:
+        faltantes.append(f"columna nº{INDICE_COLUMNA_NUMERO_INTERNO + 1} (numero_interno)")
     if faltantes:
         print(f"Aviso: no se han encontrado estas columnas en '{HOJA_EMPRESAS}': {faltantes}", flush=True)
 
@@ -316,7 +365,7 @@ def leer_empresas(buffer_excel: io.BytesIO) -> list:
     ids_generados = 0
 
     for _, fila in df.iterrows():
-        numero_interno = _valor_texto(fila, COLUMNA_NUMERO_INTERNO)
+        numero_interno = _valor_texto(fila, columna_numero_interno)
         if not numero_interno:
             continue  # sin número interno no hay forma fiable de identificar la fila
 
@@ -337,7 +386,7 @@ def leer_empresas(buffer_excel: io.BytesIO) -> list:
             else:
                 empresa[clave] = _valor_texto(fila, columna)
 
-        empresa["notas_libres"] = _valor_texto(fila, COLUMNA_NOTAS_LIBRES)
+        empresa["notas_libres"] = _valor_texto(fila, columna_notas_libres)
         empresa["datos_excel"] = _fila_a_json(fila)
         empresas.append(empresa)
 
