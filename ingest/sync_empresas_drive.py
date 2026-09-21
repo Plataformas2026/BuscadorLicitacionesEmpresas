@@ -114,7 +114,6 @@ MAPEO_EMPRESAS = {
     "palabras_clave_fr": "PALABRAS CLAVE EN FRANCÉS",
     "palabras_clave_pt": "PALABRAS CLAVE EN PORTUGUÉS",
 }
-COLUMNA_ID_EMPRESA = "ID"
 
 # COLUMNA_NUMERO_INTERNO/COLUMNA_NOTAS_LIBRES: ROTURA REAL DETECTADA Y CORREGIDA
 # -------------------------------------------------------------------------------
@@ -355,28 +354,21 @@ def leer_empresas(buffer_excel: io.BytesIO) -> list:
         df, INDICE_COLUMNA_NOTAS_LIBRES, "notas_libres"
     )
 
-    faltantes = [c for c in list(MAPEO_EMPRESAS.values()) + [COLUMNA_ID_EMPRESA] if c not in df.columns]
+    faltantes = [c for c in list(MAPEO_EMPRESAS.values()) if c not in df.columns]
     if columna_numero_interno is None:
         faltantes.append(f"columna nº{INDICE_COLUMNA_NUMERO_INTERNO + 1} (numero_interno)")
     if faltantes:
         print(f"Aviso: no se han encontrado estas columnas en '{HOJA_EMPRESAS}': {faltantes}", flush=True)
 
     empresas = []
-    ids_generados = 0
 
     for _, fila in df.iterrows():
         numero_interno = _valor_texto(fila, columna_numero_interno)
         if not numero_interno:
             continue  # sin número interno no hay forma fiable de identificar la fila
 
-        id_empresa = _valor_texto(fila, COLUMNA_ID_EMPRESA)
-        if not id_empresa:
-            id_empresa = f"SIN_ID_{numero_interno}"
-            ids_generados += 1
-
         empresa = {
             "numero_interno": numero_interno,
-            "id_empresa": id_empresa,
         }
         for clave, columna in MAPEO_EMPRESAS.items():
             if columna not in df.columns:
@@ -389,9 +381,6 @@ def leer_empresas(buffer_excel: io.BytesIO) -> list:
         empresa["notas_libres"] = _valor_texto(fila, columna_notas_libres)
         empresa["datos_excel"] = _fila_a_json(fila)
         empresas.append(empresa)
-
-    if ids_generados:
-        print(f"ℹ️ {ids_generados} empresas sin 'ID' en el Excel: se les asignó un ID estable 'SIN_ID_<número interno>'.", flush=True)
 
     return empresas
 
@@ -412,7 +401,7 @@ def _normalizar_resultado(texto: str) -> str:
 
 def _buscar_empresa_por_prefijo_o_alias(nombre_original: str, indice_nombres: dict) -> tuple:
     """Busca mediante alias explícitos, coincidencia exacta normalizada y prefijos inteligentes.
-       Devuelve (id_empresa, motivo_falla)"""
+       Devuelve (numero_interno, motivo_falla)"""
     if not nombre_original:
         return None, "Nombre de empresa vacío en la referencia"
 
@@ -442,11 +431,27 @@ def _buscar_empresa_por_prefijo_o_alias(nombre_original: str, indice_nombres: di
         else:
             return None, f"Primera palabra demasiado corta y sin secundaria: '{primera_palabra}'"
 
-    for nombre_idx, id_emp in indice_nombres.items():
+    for nombre_idx, num_interno in indice_nombres.items():
         if nombre_idx.startswith(primera_palabra) or primera_palabra.startswith(nombre_idx):
-            return id_emp, None
+            return num_interno, None
 
     return None, f"No se encontró coincidencia exacta, alias ni prefijo compatible para '{nombre_original}' (normalizado: '{nombre_norm}')"
+
+
+# Campos que se muestran en la ficha de la empresa (ver app/directorio.py,
+# tabla de "Referencias de licitaciones": SECTOR, TIPO PROYECTO, AGENCIA
+# EJECUTORA, TITULO, FECHA, IMPORTE, RESULTADO). Si NINGUNO de estos tiene
+# contenido, la fila del Excel solo traía el nombre de la empresa y nada
+# mas -- no aporta ninguna referencia real, asi que se descarta (antes se
+# guardaba igual y se contaba en el "N referencias" de la ficha, dando un
+# recuento que no coincidia con las filas realmente visibles).
+CAMPOS_REFERENCIA_MOSTRADOS = (
+    "sector", "tipo_proyecto", "agencia_ejecutora", "titulo", "fecha", "importe", "resultado",
+)
+
+
+def _referencia_totalmente_vacia(referencia: dict) -> bool:
+    return all(not referencia.get(campo) for campo in CAMPOS_REFERENCIA_MOSTRADOS)
 
 
 def leer_referencias(buffer_excel: io.BytesIO, indice_nombres_empresa: dict) -> list:
@@ -460,6 +465,7 @@ def leer_referencias(buffer_excel: io.BytesIO, indice_nombres_empresa: dict) -> 
 
     referencias = []
     sin_match = 0
+    vacias_descartadas = 0
 
     for _, fila in df.iterrows():
         nombre_excel = _valor_texto(fila, MAPEO_REFERENCIAS["nombre_empresa_excel"])
@@ -475,23 +481,34 @@ def leer_referencias(buffer_excel: io.BytesIO, indice_nombres_empresa: dict) -> 
             else:
                 referencia[clave] = _valor_texto(fila, columna) if columna in df.columns else None
 
+        if _referencia_totalmente_vacia(referencia):
+            vacias_descartadas += 1
+            continue  # solo tenia el nombre de la empresa, ninguna informacion real de la licitacion
+
         referencia["resultado_normalizado"] = _normalizar_resultado(referencia.get("resultado"))
         referencia["datos_excel"] = _fila_a_json(fila)
 
         # Búsqueda inteligente con impresión de motivos detallados si falla
-        id_empresa, motivo = _buscar_empresa_por_prefijo_o_alias(nombre_excel, indice_nombres_empresa)
+        numero_interno, motivo = _buscar_empresa_por_prefijo_o_alias(nombre_excel, indice_nombres_empresa)
         
-        referencia["id_empresa"] = id_empresa
-        if not id_empresa:
+        referencia["numero_interno"] = numero_interno
+        if not numero_interno:
             sin_match += 1
             print(f"[SIN MATCH] Empresa en referencia: '{nombre_excel}' -> Motivo: {motivo}", flush=True)
 
         referencias.append(referencia)
 
+    if vacias_descartadas:
+        print(
+            f"ℹ️ {vacias_descartadas} filas de '{HOJA_REFERENCIAS}' descartadas por no tener ningún "
+            f"dato relleno salvo el nombre de la empresa.",
+            flush=True,
+        )
+
     if sin_match:
         print(
             f"ℹ️ {sin_match}/{len(referencias)} filas de referencias no se han podido enlazar "
-            f"con ninguna empresa de '{HOJA_EMPRESAS}' por nombre (quedan con id_empresa=NULL, "
+            f"con ninguna empresa de '{HOJA_EMPRESAS}' por nombre (quedan con numero_interno=NULL, "
             f"pero se guardan igualmente).",
             flush=True,
         )
@@ -574,12 +591,12 @@ def ejecutar_sincronizacion():
     for empresa in empresas:
         empresa.update(calcular_textos_y_embeddings(empresa))
 
-    subidas = subir_en_lotes(supabase, "empresas", "id_empresa", empresas, tamano_lote=TAMANO_LOTE_SUPABASE)
+    subidas = subir_en_lotes(supabase, "empresas", "numero_interno", empresas, tamano_lote=TAMANO_LOTE_SUPABASE)
     print(f"Empresas sincronizadas: {subidas}/{len(empresas)}", flush=True)
 
-    ids_actuales = {e["id_empresa"] for e in empresas}
-    respuesta_existentes = supabase.table("empresas").select("id, id_empresa").execute()
-    ids_a_borrar = [f["id"] for f in respuesta_existentes.data if f["id_empresa"] not in ids_actuales]
+    numeros_actuales = {e["numero_interno"] for e in empresas}
+    respuesta_existentes = supabase.table("empresas").select("id, numero_interno").execute()
+    ids_a_borrar = [f["id"] for f in respuesta_existentes.data if f["numero_interno"] not in numeros_actuales]
     if ids_a_borrar:
         for i in range(0, len(ids_a_borrar), 100):
             supabase.table("empresas").delete().in_("id", ids_a_borrar[i:i + 100]).execute()
@@ -587,7 +604,7 @@ def ejecutar_sincronizacion():
 
     # ---------------- Referencias ----------------
     indice_nombres = {
-        _normalizar_nombre_empresa(e["nombre_empresa"]): e["id_empresa"]
+        _normalizar_nombre_empresa(e["nombre_empresa"]): e["numero_interno"]
         for e in empresas if e.get("nombre_empresa")
     }
     referencias = leer_referencias(buffer_excel, indice_nombres)
