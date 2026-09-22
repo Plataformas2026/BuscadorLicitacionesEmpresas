@@ -1,0 +1,45 @@
+name: Sincronizar Licitaciones (BCIE)
+
+on:
+  schedule:
+    - cron: '0 8 * * *'   # todos los dias a las 08:00 UTC
+  workflow_dispatch:
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Instalar el navegador de Playwright
+        run: python -m playwright install --with-deps chromium
+
+      - name: Ejecutar sincronizacion BCIE
+        working-directory: ingest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python ingesta_bcie.py
+
+      - name: Subir captura de depuracion (si el script no reconocio ninguna fila)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-bcie-tabla
+          path: ingest/debug_bcie_tabla.png
+          if-no-files-found: ignore
+          retention-days: 7
