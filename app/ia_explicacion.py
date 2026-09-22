@@ -134,6 +134,8 @@ def _llamar_groq(prompt_usuario: str):
             timeout=TIMEOUT_PETICION_SEGUNDOS,
         )
         respuesta.raise_for_status()
+        print("Status code:", response.status_code)
+        print("Response text:", response.text)
         cuerpo = respuesta.json()
         return cuerpo["choices"][0]["message"]["content"].strip()
     except Exception:
