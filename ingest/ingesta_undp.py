@@ -134,6 +134,21 @@ def _generar_slug(texto: str) -> str:
     return (slug or "sin-referencia")[:120]
 
 
+# El campo "Office"/"Country" trae a veces un código de oficina de UNDP
+# pegado delante, p. ej. "UNDP-ZAF/SOUTH AFRICA" en vez de "South Africa"
+# -- se quita cualquier prefijo tipo "CODIGO/" (letras/números/guiones
+# seguidos de barra) y se normaliza la capitalización, ya que la fuente
+# lo da en mayúsculas.
+PATRON_PREFIJO_OFICINA_UNDP = re.compile(r"^[A-Z0-9\-]+/")
+
+
+def _limpiar_pais_undp(texto: str):
+    if not texto:
+        return None
+    limpio = PATRON_PREFIJO_OFICINA_UNDP.sub("", texto.strip()).strip()
+    return limpio.title() if limpio else None
+
+
 def parsear_fecha_undp(cadena_fecha: str):
     """Convierte fechas tipo '22-Sep-26' o '22-Sep-2026' a date (año de 2 dígitos -> 20XX)."""
     if not cadena_fecha:
@@ -234,7 +249,7 @@ def construir_registro(item: dict) -> dict:
     fecha_publicacion = parsear_fecha_undp(item.get("posted_raw"))
     fecha_limite = parsear_fecha_undp(item.get("deadline_raw"))
 
-    pais = (item.get("pais") or "").strip() or None
+    pais = _limpiar_pais_undp(item.get("pais"))
     proceso = (item.get("proceso") or "").strip() or None
 
     partes_descripcion = []

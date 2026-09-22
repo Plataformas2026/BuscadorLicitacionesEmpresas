@@ -49,6 +49,20 @@ manual (workflow_dispatch); si sale muy bajo, es señal de que el país sí
 vive en una celda de la tabla y conviene inspeccionar el HTML real para
 extraerlo de forma más precisa en vez de por coincidencia de texto.**
 
+AVISO DE FIABILIDAD -- TÍTULO CORREGIDO A CIEGAS (SIN CONFIRMAR TODAVÍA)
+--------------------------------------------------------------------------
+Una ejecución real confirmó que el título llegaba vacío: el único intento
+de partida (`enlace.innerText`) no bastaba. Se han añadido varios niveles
+de respaldo, de más a menos específico -- atributos `title`/`aria-label`
+del propio enlace, el texto de la celda que lo contiene, la primera celda
+de la fila y, como último recurso en Python, la celda no vacía más larga
+que no parezca solo una fecha o una referencia corta
+(`_mejor_titulo_disponible`). Ninguno de estos respaldos se ha podido
+confirmar contra la página real (mismo motivo que el aviso de país, más
+arriba) -- revisa el título de los avisos en la primera ejecución manual;
+si sigue vacío o sale el texto "sin título reconocido", hace falta
+inspeccionar el HTML real para dar con el selector correcto.
+
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
 Ejecucion local:      python ingesta_ungm.py
 Ejecucion programada: ver .github/workflows/sincronizar_ungm.yml
@@ -100,7 +114,28 @@ _JS_EXTRAER_FILAS = """
         const enlace = fila.querySelector('a[href*="/Public/Notice/"]');
         if (!enlace) return;
 
-        const titulo = (enlace.innerText || '').trim();
+        // El titulo se intenta en varios sitios, de mas a menos
+        // especifico -- el texto del propio enlace no siempre basta (se
+        // ha observado vacio en produccion, posiblemente porque el
+        // titulo visible vive en un span/strong hijo con otro
+        // tratamiento, o el enlace envuelve solo un icono).
+        let titulo = (enlace.innerText || '').trim();
+        if (!titulo) {
+            titulo = (enlace.getAttribute('title') || enlace.getAttribute('aria-label') || '').trim();
+        }
+        if (!titulo) {
+            const celdaEnlace = enlace.closest('td, div.tableCell');
+            if (celdaEnlace) {
+                titulo = (celdaEnlace.innerText || '').trim();
+            }
+        }
+        if (!titulo) {
+            const primeraCelda = fila.querySelector('td, div.tableCell');
+            if (primeraCelda) {
+                titulo = (primeraCelda.innerText || '').trim();
+            }
+        }
+
         const href = enlace.getAttribute('href');
         const celdas = Array.from(fila.querySelectorAll('td, div.tableCell')).map(c => c.innerText.trim());
 
@@ -317,23 +352,51 @@ def extraer_licitaciones_playwright() -> list:
     return list(registros_por_url.values())
 
 
+def _mejor_titulo_disponible(item: dict) -> str:
+    """
+    Respaldo en Python, además de los ya intentados en el propio JS (ver
+    _JS_EXTRAER_FILAS): si aun así no hay título, se usa la celda no
+    vacía más larga de la fila que no parezca solo una fecha o una
+    referencia corta -- mejor eso que guardar el aviso con el título en
+    blanco.
+    """
+    titulo = (item.get("titulo") or "").strip()
+    if titulo:
+        return titulo
+
+    candidatas = [c.strip() for c in (item.get("celdas") or []) if c and c.strip()]
+    candidatas = [c for c in candidatas if len(c) > 15 and not PATRON_FECHA.fullmatch(c)]
+    if candidatas:
+        return max(candidatas, key=len)
+
+    return "Aviso de UNGM sin título reconocido (revisar extracción)"
+
+
 def construir_registro(item: dict) -> dict:
     fecha_publicacion_str, fecha_limite_str = evaluar_licitacion(item)
     fecha_publicacion = parsear_fecha_string(fecha_publicacion_str) if fecha_publicacion_str else None
     fecha_limite = parsear_fecha_string(fecha_limite_str) if fecha_limite_str else None
 
     pais = _detectar_pais(item.get("texto_completo"))
+    titulo = _mejor_titulo_disponible(item)
 
+    # Descripcion: aparte del plazo, se añade un fragmento del texto
+    # completo de la fila (quitando el propio título si aparece
+    # literalmente) como contexto adicional -- el script de prueba no
+    # capturaba ningún campo de descripción propiamente dicho para UNGM.
     partes_descripcion = []
     if fecha_limite_str:
         partes_descripcion.append(f"Plazo: {fecha_limite_str}.")
+    texto_extra = (item.get("texto_completo") or "").replace(titulo, "", 1).strip()
+    if texto_extra:
+        partes_descripcion.append(texto_extra[:300])
     descripcion = " ".join(partes_descripcion) or None
 
     return {
         "codigo_unico": f"UNGM-{_id_o_slug(item['url_oficial'])}"[:150],
         "fuente_origen": FUENTE,
         "tipo_aviso": None,
-        "titulo": item.get("titulo"),
+        "titulo": titulo,
         "descripcion": descripcion,
         "pais": pais,
         "paises": [pais] if pais else [],
@@ -407,6 +470,13 @@ def ejecutar_sincronizacion():
         f"{con_pais}/{len(normalizados)}",
         flush=True,
     )
+    sin_titulo = sum(1 for n in normalizados if "sin título reconocido" in (n.get("titulo") or ""))
+    if sin_titulo:
+        print(
+            f"Aviso: {sin_titulo}/{len(normalizados)} avisos se han quedado sin título tras todos "
+            "los respaldos -- ver 'AVISO DE FIABILIDAD -- TÍTULO' en el docstring.",
+            flush=True,
+        )
 
     en_ventana = [
         n for n in normalizados
