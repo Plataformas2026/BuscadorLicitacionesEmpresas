@@ -24,6 +24,16 @@ def _config(clave: str, por_defecto: str = "") -> str:
 SUPABASE_URL = _config("SUPABASE_URL")
 SUPABASE_ANON_KEY = _config("SUPABASE_ANON_KEY")
 
+# Justificación de coincidencias con IA (Pestaña 2, capa tipo RAG sobre la
+# lógica de coincidencias ya existente) -- ver app/ia_explicacion.py.
+# Groq: capa gratuita real, sin tarjeta de crédito (30 peticiones/min,
+# 14.400/día en el momento de escribir esto), API compatible con la de
+# OpenAI. Si no se configura la clave, la app sigue funcionando igual que
+# hasta ahora (la Pestaña 2 no ofrece el botón de justificación con IA,
+# pero toda la lógica de coincidencias determinista sigue intacta).
+GROQ_API_KEY = _config("GROQ_API_KEY")
+GROQ_MODELO = _config("GROQ_MODELO", "llama-3.3-70b-versatile")
+
 MODELO_EMBEDDING = "intfloat/multilingual-e5-small"  # 384 dimensiones
 
 FUENTES_LICITACIONES = ["AfDB", "BID", "CAF", "AFD"]  # se irán añadiendo más bancos/organismos aquí
