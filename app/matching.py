@@ -56,6 +56,7 @@ from sentence_transformers import SentenceTransformer
 from supabase import Client
 
 from search import buscar_semantica
+from ia_explicacion import generar_justificacion_ia, groq_configurado, justificacion_en_cache
 
 PATRON_URL = re.compile(r"^https?://", re.IGNORECASE)
 
@@ -194,8 +195,8 @@ def localizar_licitacion(supabase: Client, encoder: SentenceTransformer, entrada
         return []
 
     columnas = (
-        "codigo_unico, titulo, descripcion, pais, fuente_origen, url_oficial, "
-        "fecha_publicacion, fecha_limite"
+        "codigo_unico, titulo, descripcion, pais, organismo, tipo_aviso, fuente_origen, "
+        "url_oficial, fecha_publicacion, fecha_limite"
     )
 
     # 1. Match exacto por enlace
@@ -547,6 +548,18 @@ def explicar_coincidencia(
         else:
             motivos_detalle.append(f"Sector de actividad de la empresa: {detalle_sector}.")
 
+    # Contexto adicional (tamaño, facturación, rango de importes preferido):
+    # no son señales de "coincidencia" en sí mismas -- no hay un requisito
+    # de tamaño/presupuesto de la licitación con el que compararlas --,
+    # pero es información relevante que el usuario (y la capa de IA, ver
+    # ia_explicacion.py) debe tener a la vista siempre que exista.
+    if empresa.get("tamano"):
+        motivos_detalle.append(f"Tamaño de la empresa: {empresa['tamano']}.")
+    if empresa.get("facturacion_anual"):
+        motivos_detalle.append(f"Facturación anual declarada: {empresa['facturacion_anual']}.")
+    if empresa.get("notas_libres"):
+        motivos_detalle.append(f"Rango de importe de proyecto preferido por la empresa: {empresa['notas_libres']}.")
+
     # Capa 2 -- puente temático multilingüe: solo se activa si la Capa 1 no
     # ha encontrado NINGUNA coincidencia literal, para no repetir lo mismo
     # con otras palabras. Se guarda en `temas_puente`, NO en `señales`
@@ -743,6 +756,29 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
                         motivos = explicar_coincidencia(texto_licitacion, pais_licitacion, empresa, referencias_empresa, encoder)
                         for motivo in motivos:
                             st.markdown(f"- {motivo}")
+
+                        # Justificación en lenguaje natural (capa tipo RAG sobre los
+                        # motivos deterministas de arriba, ver ia_explicacion.py) --
+                        # solo si hay GROQ_API_KEY configurada, y siempre bajo demanda
+                        # (nunca automática para las ~30 coincidencias a la vez: hay
+                        # que respetar el límite de la capa gratuita de Groq).
+                        if groq_configurado():
+                            ya_en_cache, texto_en_cache = justificacion_en_cache(licitacion, empresa)
+                            if ya_en_cache:
+                                if texto_en_cache:
+                                    st.info(f"**Justificación con IA:** {texto_en_cache}")
+                                else:
+                                    st.caption(
+                                        "No se ha podido generar la justificación con IA "
+                                        "(límite de peticiones gratuitas o problema temporal del servicio)."
+                                    )
+                            elif st.button(
+                                "Generar justificación con IA",
+                                key=f"tab2_btn_ia_{empresa['numero_interno']}",
+                            ):
+                                with st.spinner("Generando justificación con IA..."):
+                                    texto_ia = generar_justificacion_ia(licitacion, empresa, motivos)
+                                st.rerun()
 
                         st.caption(f"Lugar de la licitación: {pais_licitacion or 'No especificado'}")
                         for etiqueta, valor in obtener_lugares_empresa(empresa):
