@@ -166,24 +166,20 @@ def justificacion_en_cache(licitacion: dict, empresa: dict):
 
 
 def generar_justificacion_ia(licitacion: dict, empresa: dict, motivos_deterministas: list):
-    """
-    Punto de entrada usado por matching.py. Cachea en sesión por la
-    combinación licitación+empresa (nunca vuelve a llamar a la API para
-    la misma pareja en la misma sesión del usuario) -- ver
-    TIMEOUT_PETICION_SEGUNDOS y el aviso de límites gratuitos en el
-    docstring del módulo: no se llama automáticamente para todas las
-    coincidencias de golpe, solo bajo demanda desde un botón por
-    empresa (render_tab2()).
-    """
     if "cache_justificacion_ia" not in st.session_state:
         st.session_state.cache_justificacion_ia = {}
 
     clave = _clave_cache(licitacion, empresa)
 
-    if clave in st.session_state.cache_justificacion_ia:
+    # Solo reutilizar la caché si contiene un texto válido (no None)
+    if clave in st.session_state.cache_justificacion_ia and st.session_state.cache_justificacion_ia[clave] is not None:
         return st.session_state.cache_justificacion_ia[clave]
 
     prompt = construir_prompt(licitacion, empresa, motivos_deterministas)
     resultado = _llamar_groq(prompt)
-    st.session_state.cache_justificacion_ia[clave] = resultado
+
+    # Guardar en caché únicamente si la llamada tuvo éxito
+    if resultado is not None:
+        st.session_state.cache_justificacion_ia[clave] = resultado
+
     return resultado
