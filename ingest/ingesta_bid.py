@@ -153,6 +153,34 @@ def _generar_slug(texto: str) -> str:
     return (slug or "sin-referencia")[:120]
 
 
+# Las etiquetas de la fila de detalle (ver _JS_EXTRAER_FILAS_IADB) no
+# siempre quedan separadas por salto de línea en nodePadre.innerText: se
+# ha observado en producción que el país capturado arrastra la etiqueta
+# SIGUIENTE pegada sin espacio, p. ej. "PerúFunding Source:
+# ATN/PS-22383-PE" en vez de "Perú". Se limpia aquí (en vez de en el JS)
+# porque es mucho más fácil de probar sin necesitar un navegador real:
+# se corta cualquier cosa a partir de la primera etiqueta de detalle
+# conocida que aparezca (la que sea, no solo "Funding Source" -- las
+# demás podrían arrastrarse igual si su orden en el DOM cambiara).
+ETIQUETAS_DETALLE_BID = (
+    "Funding Source", "Operation Country", "Sub-Sector",
+    "Notice Publication Date", "Deadline",
+)
+PATRON_ETIQUETA_SIGUIENTE_BID = re.compile(
+    r"\s*(?:" + "|".join(re.escape(e) for e in ETIQUETAS_DETALLE_BID) + r")\s*:.*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _limpiar_valor_detalle_bid(texto: str):
+    """Quita del final del texto cualquier etiqueta de detalle que se
+    haya arrastrado pegada (ver ETIQUETAS_DETALLE_BID)."""
+    if not texto:
+        return None
+    limpio = PATRON_ETIQUETA_SIGUIENTE_BID.sub("", texto).strip()
+    return limpio or None
+
+
 def parsear_fecha_iadb(cadena_fecha: str):
     """Convierte cadenas del tipo '21-Sept-2026' / '21-Sep-2026' a date."""
     if not cadena_fecha:
@@ -256,8 +284,8 @@ def construir_registro(item: dict) -> dict:
     fecha_publicacion = parsear_fecha_iadb(item.get("publication_date_raw"))
     fecha_limite = parsear_fecha_iadb(item.get("deadline_raw"))
 
-    pais = (item.get("pais") or "").strip() or None
-    sub_sector = (item.get("sub_sector") or "").strip() or None
+    pais = _limpiar_valor_detalle_bid(item.get("pais"))
+    sub_sector = _limpiar_valor_detalle_bid(item.get("sub_sector"))
 
     partes_descripcion = []
     if sub_sector:
