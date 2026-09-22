@@ -34,18 +34,18 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python ingesta_bid.py
 
-      # Ver aviso de fiabilidad en ingesta_bid.py: si no se reconoce
-      # ninguna fila, el script guarda una captura de pantalla del
-      # informe tal cual lo vio el navegador. Se sube como artefacto
-      # descargable desde la propia ejecucion en GitHub Actions (pestaña
-      # "Summary" -> "Artifacts") para poder ver que encontro sin tener
-      # que reproducirlo en local.
+      # Ver docstring de ingesta_bid.py: si no se reconoce ninguna fila,
+      # el script guarda una captura de pantalla de la tabla tal cual la
+      # vio el navegador. Se sube como artefacto descargable desde la
+      # propia ejecucion en GitHub Actions (pestaña "Summary" ->
+      # "Artifacts") para poder ver que encontro sin tener que
+      # reproducirlo en local.
       - name: Subir captura de depuracion (si el script no reconocio ninguna fila)
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: debug-bid-powerbi
-          path: ingest/debug_bid_powerbi.png
+          name: debug-bid-tabla
+          path: ingest/debug_bid_tabla.png
           if-no-files-found: ignore
           retention-days: 7
