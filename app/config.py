@@ -32,7 +32,7 @@ SUPABASE_ANON_KEY = _config("SUPABASE_ANON_KEY")
 # hasta ahora (la Pestaña 2 no ofrece el botón de justificación con IA,
 # pero toda la lógica de coincidencias determinista sigue intacta).
 GROQ_API_KEY = _config("GROQ_API_KEY")
-GROQ_MODELO = _config("GROQ_MODELO", "llama-3.1-8b-instant")
+GROQ_MODELO = _config("GROQ_MODELO", "openai/gpt-oss-20b")
 
 MODELO_EMBEDDING = "intfloat/multilingual-e5-small"  # 384 dimensiones
 
