@@ -62,6 +62,7 @@ import unicodedata
 from datetime import date, datetime
 
 import numpy as np
+import openpyxl
 import pandas as pd
 
 from common import (
@@ -78,6 +79,16 @@ FILA_CABECERA_EMPRESAS = 0          # cabecera en la 1ª fila
 
 HOJA_REFERENCIAS = "REFERENCIAS P BÚSQUEDAS"
 FILA_CABECERA_REFERENCIAS = 1       # cabecera en la 2ª fila (la 1ª va vacía en el Excel real)
+
+# HMS: misma tabla destino que REFERENCIAS P BÚSQUEDAS (empresas_referencias),
+# mismas cabeceras de columna exactas -- solo cambia la hoja y la fila de
+# cabecera. La columna "EMPRESA" de esta hoja vale literalmente "HMS" en
+# todas las filas: la búsqueda por prefijo ya existente
+# (_buscar_empresa_por_prefijo_o_alias) la enlaza sola con "HMS INTELLIGENCE"
+# en 'DOSSIER COMPLETO' (nombre_idx.startswith(primera_palabra)), sin
+# necesitar ningún caso especial.
+HOJA_HMS = "HMS"
+FILA_CABECERA_HMS = 9                # cabecera en la fila 10 (filas 1-9 vacías en el Excel real)
 
 IDIOMAS_PALABRAS_CLAVE = ["es", "en", "fr", "pt"]  # ver nota "5 IDIOMAS" arriba
 
@@ -123,23 +134,26 @@ MAPEO_EMPRESAS = {
 # -- y el script buscaba esos nombres literales. En
 # BBDD_Empresas_260918.xlsx esas dos celdas de cabecera SI tienen texto
 # ("ID empresas TB" y "importe mínimo / máximo"), asi que pandas ya NO
-# genera "Unnamed: 0"/"Unnamed: 26": esos nombres dejan de existir en
-# el DataFrame, `_valor_texto` no encuentra la columna (devuelve None
-# para TODA fila, en silencio, sin ningun error) y `numero_interno`
-# sale vacio en todas las filas -- exactamente la condicion que hace
-# que leer_empresas() descarte TODAS las filas (ver el "continue" mas
-# abajo) y no sincronice ninguna empresa. Se comprobo directamente
-# contra los dos ficheros: los DATOS de ambas columnas son identicos
-# entre versiones (mismos numeros/"P.1"/"C.1"/"CC.2" en A, mismas notas
-# en AA), solo cambio si la celda de cabecera tiene texto o no.
+# genera "Unnamed: 0"/"Unnamed: 26". Se comprobo directamente contra
+# los dos ficheros: los DATOS de ambas columnas son identicos entre
+# versiones (mismos numeros/"P.1"/"C.1"/"CC.2" en A, mismas notas en
+# AA), solo cambio si la celda de cabecera tiene texto o no.
 #
-# Para que esto no se vuelva a romper la proxima vez que alguien
-# escriba algo en esas celdas de cabecera (o lo borre), estas dos
-# columnas ya NO se buscan por nombre: se resuelven por POSICION (ver
-# _columna_por_posicion), que es estable independientemente de que
-# texto de cabecera tengan hoy.
-INDICE_COLUMNA_NUMERO_INTERNO = 0    # columna A: numero/codigo interno de fila (a veces "P.1"/"C.1"/"CC.2" para entidades publicas o clusteres)
-INDICE_COLUMNA_NOTAS_LIBRES = 26     # columna AA: notas sueltas del analista (en 260918 son comentarios de importe minimo/maximo por empresa)
+# Se resuelven por NOMBRE primero (probando el texto de cabecera actual
+# como primer candidato) y solo si no se encuentra ningun nombre se cae
+# a la POSICION como red de seguridad -- nunca al reves. La resolucion
+# solo por posicion (como se hizo en un principio) se rompio en cuanto
+# se añadio el filtrado de columnas ocultas de "DOSSIER COMPLETO" (ver
+# excluir_ocultos en _leer_hoja): al quitar columnas ocultas ANTES de
+# esta posicion, la columna AA (indice 26 en el Excel de 36 columnas)
+# se desplaza a la izquierda -- en la version de 260918 queda en el
+# indice 23, no 26 -- asi que un indice fijo ya no es fiable una vez se
+# excluyen ocultos. Buscar primero por el nombre real (que ya no esta
+# en blanco) evita depender de ninguna posicion.
+INDICE_COLUMNA_NUMERO_INTERNO = 0    # respaldo si no se encuentra por nombre (columna A)
+NOMBRES_COLUMNA_NUMERO_INTERNO = ("ID empresas TB",)
+INDICE_COLUMNA_NOTAS_LIBRES = 26     # respaldo (posicion en el Excel de 36 columnas, antes de excluir ocultos)
+NOMBRES_COLUMNA_NOTAS_LIBRES = ("importe mínimo / máximo", "importe minimo / maximo")
 
 MAPEO_REFERENCIAS = {
     "sector": "SECTOR",
@@ -317,23 +331,89 @@ def _dividir_lista(valor) -> list:
     return [p.strip() for p in re.split(r"[,;\n]", texto) if p.strip()]
 
 
-def _leer_hoja(buffer_excel: io.BytesIO, hoja: str, fila_cabecera: int) -> pd.DataFrame:
+def _detectar_ocultos(buffer_excel: io.BytesIO, hoja: str) -> tuple:
+    """
+    Devuelve (columnas_ocultas, filas_ocultas): las letras de columna
+    de Excel ("B", "E"...) y los números de fila de Excel marcados como
+    ocultos en esa hoja. pandas no expone esta información -- hace
+    falta leer el propio libro con openpyxl para consultarla.
+    read_only=False a propósito: en modo solo lectura, openpyxl no
+    siempre rellena column_dimensions/row_dimensions con la visibilidad
+    real.
+    """
+    posicion_previa = buffer_excel.tell()
+    buffer_excel.seek(0)
+    libro = openpyxl.load_workbook(buffer_excel, read_only=False, data_only=True)
+    hoja_wb = libro[hoja]
+
+    columnas_ocultas = {
+        letra for letra, dim in hoja_wb.column_dimensions.items() if dim.hidden
+    }
+    filas_ocultas = {
+        numero for numero, dim in hoja_wb.row_dimensions.items() if dim.hidden
+    }
+
+    libro.close()
+    buffer_excel.seek(posicion_previa)
+    return columnas_ocultas, filas_ocultas
+
+
+def _leer_hoja(buffer_excel: io.BytesIO, hoja: str, fila_cabecera: int, excluir_ocultos: bool = False) -> pd.DataFrame:
     df = pd.read_excel(buffer_excel, sheet_name=hoja, header=fila_cabecera, dtype=object)
     df.columns = [str(c).strip() for c in df.columns]
+
+    if not excluir_ocultos:
+        return df
+
+    columnas_ocultas, filas_ocultas = _detectar_ocultos(buffer_excel, hoja)
+
+    if columnas_ocultas:
+        indices_ocultos = {
+            openpyxl.utils.column_index_from_string(letra) - 1
+            for letra in columnas_ocultas
+        }
+        nombres_columnas_ocultas = [
+            df.columns[i] for i in sorted(indices_ocultos) if i < len(df.columns)
+        ]
+        if nombres_columnas_ocultas:
+            df = df.drop(columns=nombres_columnas_ocultas)
+            print(f"'{hoja}': se ignoran columnas ocultas del Excel: {nombres_columnas_ocultas}", flush=True)
+
+    if filas_ocultas:
+        # fila de Excel = índice de fila del DataFrame + fila_cabecera + 2
+        # (fila_cabecera es 0-indexado, como el `header=` de pandas; +1
+        # por la propia cabecera, +1 porque Excel empieza a contar en 1)
+        indices_filas_ocultas = {
+            numero_excel - fila_cabecera - 2 for numero_excel in filas_ocultas
+        }
+        filas_a_quitar = [i for i in indices_filas_ocultas if i in df.index]
+        if filas_a_quitar:
+            df = df.drop(index=filas_a_quitar)
+            print(f"'{hoja}': se ignoran {len(filas_a_quitar)} filas ocultas del Excel.", flush=True)
+
     return df
 
 
-def _columna_por_posicion(df: pd.DataFrame, indice: int, descripcion: str):
-    """Devuelve el nombre REAL que tiene HOY la columna en la posicion
-    `indice` (0 = columna A), sea cual sea su texto de cabecera -- ver
-    aviso "ROTURA REAL DETECTADA Y CORREGIDA" junto a
-    INDICE_COLUMNA_NUMERO_INTERNO. Devuelve None (sin lanzar excepcion)
-    si la hoja no llega a tener tantas columnas."""
-    if indice < len(df.columns):
-        return df.columns[indice]
+def _resolver_columna(df: pd.DataFrame, nombres_candidatos: tuple, indice_respaldo: int, descripcion: str):
+    """
+    Resuelve una columna por NOMBRE primero (probando cada texto de
+    `nombres_candidatos`, en orden), y solo si ninguno aparece en el
+    Excel cae a la posición `indice_respaldo` como red de seguridad --
+    ver aviso "ROTURA REAL DETECTADA Y CORREGIDA" junto a
+    INDICE_COLUMNA_NUMERO_INTERNO. Devuelve None (sin lanzar excepción)
+    si tampoco hay tantas columnas para el respaldo posicional.
+    """
+    for nombre in nombres_candidatos:
+        if nombre in df.columns:
+            return nombre
+
+    if indice_respaldo < len(df.columns):
+        return df.columns[indice_respaldo]
+
     print(
-        f"Aviso: la hoja '{HOJA_EMPRESAS}' no tiene columna en la posicion "
-        f"{indice + 1} (se esperaba ahi la columna de {descripcion}).",
+        f"Aviso: la hoja '{HOJA_EMPRESAS}' no tiene ninguna columna llamada "
+        f"{nombres_candidatos} ni una columna en la posición {indice_respaldo + 1} "
+        f"(se esperaba ahí la columna de {descripcion}).",
         flush=True,
     )
     return None
@@ -343,22 +423,27 @@ def _columna_por_posicion(df: pd.DataFrame, indice: int, descripcion: str):
 # Lectura de "DOSSIER COMPLETO" -> empresas
 # ------------------------------------------------------------------
 def leer_empresas(buffer_excel: io.BytesIO) -> list:
-    df = _leer_hoja(buffer_excel, HOJA_EMPRESAS, FILA_CABECERA_EMPRESAS)
+    df = _leer_hoja(buffer_excel, HOJA_EMPRESAS, FILA_CABECERA_EMPRESAS, excluir_ocultos=True)
     if df.empty:
         return []
 
-    columna_numero_interno = _columna_por_posicion(
-        df, INDICE_COLUMNA_NUMERO_INTERNO, "numero_interno"
+    columna_numero_interno = _resolver_columna(
+        df, NOMBRES_COLUMNA_NUMERO_INTERNO, INDICE_COLUMNA_NUMERO_INTERNO, "numero_interno"
     )
-    columna_notas_libres = _columna_por_posicion(
-        df, INDICE_COLUMNA_NOTAS_LIBRES, "notas_libres"
+    columna_notas_libres = _resolver_columna(
+        df, NOMBRES_COLUMNA_NOTAS_LIBRES, INDICE_COLUMNA_NOTAS_LIBRES, "notas_libres"
     )
 
     faltantes = [c for c in list(MAPEO_EMPRESAS.values()) if c not in df.columns]
     if columna_numero_interno is None:
         faltantes.append(f"columna nº{INDICE_COLUMNA_NUMERO_INTERNO + 1} (numero_interno)")
     if faltantes:
-        print(f"Aviso: no se han encontrado estas columnas en '{HOJA_EMPRESAS}': {faltantes}", flush=True)
+        print(
+            f"Aviso: no se han encontrado estas columnas en '{HOJA_EMPRESAS}': {faltantes} "
+            "(si son columnas que sabes que están ocultas a propósito en el Excel, es el "
+            "comportamiento esperado -- ver excluir_ocultos en _leer_hoja).",
+            flush=True,
+        )
 
     empresas = []
 
@@ -454,14 +539,29 @@ def _referencia_totalmente_vacia(referencia: dict) -> bool:
     return all(not referencia.get(campo) for campo in CAMPOS_REFERENCIA_MOSTRADOS)
 
 
-def leer_referencias(buffer_excel: io.BytesIO, indice_nombres_empresa: dict) -> list:
-    df = _leer_hoja(buffer_excel, HOJA_REFERENCIAS, FILA_CABECERA_REFERENCIAS)
+def leer_referencias(
+    buffer_excel: io.BytesIO,
+    indice_nombres_empresa: dict,
+    hoja: str = HOJA_REFERENCIAS,
+    fila_cabecera: int = FILA_CABECERA_REFERENCIAS,
+) -> list:
+    """
+    Lee una hoja de referencias/histórico de licitaciones con el mismo
+    formato de columnas que "REFERENCIAS P BÚSQUEDAS" (ver
+    MAPEO_REFERENCIAS) -- se usa tanto para esa hoja como para "HMS"
+    (mismas cabeceras exactas, solo cambia la hoja y la fila de
+    cabecera; ver HOJA_HMS/FILA_CABECERA_HMS). A diferencia de
+    'DOSSIER COMPLETO', aquí NUNCA se excluyen filas/columnas ocultas
+    -- se pidió explícitamente conservar todo lo de estas hojas, esté
+    oculto o no en el Excel.
+    """
+    df = _leer_hoja(buffer_excel, hoja, fila_cabecera)
     if df.empty:
         return []
 
     faltantes = [c for c in MAPEO_REFERENCIAS.values() if c not in df.columns]
     if faltantes:
-        print(f"Aviso: no se han encontrado estas columnas en '{HOJA_REFERENCIAS}': {faltantes}", flush=True)
+        print(f"Aviso: no se han encontrado estas columnas en '{hoja}': {faltantes}", flush=True)
 
     referencias = []
     sin_match = 0
@@ -494,20 +594,20 @@ def leer_referencias(buffer_excel: io.BytesIO, indice_nombres_empresa: dict) -> 
         referencia["numero_interno"] = numero_interno
         if not numero_interno:
             sin_match += 1
-            print(f"[SIN MATCH] Empresa en referencia: '{nombre_excel}' -> Motivo: {motivo}", flush=True)
+            print(f"[SIN MATCH] Empresa en referencia ('{hoja}'): '{nombre_excel}' -> Motivo: {motivo}", flush=True)
 
         referencias.append(referencia)
 
     if vacias_descartadas:
         print(
-            f"ℹ️ {vacias_descartadas} filas de '{HOJA_REFERENCIAS}' descartadas por no tener ningún "
+            f"ℹ️ {vacias_descartadas} filas de '{hoja}' descartadas por no tener ningún "
             f"dato relleno salvo el nombre de la empresa.",
             flush=True,
         )
 
     if sin_match:
         print(
-            f"ℹ️ {sin_match}/{len(referencias)} filas de referencias no se han podido enlazar "
+            f"ℹ️ {sin_match}/{len(referencias)} filas de '{hoja}' no se han podido enlazar "
             f"con ninguna empresa de '{HOJA_EMPRESAS}' por nombre (quedan con numero_interno=NULL, "
             f"pero se guardan igualmente).",
             flush=True,
@@ -607,8 +707,12 @@ def ejecutar_sincronizacion():
         _normalizar_nombre_empresa(e["nombre_empresa"]): e["numero_interno"]
         for e in empresas if e.get("nombre_empresa")
     }
-    referencias = leer_referencias(buffer_excel, indice_nombres)
+    referencias = leer_referencias(buffer_excel, indice_nombres, HOJA_REFERENCIAS, FILA_CABECERA_REFERENCIAS)
     print(f"Referencias leídas de '{HOJA_REFERENCIAS}': {len(referencias)}", flush=True)
+
+    referencias_hms = leer_referencias(buffer_excel, indice_nombres, HOJA_HMS, FILA_CABECERA_HMS)
+    print(f"Referencias leídas de '{HOJA_HMS}': {len(referencias_hms)}", flush=True)
+    referencias += referencias_hms
 
     if referencias:
         print("Recargando 'empresas_referencias' (borrado + inserción completa)...", flush=True)
