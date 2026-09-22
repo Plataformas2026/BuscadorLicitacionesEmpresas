@@ -70,7 +70,7 @@ def listar_empresas(
     numero_interno: list = None,
     sector: list = None,
     subsector: list = None,
-    tipo: list = None,
+    # tipo: list = None,
     cnae: list = None,
 ) -> list:
     consulta = supabase.table("empresas").select(COLUMNAS_TARJETA)
@@ -84,8 +84,8 @@ def listar_empresas(
     if subsector:
         consulta = consulta.in_("subsector", subsector)
 
-    if tipo:
-        consulta = consulta.in_("tipo_empresa", tipo)
+    #if tipo:
+        #consulta = consulta.in_("tipo_empresa", tipo)
 
     if cnae:
         consulta = consulta.in_("cnae", cnae)
@@ -322,12 +322,12 @@ def render_tab3(supabase: Client, encoder: SentenceTransformer):
             key="tab3_filtro_subsector",
         )
     
-    with col_tipo:
-        filtro_tipo = st.multiselect(
-            "Empresa pública / clúster / asociación / privada",
-            opciones["tipos"],
-            key="tab3_filtro_tipo",
-        )
+    #with col_tipo:
+    #    filtro_tipo = st.multiselect(
+    #        "Empresa pública / clúster / asociación / privada",
+    #        opciones["tipos"],
+    #        key="tab3_filtro_tipo",
+    #    )
     
     with col_cnae:
         filtro_cnae = st.multiselect(
@@ -350,7 +350,7 @@ def render_tab3(supabase: Client, encoder: SentenceTransformer):
                     numero_interno=filtro_numero_interno or None,
                     sector=filtro_sector or None,
                     subsector=filtro_subsector or None,
-                    tipo=filtro_tipo or None,
+                    # tipo=filtro_tipo or None,
                     cnae=filtro_cnae or None,
                 )
                 st.session_state.tab3_idioma_detectado = None
@@ -376,11 +376,11 @@ def render_tab3(supabase: Client, encoder: SentenceTransformer):
                       if r.get("subsector") in filtro_subsector
                   ]
           
-              if filtro_tipo:
-                  resultados = [
-                      r for r in resultados
-                      if r.get("tipo_empresa") in filtro_tipo
-                  ]
+              #if filtro_tipo:
+               #   resultados = [
+               #       r for r in resultados
+               #       if r.get("tipo_empresa") in filtro_tipo
+               #   ]
           
               if filtro_cnae:
                   resultados = [
