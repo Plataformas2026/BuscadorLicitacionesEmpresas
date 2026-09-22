@@ -1,0 +1,51 @@
+name: Sincronizar Licitaciones (UNDP)
+
+on:
+  schedule:
+    - cron: '0 7 * * *'   # todos los dias a las 07:00 UTC
+  workflow_dispatch:
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Instalar el navegador de Playwright
+        run: python -m playwright install --with-deps chromium
+
+      - name: Ejecutar sincronizacion UNDP
+        working-directory: ingest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python ingesta_undp.py
+
+      # Ver docstring de ingesta_undp.py: si no se reconoce ninguna fila,
+      # el script guarda una captura de pantalla de la tabla tal cual la
+      # vio el navegador. Se sube como artefacto descargable desde la
+      # propia ejecucion en GitHub Actions (pestaña "Summary" ->
+      # "Artifacts") para poder ver que encontro sin tener que
+      # reproducirlo en local.
+      - name: Subir captura de depuracion (si el script no reconocio ninguna fila)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-undp-tabla
+          path: ingest/debug_undp_tabla.png
+          if-no-files-found: ignore
+          retention-days: 7
