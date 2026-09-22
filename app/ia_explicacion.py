@@ -111,8 +111,9 @@ def groq_configurado() -> bool:
 
 
 def _llamar_groq(prompt_usuario: str):
-    """Devuelve el texto generado, o None si algo falla (ver docstring del módulo)."""
+    """Devuelve el texto generado, o el mensaje de error si algo falla."""
     if not groq_configurado():
+        st.warning("GROQ_API_KEY no está configurada en las variables del sistema.")
         return None
 
     try:
@@ -133,12 +134,20 @@ def _llamar_groq(prompt_usuario: str):
             },
             timeout=TIMEOUT_PETICION_SEGUNDOS,
         )
+        
+        # Si la API devuelve un status distinto a 200 (ej. 400, 404, 429), lanzará una excepción
         respuesta.raise_for_status()
-        print("Status code:", respuesta.status_code)
-        print("Response text:", respuesta.text)
+
         cuerpo = respuesta.json()
         return cuerpo["choices"][0]["message"]["content"].strip()
-    except Exception:
+
+    except requests.exceptions.HTTPError as err:
+        # Muestra en la pantalla de Streamlit la respuesta detallada de Groq
+        st.error(f"Error HTTP de Groq ({respuesta.status_code}): {respuesta.text}")
+        return None
+    except Exception as e:
+        # Muestra en la pantalla de Streamlit cualquier otro error de Python
+        st.error(f"Error al procesar la llamada a Groq: {e}")
         return None
 
 
