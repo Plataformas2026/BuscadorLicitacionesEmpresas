@@ -36,7 +36,7 @@ INSTRUCCIONES_SISTEMA = (
     "información verificada sobre una licitación y sobre el perfil de una "
     "empresa candidata, incluyendo un análisis de coincidencias ya "
     "realizado por otro sistema (una lista de motivos concretos). Tu "
-    "única tarea es redactar, en español y en un solo párrafo de 3 a 5 "
+    "única tarea es redactar, en español y en un solo párrafo de 3 a 4 "
     "frases, una justificación natural y bien argumentada de por qué esa "
     "empresa es (o no es) una buena candidata, basándote EXCLUSIVAMENTE "
     "en los datos que se te proporcionan. No inventes cifras, países, "
