@@ -13,7 +13,7 @@ ESTRATEGIA DE LA TABLA AUXILIAR (IGUAL QUE CAF):
 --------------------------------------------------------------------------
 1. Rastrea TODAS las convocatorias actualmente abiertas del listado mediante
    Playwright (sin ventana de fechas fija).
-2. Las registra/actualiza en la tabla auxiliar `ugpe_concursos_activos`
+2. Las registra/actualiza en la tabla auxiliar `ugpe_convocatorias_activas`
    (ver sql/schema.sql) mediante un upsert económico (título, URL, fecha límite)
    SIN leer la ficha ni generar ningún embedding todavía.
 3. Solo las que sean REALMENTE NUEVAS en esa tabla (columna `visto` a False)
@@ -22,6 +22,13 @@ ESTRATEGIA DE LA TABLA AUXILIAR (IGUAL QUE CAF):
    estaban registradas como vistas se saltan por completo.
 4. Al arrancar cada ejecución, se eliminan de la tabla auxiliar los concursos
    cuya fecha límite ya ha pasado.
+
+VALIDACIÓN REAL (a diferencia de CAF/BID, ver sus propios docstrings): esta
+lógica de extracción SÍ se ha ejecutado con éxito contra el portal real
+(ugpe.gov.cv) fuera de este entorno de desarrollo. Un único ajuste salió de
+esa prueba real: `wait_for_selector` esperaba solo 10 segundos a que
+aparecieran los concursos, insuficiente en la práctica -- ahora usa el mismo
+TIEMPO_ESPERA_CARGA_MS (45s) que el propio `goto()`.
 
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
 Ejecución local o programada: python ingesta_ugpe.py
@@ -209,7 +216,7 @@ async def rastrear_listado_completo(page) -> list:
         print(f"--> Cargando {url_pagina} ...", flush=True)
         try:
             await page.goto(url_pagina, timeout=TIEMPO_ESPERA_CARGA_MS, wait_until="domcontentloaded")
-            await page.wait_for_selector('a[href*="/concurso/"]', timeout=10000)
+            await page.wait_for_selector('a[href*="/concurso/"]', timeout=TIEMPO_ESPERA_CARGA_MS)
         except Exception as error:
             print(f"    No apareció ningún concurso reconocible a tiempo en la página {pagina}: {error}", flush=True)
             if pagina == 1:
