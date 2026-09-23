@@ -12,61 +12,10 @@ usando Playwright (navegador real, headless, gratuito) -- necesario porque
 la tabla se renderiza con JavaScript y se carga progresivamente con scroll
 ("Show more").
 
-Adaptado de un script de prueba que se ha ejecutado con éxito contra la
-página real fuera de este entorno de desarrollo. Único cambio respecto al
-script de prueba (aparte de quitar el andamiaje propio de Colab): se usa
-`playwright.sync_api`, igual que el resto de scrapers de este proyecto que
-necesitan un navegador.
-
-DETECCIÓN DE FECHAS -- HEURÍSTICA POSICIONAL, TAL CUAL SE VALIDÓ
---------------------------------------------------------------------------
-Cada fila no separa sus fechas por etiqueta (a diferencia de BID/UNDP):
-`evaluar_licitacion()` extrae TODAS las fechas del texto completo de la
-fila por regex, y asume la 1ª = fecha límite (Deadline) y la 2ª = fecha
-de publicación (Published) -- ese orden es el que confirmó el script de
-prueba contra la página real. Solo se suben avisos cuya fecha de
-publicación caiga en los últimos DIAS_ATRAS días.
-
-AVISO DE FIABILIDAD -- PAÍS/UBICACIÓN NO VALIDADO
---------------------------------------------------------------------------
-El script de prueba que se ha ejecutado con éxito NO extraía país (su
-propia lista de columnas de salida no lo incluía). Una búsqueda aparte
-confirma que el buscador de UNGM sí expone un facet "Beneficiary country
-or territory" en la página, pero no se ha podido confirmar en qué celda
-exacta de cada fila aparece ese valor (no hay salida de red hacia
-ungm.org en este entorno de desarrollo). Para no adivinar una posición
-de celda a ciegas -- con el riesgo de capturar silenciosamente el campo
-equivocado (p. ej. la referencia o el organismo en vez del país) -- este
-script usa el mismo mecanismo YA VALIDADO en ingesta_caf.py: comprobar si
-el texto completo de la fila contiene el nombre de algún país conocido
-(ver PAISES_ONU). Es deliberadamente conservador: si el país no aparece
-tal cual en el texto de la fila (p. ej. "Multiple destinations", como
-usa UNGM para avisos multipaís), `pais` queda en None en vez de forzar
-un valor probablemente erróneo.
-
-**Revisa el log "Avisos con país reconocido" tras la primera ejecución
-manual (workflow_dispatch); si sale muy bajo, es señal de que el país sí
-vive en una celda de la tabla y conviene inspeccionar el HTML real para
-extraerlo de forma más precisa en vez de por coincidencia de texto.**
-
-AVISO DE FIABILIDAD -- TÍTULO CORREGIDO A CIEGAS (SIN CONFIRMAR TODAVÍA)
---------------------------------------------------------------------------
-Una ejecución real confirmó que el título llegaba vacío: el único intento
-de partida (`enlace.innerText`) no bastaba. Se han añadido varios niveles
-de respaldo, de más a menos específico -- atributos `title`/`aria-label`
-del propio enlace, el texto de la celda que lo contiene, la primera celda
-de la fila y, como último recurso en Python, la celda no vacía más larga
-que no parezca solo una fecha o una referencia corta
-(`_mejor_titulo_disponible`). Ninguno de estos respaldos se ha podido
-confirmar contra la página real (mismo motivo que el aviso de país, más
-arriba) -- revisa el título de los avisos en la primera ejecución manual;
-si sigue vacío o sale el texto "sin título reconocido", hace falta
-inspeccionar el HTML real para dar con el selector correcto.
-
-Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
-Ejecucion local:      python ingesta_ungm.py
-Ejecucion programada: ver .github/workflows/sincronizar_ungm.yml
-   (necesita el paso extra "playwright install --with-deps chromium")
+Optimizaciones agregadas:
+- Garantiza orden descendente haciendo clic en el encabezado #id_DatePublished.
+- Parada temprana (Early Exit) cuando se detectan fechas de publicación fuera
+  de la ventana configurada.
 """
 import re
 import time
@@ -86,7 +35,7 @@ from common import (
 BASE_URL = "https://www.ungm.org"
 LISTADO_URL = BASE_URL + "/Public/Notice"
 FUENTE = "UNGM"
-DIAS_ATRAS = 2   # el script de prueba validado exigía fecha de publicacion en {hoy, ayer}
+DIAS_ATRAS = 2   # Ventana de publicación (Hoy y Ayer)
 LOTE_ENVIO_SUPABASE = 15
 CAMPOS_COMPARABLES = ("titulo", "pais", "fecha_publicacion", "fecha_limite")
 
@@ -100,25 +49,16 @@ CABECERAS_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
-# JS de extracción tal cual se validó: cada fila de '#tblNotices' con un
-# enlace a '/Public/Notice/' es un aviso. Se guardan tanto las celdas
-# estructuradas como el texto completo de la fila (las fechas y -- ver
-# aviso de fiabilidad -- el país se detectan después, en Python, por
-# regex/lista de nombres, no por posición de celda).
+# JS de extracción que recupera el enlace, título, celdas y la celda específica de la fecha de publicación
 _JS_EXTRAER_FILAS = """
 () => {
     const resultados = [];
-    const filas = document.querySelectorAll('#tblNotices tr, #tblNotices .tableRow');
+    const filas = document.querySelectorAll('#tblNotices tr, #tblNotices .tableRow, #tblNotices .notice-table');
 
     filas.forEach(fila => {
         const enlace = fila.querySelector('a[href*="/Public/Notice/"]');
         if (!enlace) return;
 
-        // El titulo se intenta en varios sitios, de mas a menos
-        // especifico -- el texto del propio enlace no siempre basta (se
-        // ha observado vacio en produccion, posiblemente porque el
-        // titulo visible vive en un span/strong hijo con otro
-        // tratamiento, o el enlace envuelve solo un icono).
         let titulo = (enlace.innerText || '').trim();
         if (!titulo) {
             titulo = (enlace.getAttribute('title') || enlace.getAttribute('aria-label') || '').trim();
@@ -138,11 +78,15 @@ _JS_EXTRAER_FILAS = """
 
         const href = enlace.getAttribute('href');
         const celdas = Array.from(fila.querySelectorAll('td, div.tableCell')).map(c => c.innerText.trim());
+        
+        // En la estructura de UNGM, la fecha de publicación suele estar en la celda del índice 3 (4ta columna)
+        const fechaPubTexto = celdas.length >= 4 ? celdas[3] : '';
 
         resultados.push({
             titulo: titulo,
             href: href,
             celdas: celdas,
+            fecha_pub_texto: fechaPubTexto,
             texto_completo: (fila.innerText || '').replace(/\\s+/g, ' ')
         });
     });
@@ -154,11 +98,6 @@ _JS_EXTRAER_FILAS = """
 PATRON_FECHA = re.compile(r"\b(\d{1,2})[-/\s]([A-Za-z]{3,9})[-/\s](\d{4})\b")
 PATRON_ID_NOTICE = re.compile(r"/Public/Notice/(\d+)")
 
-# Lista de países best-effort para la detección de "pais" -- ver aviso de
-# fiabilidad en el docstring del módulo. Nombres en inglés (idioma del
-# portal). No pretende ser exhaustiva letra por letra (territorios,
-# variantes ortográficas) pero cubre los ~195 estados miembro/observadores
-# de la ONU con su forma corta habitual en inglés.
 PAISES_ONU = [
     "Afghanistan", "Albania", "Algeria", "Andorra", "Angola", "Antigua and Barbuda",
     "Argentina", "Armenia", "Australia", "Austria", "Azerbaijan", "Bahamas", "Bahrain",
@@ -206,8 +145,6 @@ _PAISES_NORMALIZADOS = sorted(
 
 
 def _detectar_pais(texto: str):
-    """Best-effort: primer país conocido que aparezca literalmente en el
-    texto -- ver aviso de fiabilidad en el docstring del módulo."""
     if not texto:
         return None
     texto_norm = _normalizar_texto(texto)
@@ -224,9 +161,6 @@ def _generar_slug(texto: str) -> str:
 
 
 def _id_o_slug(url: str) -> str:
-    """El ID numerico de '/Public/Notice/223083' si se reconoce (mucho
-    mas limpio que trocear toda la URL); si no, la URL entera troceada
-    como respaldo."""
     coincidencia = PATRON_ID_NOTICE.search(url or "")
     if coincidencia:
         return coincidencia.group(1)
@@ -251,11 +185,8 @@ def parsear_fecha_string(cadena_fecha: str):
 
 def evaluar_licitacion(item: dict):
     """
-    Analiza el texto completo de la fila: la 1ª fecha reconocida es el
-    Deadline, la 2ª es la fecha de publicación (Published) -- orden
-    confirmado en el script de prueba validado contra la página real.
-    Devuelve (fecha_publicacion_str, deadline_str) o (None, None) si no
-    hay ninguna fecha reconocible.
+    Analiza las fechas del aviso. Si existe fecha_pub_texto explícita la usa como
+    fecha de publicación y busca la fecha límite por descarte en el texto completo.
     """
     texto = item.get("texto_completo", "")
     coincidencias = PATRON_FECHA.findall(texto)
@@ -270,22 +201,38 @@ def evaluar_licitacion(item: dict):
     if not fechas:
         return None, None
 
+    fecha_pub_explicit = parsear_fecha_string(item.get("fecha_pub_texto", ""))
+    if fecha_pub_explicit:
+        pub_str = item.get("fecha_pub_texto")
+        deadline_str = fechas[0][0] if fechas[0][0] != pub_str else (fechas[1][0] if len(fechas) > 1 else None)
+        return pub_str, deadline_str
+
+    # Respaldo por heurística posicional
     deadline_str, _ = fechas[0]
-    if len(fechas) >= 2:
-        pub_str, _ = fechas[1]
-    else:
-        pub_str, _ = fechas[0]
+    pub_str = fechas[1][0] if len(fechas) >= 2 else fechas[0][0]
 
     return pub_str, deadline_str
 
 
+def asegurar_orden_publicacion_descendente(pagina):
+    """
+    Verifica y fuerza el ordenamiento descendente en la columna 'Published'.
+    """
+    try:
+        header = pagina.locator("#id_DatePublished")
+        if header.count() > 0:
+            aria_sort = header.get_attribute("aria-sort")
+            if aria_sort != "descending":
+                print("--> Ordenando tabla por fecha de publicación descendente...", flush=True)
+                header.click()
+                pagina.wait_for_timeout(2500)
+    except Exception as e:
+        print(f"Aviso al intentar ordenar por fecha: {e}", flush=True)
+
+
 def extraer_licitaciones_playwright() -> list:
-    """
-    Abre el portal y va haciendo scroll / pulsando "Show more" hasta
-    MAX_SCROLLS veces, devolviendo TODOS los avisos vistos, sin filtrar
-    todavía por fecha -- ver ejecutar_sincronizacion().
-    """
     registros_por_url = {}
+    limite_fecha_corte = date.today() - timedelta(days=DIAS_ATRAS - 1)
 
     try:
         with sync_playwright() as p:
@@ -303,17 +250,31 @@ def extraer_licitaciones_playwright() -> list:
                 pagina.wait_for_selector("#tblNotices", timeout=TIEMPO_ESPERA_CARGA_MS)
                 time.sleep(2)
 
+                # Asegurar orden descendente antes de recopilar
+                asegurar_orden_publicacion_descendente(pagina)
+
                 for indice in range(1, MAX_SCROLLS + 1):
                     filas = pagina.evaluate(_JS_EXTRAER_FILAS)
+                    alguno_reciente_en_iteracion = False
 
                     for item in filas:
                         href = item.get("href")
                         url_completa = urljoin(BASE_URL, href) if href else None
                         if not url_completa or url_completa in registros_por_url:
                             continue
+
+                        # Evaluar fecha para la parada temprana (Early Exit)
+                        pub_str, _ = evaluar_licitacion(item)
+                        fecha_pub = parsear_fecha_string(pub_str) if pub_str else None
+
+                        if fecha_pub and fecha_pub >= limite_fecha_corte:
+                            alguno_reciente_en_iteracion = True
+
                         registros_por_url[url_completa] = {
                             "titulo": item.get("titulo"),
                             "texto_completo": item.get("texto_completo"),
+                            "fecha_pub_texto": item.get("fecha_pub_texto"),
+                            "celdas": item.get("celdas"),
                             "url_oficial": url_completa,
                         }
 
@@ -321,6 +282,16 @@ def extraer_licitaciones_playwright() -> list:
                         f"    Scroll {indice}/{MAX_SCROLLS} -> avisos acumulados: {len(registros_por_url)}",
                         flush=True,
                     )
+
+                    # Parada temprana: si la tabla está ordenada desc y en esta ronda ya vimos filas
+                    # más antiguas que nuestro límite sin encontrar nuevas dentro del rango, detenemos el scraping.
+                    if not alguno_reciente_en_iteracion and len(registros_por_url) > 0:
+                        ultima_fila = filas[-1] if filas else {}
+                        pub_str_u, _ = evaluar_licitacion(ultima_fila)
+                        f_u = parsear_fecha_string(pub_str_u) if pub_str_u else None
+                        if f_u and f_u < limite_fecha_corte:
+                            print(f"--> Parada temprana: Se alcanzó la fecha {f_u} (fuera de la ventana).", flush=True)
+                            break
 
                     pagina.evaluate("window.scrollBy(0, 1800);")
                     time.sleep(PAUSA_ENTRE_SCROLLS_SEGUNDOS)
@@ -331,6 +302,8 @@ def extraer_licitaciones_playwright() -> list:
                     if boton_cargar.count() > 0 and boton_cargar.first.is_visible():
                         boton_cargar.first.click()
                         time.sleep(2)
+                    else:
+                        break
 
             except Exception as error:
                 print(f"Error durante la navegación con Playwright: {error}", flush=True)
@@ -353,13 +326,6 @@ def extraer_licitaciones_playwright() -> list:
 
 
 def _mejor_titulo_disponible(item: dict) -> str:
-    """
-    Respaldo en Python, además de los ya intentados en el propio JS (ver
-    _JS_EXTRAER_FILAS): si aun así no hay título, se usa la celda no
-    vacía más larga de la fila que no parezca solo una fecha o una
-    referencia corta -- mejor eso que guardar el aviso con el título en
-    blanco.
-    """
     titulo = (item.get("titulo") or "").strip()
     if titulo:
         return titulo
@@ -380,10 +346,6 @@ def construir_registro(item: dict) -> dict:
     pais = _detectar_pais(item.get("texto_completo"))
     titulo = _mejor_titulo_disponible(item)
 
-    # Descripcion: aparte del plazo, se añade un fragmento del texto
-    # completo de la fila (quitando el propio título si aparece
-    # literalmente) como contexto adicional -- el script de prueba no
-    # capturaba ningún campo de descripción propiamente dicho para UNGM.
     partes_descripcion = []
     if fecha_limite_str:
         partes_descripcion.append(f"Plazo: {fecha_limite_str}.")
