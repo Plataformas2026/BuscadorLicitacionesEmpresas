@@ -323,6 +323,7 @@ def obtener_detalle_concurso(url: str) -> dict:
         "titulo_real": titulo_real,
         "referencia": campos.get(ETIQUETA_ID),
         "categoria": campos.get(ETIQUETA_CATEGORIA),
+        "abrangencia": campos.get(ETIQUETA_ABRANGENCIA),
         "descripcion": descripcion,
         "fecha_publicacion": fecha_publicacion,
         "fecha_limite": fecha_limite,
@@ -406,14 +407,20 @@ def construir_registro(tarjeta: dict, detalle: dict) -> dict:
     fecha_pub = (detalle or {}).get("fecha_publicacion")
     fecha_lim = (detalle or {}).get("fecha_limite")
 
+    abrangencia = (detalle or {}).get("abrangencia")
+    if abrangencia:
+        pais_formateado = f"{abrangencia.strip().lower()} ({PAIS_UGPE})"
+    else:
+        pais_formateado = PAIS_UGPE
+
     return {
         "codigo_unico": f"UGPE-{_generar_slug(slug_base)}",
         "fuente_origen": FUENTE,
         "tipo_aviso": "Concurso",
         "titulo": titulo_final,
         "descripcion": (detalle or {}).get("descripcion"),
-        "pais": PAIS_UGPE,
-        "paises": [PAIS_UGPE],
+        "pais": pais_formateado,
+        "paises": [pais_formateado],
         "organismo": "UGPE",
         "categoria": (detalle or {}).get("categoria"),
         "url_oficial": tarjeta["url_oficial"],
