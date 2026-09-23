@@ -12,10 +12,10 @@ usando Playwright (navegador real, headless, gratuito) -- necesario porque
 la tabla se renderiza con JavaScript y se carga progresivamente con scroll
 ("Show more").
 
-Optimizaciones agregadas:
-- Garantiza orden descendente haciendo clic en el encabezado #id_DatePublished.
-- Parada temprana (Early Exit) cuando se detectan fechas de publicación fuera
-  de la ventana configurada.
+Adaptaciones:
+- Intenta ordenar la tabla por fecha de publicación descendente haciendo clic en #id_DatePublished.
+- Mapea directamente la 4ª celda (índice 3) para la fecha de publicación.
+- Recorre todos los scrolls sin parada temprana para no omitir registros si las fechas vienen desordenadas.
 """
 import re
 import time
@@ -216,14 +216,14 @@ def evaluar_licitacion(item: dict):
 
 def asegurar_orden_publicacion_descendente(pagina):
     """
-    Verifica y fuerza el ordenamiento descendente en la columna 'Published'.
+    Intenta ordenar la columna 'Published' de forma descendente.
     """
     try:
         header = pagina.locator("#id_DatePublished")
         if header.count() > 0:
             aria_sort = header.get_attribute("aria-sort")
             if aria_sort != "descending":
-                print("--> Ordenando tabla por fecha de publicación descendente...", flush=True)
+                print("--> Intentando ordenar por fecha de publicación descendente...", flush=True)
                 header.click()
                 pagina.wait_for_timeout(2500)
     except Exception as e:
@@ -232,7 +232,6 @@ def asegurar_orden_publicacion_descendente(pagina):
 
 def extraer_licitaciones_playwright() -> list:
     registros_por_url = {}
-    limite_fecha_corte = date.today() - timedelta(days=DIAS_ATRAS - 1)
 
     try:
         with sync_playwright() as p:
@@ -250,25 +249,17 @@ def extraer_licitaciones_playwright() -> list:
                 pagina.wait_for_selector("#tblNotices", timeout=TIEMPO_ESPERA_CARGA_MS)
                 time.sleep(2)
 
-                # Asegurar orden descendente antes de recopilar
+                # Intentar ordenar desc si la columna lo permite
                 asegurar_orden_publicacion_descendente(pagina)
 
                 for indice in range(1, MAX_SCROLLS + 1):
                     filas = pagina.evaluate(_JS_EXTRAER_FILAS)
-                    alguno_reciente_en_iteracion = False
 
                     for item in filas:
                         href = item.get("href")
                         url_completa = urljoin(BASE_URL, href) if href else None
                         if not url_completa or url_completa in registros_por_url:
                             continue
-
-                        # Evaluar fecha para la parada temprana (Early Exit)
-                        pub_str, _ = evaluar_licitacion(item)
-                        fecha_pub = parsear_fecha_string(pub_str) if pub_str else None
-
-                        if fecha_pub and fecha_pub >= limite_fecha_corte:
-                            alguno_reciente_en_iteracion = True
 
                         registros_por_url[url_completa] = {
                             "titulo": item.get("titulo"),
@@ -282,16 +273,6 @@ def extraer_licitaciones_playwright() -> list:
                         f"    Scroll {indice}/{MAX_SCROLLS} -> avisos acumulados: {len(registros_por_url)}",
                         flush=True,
                     )
-
-                    # Parada temprana: si la tabla está ordenada desc y en esta ronda ya vimos filas
-                    # más antiguas que nuestro límite sin encontrar nuevas dentro del rango, detenemos el scraping.
-                    if not alguno_reciente_en_iteracion and len(registros_por_url) > 0:
-                        ultima_fila = filas[-1] if filas else {}
-                        pub_str_u, _ = evaluar_licitacion(ultima_fila)
-                        f_u = parsear_fecha_string(pub_str_u) if pub_str_u else None
-                        if f_u and f_u < limite_fecha_corte:
-                            print(f"--> Parada temprana: Se alcanzó la fecha {f_u} (fuera de la ventana).", flush=True)
-                            break
 
                     pagina.evaluate("window.scrollBy(0, 1800);")
                     time.sleep(PAUSA_ENTRE_SCROLLS_SEGUNDOS)
