@@ -211,67 +211,109 @@ def _parrafos_de(li) -> list:
 def obtener_datos_ficha(url: str) -> dict:
     resultado = {"descripcion": None, "fecha_publicacion": None, "fecha_limite": None}
 
+    print(f"\n--- [DEBUG] Analizando URL: {url} ---", flush=True)
+
     try:
         respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=CABECERAS_PETICION)
         respuesta.raise_for_status()
     except Exception as error:
-        print(f"     Error descargando la ficha: {error}", flush=True)
+        print(f"     [ERROR] Descargando la ficha: {error}", flush=True)
         return resultado
 
     soup = BeautifulSoup(respuesta.text, "html.parser")
-    
-    # BÚSQUEDA TOLERANTE DE DESCRIPCIÓN: Busca cualquier elemento cuyo texto incluya "objetivos generales"
-    elemento_objetivos = soup.find(lambda tag: tag.name in ['span', 'h3', 'p', 'div'] and 'objetivos generales' in tag.get_text().lower())
-    if elemento_objetivos:
-        # Buscamos el primer párrafo (<p>) que esté a continuación o dentro del mismo contenedor padre (<li> o <div>)
-        contenedor = elemento_objetivos.find_parent(['li', 'div', 'section'])
-        if contenedor:
-            parrafos = [p.get_text(" ", strip=True) for p in contenedor.find_all("p") if p.get_text(strip=True)]
-            # Filtramos para asegurarnos de no coger el propio título de objetivos si fuera un párrafo
-            parrafos_validos = [p for p in parrafos if 'objetivos generales' not in p.lower()]
-            if parrafos_validos:
-                resultado["descripcion"] = parrafos_validos[0]
-            elif parrafos:
-                resultado["descripcion"] = parrafos[0]
 
-    # Si aún así fuera nulo, buscamos cualquier párrafo que hable de la finalidad o adquisición de forma genérica en la ficha
-    if not resultado["descripcion"]:
-        for p in soup.find_all("p"):
-            texto_p = p.get_text(" ", strip=True)
-            if any(k in texto_p.lower() for k in ["tiene como finalidad", "acquisition and delivery", "consiste en", "la presente adquisición"]):
-                resultado["descripcion"] = texto_p
+    # 1. BÚSQUEDA DE DESCRIPCIÓN POR "Objetivos Generales"
+    encontrado_por_span = False
+    for span in soup.find_all(["span", "h3", "p", "div"]):
+        texto_span = span.get_text(" ", strip=True)
+        if "objetivos generales" in texto_span.lower():
+            print(f"   [+] Encontrado span/etiqueta clave: '{texto_span}'", flush=True)
+            contenedor = span.find_parent("li") or span.parent
+            if contenedor:
+                parrafos = contenedor.find_all("p")
+                for p in parrafos:
+                    txt_p = p.get_text(" ", strip=True)
+                    print(f"       -> Analizando párrafo hijo: '{txt_p}'", flush=True)
+                    if txt_p and "objetivos generales" not in txt_p.lower():
+                        resultado["descripcion"] = txt_p
+                        encontrado_por_span = True
+                        print(f"       [¡EXITO!] Descripción fijada: '{txt_p}'", flush=True)
+                        break
+            if encontrado_por_span:
                 break
 
-    # Extracción de fechas robusta basada en la estructura de metadatos o etiquetas <li> / párrafos
-    items = soup.find_all("li")
-    for li in items:
-        span = li.find("span")
-        texto_span = (span.get_text(" ", strip=True) if span else "").lower()
-        parrafos = _parrafos_de(li)
+    # Red de seguridad 1 para descripción
+    if not resultado["descripcion"]:
+        print("   [!] No se halló por span directo. Buscando por elementos <li>...", flush=True)
+        for li in soup.find_all("li"):
+            texto_li = li.get_text(" ", strip=True)
+            if "objetivos generales" in texto_li.lower():
+                parrafos = li.find_all("p")
+                if parrafos:
+                    resultado["descripcion"] = parrafos[0].get_text(" ", strip=True)
+                    print(f"   [¡EXITO! Red 1] Descripción fijada desde <li>: '{resultado['descripcion']}'", flush=True)
+                    break
 
-        if "recibir" in texto_span:   # "...se recibirán en:"
+    # Red de seguridad 2 absoluta: Si el aviso no usa la estructura estándar de objetivos, 
+    # cogemos el título principal o el texto descriptivo superior del aviso.
+    if not resultado["descripcion"]:
+        print("   [!] Estructura estándar no detectada. Buscando título principal o resumen alternativo...", flush=True)
+        h1_principal = soup.find("h1")
+        if h1_principal:
+            resultado["descripcion"] = h1_principal.get_text(" ", strip=True)
+            print(f"   [¡EXITO! Red 2] Usando título H1 como descripción: '{resultado['descripcion']}'", flush=True)
+
+    # 2. EXTRACCIÓN DE FECHAS DESDE METADATOS SUPERIORES (<dt> / <dd>)
+    for dt in soup.find_all(["dt", "span", "div"]):
+        texto_dt = dt.get_text(" ", strip=True).lower()
+        if "fecha de publicación" in texto_dt:
+            dd = dt.find_next(["dd", "span", "p"])
+            if dd:
+                txt_fecha = dd.get_text(" ", strip=True)
+                parsed = parsear_fecha_bcie(txt_fecha)
+                print(f"   [Calendario] Fecha publicación detectada en cabecera: '{txt_fecha}' -> Parseada: {parsed}", flush=True)
+                if parsed:
+                    resultado["fecha_publicacion"] = parsed
+        elif "fecha de cierre" in texto_dt:
+            dd = dt.find_next(["dd", "span", "p"])
+            if dd:
+                txt_fecha = dd.get_text(" ", strip=True)
+                parsed = parsear_fecha_bcie(txt_fecha)
+                print(f"   [Calendario] Fecha cierre detectada en cabecera: '{txt_fecha}' -> Parseada: {parsed}", flush=True)
+                if parsed:
+                    resultado["fecha_limite"] = parsed
+
+    # 3. REVISIÓN DE BLOQUES DE TEXTO INFERIORES SI FALTAN FECHAS
+    if not resultado["fecha_publicacion"] or not resultado["fecha_limite"]:
+        print("   [!] Faltan fechas en cabecera. Barriendo bloques de texto <li>...", flush=True)
+        items = soup.find_all("li")
+        for li in items:
+            parrafos = _parrafos_de(li)
             for texto_p in parrafos:
-                coincidencia = re.search(r"fecha:?\s*(\d{1,2}[-/\s][A-Za-z]{3,9}[-/\s]\d{4})", texto_p, re.IGNORECASE)
-                if coincidencia:
-                    resultado["fecha_limite"] = parsear_fecha_bcie(coincidencia.group(1))
-            continue
+                if not resultado["fecha_publicacion"]:
+                    match_partir = re.search(r"a partir de:?\s*(.+)", texto_p, re.IGNORECASE)
+                    if match_partir:
+                        parsed = parsear_fecha_bcie(match_partir.group(1))
+                        print(f"       -> 'A partir de' encontrado: {match_partir.group(1)} -> {parsed}", flush=True)
+                        if parsed:
+                            resultado["fecha_publicacion"] = parsed
+                
+                if not resultado["fecha_limite"]:
+                    match_hasta = re.search(r"hasta:?\s*(.+)", texto_p, re.IGNORECASE)
+                    if match_hasta:
+                        parsed = parsear_fecha_bcie(match_hasta.group(1))
+                        print(f"       -> 'Hasta' encontrado: {match_hasta.group(1)} -> {parsed}", flush=True)
+                        if parsed:
+                            resultado["fecha_limite"] = parsed
+                    
+                    match_fecha_rec = re.search(r"fecha:?\s*(.+)", texto_p, re.IGNORECASE)
+                    if match_fecha_rec:
+                        parsed = parsear_fecha_bcie(match_fecha_rec.group(1))
+                        print(f"       -> 'Fecha recepción' encontrado: {match_fecha_rec.group(1)} -> {parsed}", flush=True)
+                        if parsed:
+                            resultado["fecha_limite"] = parsed
 
-        for texto_p in parrafos:
-            coincidencia_partir = re.search(r"a partir de:?\s*(\d{1,2}[-/\s][A-Za-z]{3,9}[-/\s]\d{4})", texto_p, re.IGNORECASE)
-            if coincidencia_partir:
-                resultado["fecha_publicacion"] = parsear_fecha_bcie(coincidencia_partir.group(1))
-            
-            coincidencia_hasta = re.search(r"hasta:?\s*(\d{1,2}[-/\s][A-Za-z]{3,9}[-/\s]\d{4})", texto_p, re.IGNORECASE)
-            if coincidencia_hasta and resultado["fecha_limite"] is None:
-                resultado["fecha_limite"] = parsear_fecha_bcie(coincidencia_hasta.group(1))
-
-    # Red de seguridad global para fechas si vinieron vacías
-    if resultado["fecha_limite"] is None:
-        texto_plano = soup.get_text(" ", strip=True)
-        coincidencia_recepcion = PATRON_FECHA_RECEPCION.search(texto_plano)
-        if coincidencia_recepcion:
-            resultado["fecha_limite"] = parsear_fecha_bcie(coincidencia_recepcion.group(1))
-
+    print(f"   [RESUMEN FINAL] Descripcion: {resultado['descripcion']} | Publicacion: {resultado['fecha_publicacion']} | Cierre: {resultado['fecha_limite']}\n", flush=True)
     return resultado
 
 def extraer_licitaciones_playwright() -> list:
