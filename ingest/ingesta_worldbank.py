@@ -63,7 +63,7 @@ BASE_URL = (
     "business-opportunities/administrative-procurement"
 )
 FUENTE = "World Bank"
-DIAS_ATRAS = 15    # igual que el script de prueba validado
+DIAS_ATRAS = 1    # igual que el script de prueba validado
 LOTE_ENVIO_SUPABASE = 15
 CAMPOS_COMPARABLES = ("titulo", "fecha_publicacion", "fecha_limite")
 
