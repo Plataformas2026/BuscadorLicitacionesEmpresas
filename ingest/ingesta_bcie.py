@@ -220,28 +220,29 @@ def obtener_datos_ficha(url: str) -> dict:
 
     soup = BeautifulSoup(respuesta.text, "html.parser")
     
-    # NUEVA ESTRATEGIA PARA LA DESCRIPCIÓN: Buscar directamente cualquier <span> o texto 
-    # que contenga "Objetivos Generales" sin importar el nivel de listas anidadas.
-    spans = soup.find_all(lambda tag: tag.name == 'span' and 'objetivos generales' in tag.get_text().lower())
-    for span in spans:
-        # El párrafo de descripción suele ser el siguiente hermano o estar dentro del mismo <li> padre
-        li_padre = span.find_parent('li')
-        if li_padre:
-            parrafos = _parrafos_de(li_padre)
-            if parrafos:
+    # BÚSQUEDA TOLERANTE DE DESCRIPCIÓN: Busca cualquier elemento cuyo texto incluya "objetivos generales"
+    elemento_objetivos = soup.find(lambda tag: tag.name in ['span', 'h3', 'p', 'div'] and 'objetivos generales' in tag.get_text().lower())
+    if elemento_objetivos:
+        # Buscamos el primer párrafo (<p>) que esté a continuación o dentro del mismo contenedor padre (<li> o <div>)
+        contenedor = elemento_objetivos.find_parent(['li', 'div', 'section'])
+        if contenedor:
+            parrafos = [p.get_text(" ", strip=True) for p in contenedor.find_all("p") if p.get_text(strip=True)]
+            # Filtramos para asegurarnos de no coger el propio título de objetivos si fuera un párrafo
+            parrafos_validos = [p for p in parrafos if 'objetivos generales' not in p.lower()]
+            if parrafos_validos:
+                resultado["descripcion"] = parrafos_validos[0]
+            elif parrafos:
                 resultado["descripcion"] = parrafos[0]
-                break
-    
-    # Si por alguna razón no se encontró con el método anterior, buscamos en todos los párrafos de la página
+
+    # Si aún así fuera nulo, buscamos cualquier párrafo que hable de la finalidad o adquisición de forma genérica en la ficha
     if not resultado["descripcion"]:
         for p in soup.find_all("p"):
             texto_p = p.get_text(" ", strip=True)
-            if "tiene como finalidad" in texto_p.lower() or "la adquisición de" in texto_p.lower():
+            if any(k in texto_p.lower() for k in ["tiene como finalidad", "acquisition and delivery", "consiste en", "la presente adquisición"]):
                 resultado["descripcion"] = texto_p
                 break
 
-    # Extracción de fechas robusta basada en la estructura de metadatos o etiquetas <dd> / párrafos
-    # (Buscamos las fechas de publicación y cierre directamente en los bloques de la ficha)
+    # Extracción de fechas robusta basada en la estructura de metadatos o etiquetas <li> / párrafos
     items = soup.find_all("li")
     for li in items:
         span = li.find("span")
@@ -272,7 +273,6 @@ def obtener_datos_ficha(url: str) -> dict:
             resultado["fecha_limite"] = parsear_fecha_bcie(coincidencia_recepcion.group(1))
 
     return resultado
-
 
 def extraer_licitaciones_playwright() -> list:
     """
