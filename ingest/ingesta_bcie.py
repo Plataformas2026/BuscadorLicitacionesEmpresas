@@ -226,7 +226,7 @@ def obtener_datos_ficha(url: str) -> dict:
         respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=CABECERAS_PETICION)
         respuesta.raise_for_status()
     except Exception as error:
-        print(f"     Error descargando la ficha: {error}", flush=True)
+        print(f"      Error descargando la ficha: {error}", flush=True)
         return resultado
 
     soup = BeautifulSoup(respuesta.text, "html.parser")
@@ -240,7 +240,7 @@ def obtener_datos_ficha(url: str) -> dict:
     if texto_fecha_lim:
         resultado["fecha_limite"] = parsear_fecha_bcie(texto_fecha_lim)
 
-    # 2. Descripción: búsqueda robusta por palabras clave combinando la lógica adaptada
+    # 2. Descripción: Búsqueda primaria por palabras clave comunes
     palabras_clave_desc = [
         "objetivos generales", 
         "objetivos de la adquisición", 
@@ -254,11 +254,13 @@ def obtener_datos_ficha(url: str) -> dict:
     for clave in palabras_clave_desc:
         elemento_texto = _span_por_texto(soup, clave)
         if elemento_texto:
+            # Intentar con el hermano siguiente
             siguiente = elemento_texto.find_next_sibling(["p", "div", "span", "ul"])
             if siguiente and len(siguiente.get_text(strip=True)) > 20:
                 parrafo_encontrado = siguiente.get_text(" ", strip=True)
                 break
             else:
+                # Si no hay hermano directo, buscar en el contenedor padre
                 padre = elemento_texto.find_parent()
                 if padre:
                     siguiente_padre = padre.find_next_sibling(["p", "div", "section"])
@@ -266,9 +268,20 @@ def obtener_datos_ficha(url: str) -> dict:
                         parrafo_encontrado = siguiente_padre.get_text(" ", strip=True)
                         break
 
+    # FALLBACK: Si no se encontró nada con palabras clave, extrae los 3 párrafos más largos (>100 caracteres)
+    if not parrafo_encontrado:
+        parrafos_largos = [
+            p.get_text(" ", strip=True) 
+            for p in soup.find_all("p") 
+            if len(p.get_text(strip=True)) > 100
+        ]
+        if parrafos_largos:
+            # Unir los hasta 3 párrafos más largos con saltos de línea doble
+            parrafo_encontrado = "\n\n".join(parrafos_largos[:3])
+
     resultado["descripcion"] = parrafo_encontrado
 
-    # Respaldos para fechas si faltan
+    # 3. Respaldos adicionales para fechas si faltan en el dt/dd
     texto_plano = None
     if resultado["fecha_publicacion"] is None or resultado["fecha_limite"] is None:
         texto_plano = soup.get_text(" ", strip=True)
@@ -299,7 +312,6 @@ def obtener_datos_ficha(url: str) -> dict:
                 resultado["fecha_limite"] = parsear_fecha_bcie(coincidencia_recepcion.group(1))
 
     return resultado
-
 
 def extraer_licitaciones_playwright() -> list:
     registros_por_url = {}
