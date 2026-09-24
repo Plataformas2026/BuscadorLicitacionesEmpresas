@@ -35,21 +35,54 @@ selectores CSS estructurales sobre pares `<div class="row">
     descripción real del aviso (antes era un texto sintético a partir
     de fragmentos sueltos de la fila del listado)
 
-Con MAX_SCROLLS=150 el listado puede descubrir muchos avisos; visitar
-la ficha de cada uno con `requests` es rápido (sin arrancar navegador
-por aviso) pero sigue siendo una petición HTTP por aviso -- 
-MAX_FICHAS_A_CONSULTAR pone un tope de seguridad razonable para no
-disparar peticiones sin límite si el listado devolviera muchos más
-avisos de los esperados para una ventana de 2 días.
+Con MAX_FICHAS_A_CONSULTAR=400 se pone un tope de seguridad razonable
+al número de fichas a consultar (una petición HTTP por aviso).
+
+SEGUNDA VUELTA -- TÍTULO, FILTRO POR FECHA Y SCROLL SIN TOPE FIJO
+--------------------------------------------------------------------------
+Contra el HTML real de la página de LISTADO (resultados de búsqueda,
+distinto de la ficha), se encontraron y corrigieron tres cosas más:
+
+  1. TÍTULO: el título de cada aviso vive en un
+     <span class="ungm-title..."> dentro de la celda `.resultTitle` --
+     NO en una clase `.title` (que no existe en el listado) ni en el
+     propio <a>, que solo envuelve un icono SVG sin texto ("Open in a
+     new window"). Por eso el título caía siempre al valor por defecto
+     "Aviso de UNGM sin título reconocido": ambas rutas de extracción
+     (la principal y su respaldo) devolvían una cadena vacía.
+  2. FILTRO POR FECHA: en vez de recorrer los ~1500 avisos activos
+     totales del portal sin ningún orden útil para esta ventana,
+     `_aplicar_filtro_fecha_publicacion` rellena el propio filtro
+     "Published between" del formulario de búsqueda
+     (#txtNoticePublishedFrom / #txtNoticePublishedTo, confirmados en
+     el HTML real) con la ventana de DIAS_ATRAS días y lanza la
+     búsqueda (#lnkSearch) antes de empezar a hacer scroll -- así el
+     listado que se recorre ya viene acotado por el propio servidor.
+     El formato de fecha esperado ("01-Apr-13", DD-Mon-AA en inglés) se
+     confirma en el propio mensaje de validación del formulario; se
+     genera con un diccionario propio de meses (no `strftime("%b")`,
+     que depende del locale del sistema -- la misma clase de bug ya
+     encontrada y corregida en ingesta_bcie.py).
+  3. SCROLL SIN TOPE FIJO: ya no se hacen exactamente MAX_SCROLLS
+     pasadas -- se sigue haciendo scroll mientras cada pasada siga
+     descubriendo avisos NUEVOS, y se para tras 2 pasadas seguidas sin
+     nada nuevo. MAX_PASADAS_SEGURIDAD es solo una red de seguridad
+     ante un fallo inesperado de la página (bucle infinito), no un
+     límite que se espere alcanzar en uso normal -- con el filtro de
+     fecha ya aplicado, el resultado a recorrer debería ser pequeño.
 
 AVISO DE FIABILIDAD
 ------------------------
 No hay salida de red hacia ungm.org en este entorno de desarrollo. El
-listado (selectores de descubrimiento de título+URL) sigue sin
-confirmarse en vivo -- revisa "Total avisos rastreados" en la primera
-ejecución manual (workflow_dispatch); si sale en 0, ahí sigue habiendo
-margen de ajuste. La FICHA (fechas, país, descripción) sí se ha
-validado contra una página de detalle real completa.
+descubrimiento de título+URL y el filtro de fecha del formulario SÍ se
+han confirmado contra el HTML real de la página de listado (turno de
+depuración), pero la interacción con el FORMULARIO en sí (rellenar los
+campos, pulsar buscar, y que el resultado efectivamente venga filtrado)
+no se ha podido probar en vivo -- revisa el log "Filtro 'Published
+between' aplicado" y, si falla, el mensaje de aviso que lo acompaña, en
+la primera ejecución manual (workflow_dispatch). La FICHA (fechas,
+país, descripción) sí se ha validado contra una página de detalle real
+completa.
 
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
 Ejecución local:     python ingesta_ungm.py
@@ -81,9 +114,9 @@ CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "fecha_publicacion", "fec
 
 TIEMPO_ESPERA_CARGA_MS = 60000
 TIMEOUT_PETICION = 30
-PAUSA_ENTRE_FICHAS_SEGUNDOS = 0.3
+PAUSA_ENTRE_FICHAS_SEGUNDOS = 1.5  # Subir de 0.3s a 1.5s o 2.0s
 MAX_FICHAS_A_CONSULTAR = 400   # red de seguridad -- ver aviso de fiabilidad
-MAX_SCROLLS = 150
+MAX_PASADAS_SEGURIDAD = 300   # red de seguridad, no limite esperado -- ver extraer_licitaciones_playwright
 PAUSA_ENTRE_SCROLLS_SEGUNDOS = 2.0
 CAPTURA_DEPURACION = "debug_ungm_tabla.png"
 
@@ -93,36 +126,38 @@ CABECERAS_USER_AGENT = (
 )
 CABECERAS_PETICION = {"User-Agent": CABECERAS_USER_AGENT}
 
-# JS simplificado: el listado SOLO se usa para descubrir título + URL de
-# cada aviso -- ver aviso de fiabilidad más abajo sobre por qué ya no se
-# intentan sacar fechas/país de las filas del listado.
+# JS del listado: descubre título + URL de cada aviso. Selectores
+# corregidos contra el HTML real de la página de resultados (turno
+# anterior de depuración) -- ver aviso de fiabilidad más abajo.
 _JS_EXTRAER_FILAS = """
 () => {
     const resultados = [];
-    const filas = document.querySelectorAll('#tblNotices tr, #tblNotices .tableRow, .ungm-list-item');
+    const filas = document.querySelectorAll('#tblNotices .tableRow.dataRow');
 
     filas.forEach(fila => {
-        const enlace = fila.querySelector('a[href*="/Public/Notice/"]');
-        let href = enlace ? enlace.getAttribute('href') : null;
-
-        if (!href) {
-            const btn = fila.querySelector('[data-noticeid], [data-notice-id]');
-            if (btn) {
-                const noticeId = btn.getAttribute('data-noticeid') || btn.getAttribute('data-notice-id');
-                if (noticeId) {
-                    href = '/Public/Notice/' + noticeId;
-                }
-            }
+        // El propio "role=row" trae data-noticeid -- mas directo y
+        // fiable que buscar un boton interno con ese atributo.
+        let href = null;
+        const idAviso = fila.getAttribute('data-noticeid') || fila.getAttribute('data-notice-id');
+        if (idAviso) {
+            href = '/Public/Notice/' + idAviso;
+        } else {
+            const enlace = fila.querySelector('a[href*="/Public/Notice/"]');
+            href = enlace ? enlace.getAttribute('href') : null;
         }
-
         if (!href) return;
 
+        // El titulo vive en un <span class="ungm-title..."> dentro de
+        // .resultTitle -- el <a> de esa misma celda solo envuelve un
+        // icono SVG ("Open in a new window"), sin texto, por eso la
+        // busqueda anterior (".title", o el propio <a>) devolvia vacio.
         let titulo = '';
-        const elTitulo = fila.querySelector('.title');
-        if (elTitulo) {
-            titulo = elTitulo.innerText.trim();
-        } else if (enlace) {
-            titulo = (enlace.innerText || enlace.getAttribute('title') || '').trim();
+        const elTituloEspecifico = fila.querySelector('.resultTitle .ungm-title');
+        if (elTituloEspecifico) {
+            titulo = elTituloEspecifico.innerText.trim();
+        } else {
+            const contenedorTitulo = fila.querySelector('.resultTitle');
+            titulo = contenedorTitulo ? contenedorTitulo.innerText.trim() : '';
         }
 
         resultados.push({ titulo, href });
@@ -134,6 +169,21 @@ _JS_EXTRAER_FILAS = """
 
 PATRON_FECHA = re.compile(r"\b(\d{1,2})[-/\s]([A-Za-z]{3,9})[-/\s](\d{4})\b")
 PATRON_ID_NOTICE = re.compile(r"/Public/Notice/(\d+)")
+
+# Para rellenar el filtro "Published between" del propio formulario --
+# el mensaje de validación del formulario (campo PublishedDateFromFormatError)
+# confirma el formato esperado: "01-Apr-13" (DD-Mon-AA, mes en ingles).
+# Mapa propio en vez de strftime("%b") para no depender del locale del
+# sistema -- la misma clase de bug que ya se encontró y corrigió en
+# ingesta_bcie.py.
+MESES_INGLES_ABREV = {
+    1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
+    7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
+}
+
+
+def _formato_fecha_formulario_ungm(fecha: date) -> str:
+    return f"{fecha.day:02d}-{MESES_INGLES_ABREV[fecha.month]}-{fecha.strftime('%y')}"
 
 PAISES_ONU = [
     "Afghanistan", "Albania", "Algeria", "Andorra", "Angola", "Antigua and Barbuda",
@@ -219,29 +269,27 @@ def parsear_fecha_string(cadena_fecha: str):
             continue
     return None
 
-# Aumenta el tiempo de espera entre cada consulta individual
-PAUSA_ENTRE_FICHAS_SEGUNDOS = 1.5  # Subir de 0.3s a 1.5s o 2.0s
 
 def obtener_datos_ficha(url: str, max_reintentos: int = 3) -> dict:
     resultado = {
         "fecha_publicacion": None, "fecha_limite": None,
         "pais": None, "descripcion": None, "referencia": None,
     }
-    
+
     cabeceras = CABECERAS_PETICION.copy()
     cabeceras["Referer"] = LISTADO_URL  # Simula navegación real desde el listado
 
     for intento in range(max_reintentos):
         try:
             respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=cabeceras)
-            
+
             # Si el servidor responde 429, esperamos más tiempo antes de reintentar
             if respuesta.status_code == 429:
                 tiempo_espera = (intento + 1) * 5  # Espera 5s, 10s, 15s...
                 print(f"      [429] Demasiadas peticiones. Reintentando en {tiempo_espera}s...", flush=True)
                 time.sleep(tiempo_espera)
                 continue
-                
+
             respuesta.raise_for_status()
             break
         except Exception as error:
@@ -287,7 +335,47 @@ def obtener_datos_ficha(url: str, max_reintentos: int = 3) -> dict:
     return resultado
 
 
-def extraer_licitaciones_playwright() -> list:
+def _aplicar_filtro_fecha_publicacion(pagina, desde: date, hasta: date) -> bool:
+    """
+    Rellena el filtro "Published between" del propio formulario de
+    búsqueda con la ventana de fechas dada y lanza la búsqueda, para
+    que el listado ya venga acotado por el servidor -- así se evita
+    recorrer los ~1500 avisos activos totales cuando solo interesan
+    los publicados hoy y ayer. Devuelve True si se pudo aplicar.
+
+    En pantallas estrechas los campos del filtro pueden estar
+    colapsados tras el botón "Show search criteria"
+    (.expandAllFilter) -- se intenta pulsarlo primero, sin bloquear si
+    no hace falta o no aparece.
+    """
+    try:
+        boton_criterios = pagina.locator(".expandAllFilter")
+        if boton_criterios.count() > 0 and boton_criterios.first.is_visible():
+            boton_criterios.first.click()
+            time.sleep(0.5)
+    except Exception:
+        pass
+
+    try:
+        texto_desde = _formato_fecha_formulario_ungm(desde)
+        texto_hasta = _formato_fecha_formulario_ungm(hasta)
+        pagina.fill("#txtNoticePublishedFrom", texto_desde)
+        pagina.fill("#txtNoticePublishedTo", texto_hasta)
+        pagina.click("#lnkSearch")
+        pagina.wait_for_selector("#tblNotices", timeout=TIEMPO_ESPERA_CARGA_MS)
+        time.sleep(2)
+        print(f"    Filtro 'Published between' aplicado: {texto_desde} .. {texto_hasta}", flush=True)
+        return True
+    except Exception as error:
+        print(
+            f"    No se pudo aplicar el filtro de fecha de publicación ({error}) -- "
+            "se continúa sin filtrar (recorrerá más avisos de los estrictamente necesarios).",
+            flush=True,
+        )
+        return False
+
+
+def extraer_licitaciones_playwright(desde: date, hasta: date) -> list:
     registros_por_url = {}
 
     try:
@@ -306,9 +394,24 @@ def extraer_licitaciones_playwright() -> list:
                 pagina.wait_for_selector("#tblNotices", timeout=TIEMPO_ESPERA_CARGA_MS)
                 time.sleep(2)
 
-                for indice in range(1, MAX_SCROLLS + 1):
-                    filas = pagina.evaluate(_JS_EXTRAER_FILAS)
+                _aplicar_filtro_fecha_publicacion(pagina, desde, hasta)
 
+                # Sin tope fijo de scrolls: se sigue mientras cada pasada
+                # siga descubriendo avisos NUEVOS. MAX_PASADAS_SIN_CAMBIOS
+                # es solo la condición de parada (2 pasadas seguidas sin
+                # nada nuevo = ya se ha llegado al final), y
+                # MAX_PASADAS_SEGURIDAD es una red de seguridad para no
+                # quedarse en un bucle infinito ante un fallo inesperado
+                # de la página, no un límite que se espere alcanzar en
+                # uso normal (con el filtro de fecha aplicado, el
+                # resultado debería ser pequeño).
+                pasadas_sin_cambios = 0
+                pasada = 0
+                while pasadas_sin_cambios < 2 and pasada < MAX_PASADAS_SEGURIDAD:
+                    pasada += 1
+                    total_antes = len(registros_por_url)
+
+                    filas = pagina.evaluate(_JS_EXTRAER_FILAS)
                     for item in filas:
                         href = item.get("href")
                         url_completa = urljoin(BASE_URL, href) if href else None
@@ -320,10 +423,17 @@ def extraer_licitaciones_playwright() -> list:
                             "url_oficial": url_completa,
                         }
 
+                    nuevos_esta_pasada = len(registros_por_url) - total_antes
                     print(
-                        f"    Scroll {indice}/{MAX_SCROLLS} -> avisos acumulados: {len(registros_por_url)}",
+                        f"    Pasada {pasada} -> avisos nuevos: {nuevos_esta_pasada}, "
+                        f"acumulados: {len(registros_por_url)}",
                         flush=True,
                     )
+
+                    if nuevos_esta_pasada == 0:
+                        pasadas_sin_cambios += 1
+                    else:
+                        pasadas_sin_cambios = 0
 
                     pagina.evaluate("window.scrollBy(0, 1800);")
                     time.sleep(PAUSA_ENTRE_SCROLLS_SEGUNDOS)
@@ -334,6 +444,13 @@ def extraer_licitaciones_playwright() -> list:
                     if boton_cargar.count() > 0 and boton_cargar.first.is_visible():
                         boton_cargar.first.click()
                         time.sleep(2)
+
+                if pasada >= MAX_PASADAS_SEGURIDAD:
+                    print(
+                        f"    Aviso: se alcanzó el tope de seguridad de {MAX_PASADAS_SEGURIDAD} pasadas "
+                        "sin agotar los resultados -- revisar si el filtro de fecha realmente se aplicó.",
+                        flush=True,
+                    )
 
             except Exception as error:
                 print(f"Error durante la navegación con Playwright: {error}", flush=True)
@@ -420,7 +537,7 @@ def ejecutar_sincronizacion():
     print("=" * 100, flush=True)
     print(f"Ventana de publicación objetivo: {desde} .. {hoy}", flush=True)
 
-    crudos = extraer_licitaciones_playwright()
+    crudos = extraer_licitaciones_playwright(desde, hoy)
     print(f"\nTotal avisos rastreados: {len(crudos)}", flush=True)
 
     if not crudos:
