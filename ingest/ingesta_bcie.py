@@ -23,7 +23,7 @@ AVISO DE FIABILIDAD -- FORMATO DE FECHA NO VALIDADO
 --------------------------------------------------------------------------
 El script de prueba capturaba las fechas como texto sin parsear (no
 incluía ninguna función que las convirtiera a `date`). `parsear_fecha_bcie`
-intenta varios formatos habituales en portales en español (DD/MM/AAAA,
+intenta varios formatos habituales en español (DD/MM/AAAA,
 AAAA-MM-DD, y "DD de mes de AAAA"), pero cuál usa el BCIE en concreto NO
 se ha podido confirmar contra la página real. Como red de seguridad
 adicional, si `fecha_lim` no se puede parsear pero sí hay
@@ -44,7 +44,7 @@ fecha -- la comparación contra lo ya existente en Supabase
 avisos que no han cambiado desde la última ejecución.
 
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
-Ejecucion local:      python ingesta_bcie.py
+Ejecucion local:     python ingesta_bcie.py
 Ejecucion programada: ver .github/workflows/sincronizar_bcie.yml
    (necesita el paso extra "playwright install --with-deps chromium")
 """
@@ -66,7 +66,7 @@ BASE_URL = "https://www.bcie.org"
 LISTADO_URL = BASE_URL + "/adquisiciones-en-proyectos/avisos-de-adquisicion"
 FUENTE = "BCIE"
 LOTE_ENVIO_SUPABASE = 15
-CAMPOS_COMPARABLES = ("titulo", "pais", "fecha_publicacion", "fecha_limite")
+CAMPOS_COMPARABLES = ("titulo", "pais", "fecha_publicacion", "fecha_limite", "descripcion")
 
 TIEMPO_ESPERA_CARGA_MS = 45000
 MAX_PAGINAS = 2
@@ -114,6 +114,23 @@ _JS_EXTRAER_FILAS = """
         }
     }
     return resultados;
+}
+"""
+
+# JS para obtener la descripción del primer elemento de la lista numerada
+_JS_EXTRAER_DESCRIPCION = """
+() => {
+    const elementosLista = Array.from(document.querySelectorAll('ol.list-decimal > li'));
+    for (const li of elementosLista) {
+        const textoLi = li.innerText || '';
+        if (textoLi.includes('Objetivos Generales de la adquisición')) {
+            const parrafo = li.querySelector('p');
+            if (parrafo) {
+                return (parrafo.innerText || '').trim();
+            }
+        }
+    }
+    return null;
 }
 """
 
@@ -192,7 +209,19 @@ def extraer_licitaciones_playwright() -> list:
                             "fecha_lim_raw": f.get("fecha_lim"),
                             "dias_restantes_raw": f.get("dias_restantes"),
                             "url_oficial": url_completa,
+                            "descripcion": None,
                         }
+
+                # Extracción del detalle de cada licitación (descripción)
+                for url, registro in registros_por_url.items():
+                    try:
+                        print(f"--> Extrayendo descripción desde: {url}", flush=True)
+                        pagina.goto(url, timeout=TIEMPO_ESPERA_CARGA_MS, wait_until="domcontentloaded")
+                        
+                        desc = pagina.evaluate(_JS_EXTRAER_DESCRIPCION)
+                        registro["descripcion"] = desc
+                    except Exception as err_desc:
+                        print(f"    Error extrayendo descripción de {url}: {err_desc}", flush=True)
 
             except Exception as error:
                 print(f"Error durante la navegación con Playwright: {error}", flush=True)
@@ -235,7 +264,7 @@ def construir_registro(item: dict) -> dict:
         "fuente_origen": FUENTE,
         "tipo_aviso": None,
         "titulo": item.get("titulo"),
-        "descripcion": None,
+        "descripcion": item.get("descripcion"),
         "pais": pais,
         "paises": [pais] if pais else [],
         "organismo": "BCIE",
