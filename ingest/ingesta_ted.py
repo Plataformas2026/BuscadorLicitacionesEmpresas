@@ -1,4 +1,4 @@
-# -*- coding: -*-
+# -*- coding: utf-8 -*-
 """
 ingesta_ted.py
 ----------------
