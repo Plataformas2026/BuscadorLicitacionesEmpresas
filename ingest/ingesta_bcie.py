@@ -214,7 +214,9 @@ def obtener_datos_ficha(url: str) -> dict:
     print(f"\n--- [DEBUG] Analizando URL: {url} ---", flush=True)
 
     try:
+        # Aseguramos usar las mismas cabeceras globales (CABECERAS_PETICION)
         respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=CABECERAS_PETICION)
+        print(f"   [HTTP Status] {respuesta.status_code}", flush=True)
         respuesta.raise_for_status()
     except Exception as error:
         print(f"     [ERROR] Descargando la ficha: {error}", flush=True)
@@ -222,46 +224,42 @@ def obtener_datos_ficha(url: str) -> dict:
 
     soup = BeautifulSoup(respuesta.text, "html.parser")
 
+    # Comprobación de seguridad por si el HTML vino vacío o bloqueado
+    if len(respuesta.text) < 500:
+        print(f"   [ALERTA] La respuesta HTML es sospechosamente corta ({len(respuesta.text)} chars). Podría ser un bloqueo.", flush=True)
+
     # 1. BÚSQUEDA DE DESCRIPCIÓN POR "Objetivos Generales"
     encontrado_por_span = False
     for span in soup.find_all(["span", "h3", "p", "div"]):
         texto_span = span.get_text(" ", strip=True)
         if "objetivos generales" in texto_span.lower():
-            print(f"   [+] Encontrado span/etiqueta clave: '{texto_span}'", flush=True)
             contenedor = span.find_parent("li") or span.parent
             if contenedor:
                 parrafos = contenedor.find_all("p")
                 for p in parrafos:
                     txt_p = p.get_text(" ", strip=True)
-                    print(f"       -> Analizando párrafo hijo: '{txt_p}'", flush=True)
                     if txt_p and "objetivos generales" not in txt_p.lower():
                         resultado["descripcion"] = txt_p
                         encontrado_por_span = True
-                        print(f"       [¡EXITO!] Descripción fijada: '{txt_p}'", flush=True)
                         break
             if encontrado_por_span:
                 break
 
     # Red de seguridad 1 para descripción
     if not resultado["descripcion"]:
-        print("   [!] No se halló por span directo. Buscando por elementos <li>...", flush=True)
         for li in soup.find_all("li"):
             texto_li = li.get_text(" ", strip=True)
             if "objetivos generales" in texto_li.lower():
                 parrafos = li.find_all("p")
                 if parrafos:
                     resultado["descripcion"] = parrafos[0].get_text(" ", strip=True)
-                    print(f"   [¡EXITO! Red 1] Descripción fijada desde <li>: '{resultado['descripcion']}'", flush=True)
                     break
 
-    # Red de seguridad 2 absoluta: Si el aviso no usa la estructura estándar de objetivos, 
-    # cogemos el título principal o el texto descriptivo superior del aviso.
+    # Red de seguridad 2: Título H1
     if not resultado["descripcion"]:
-        print("   [!] Estructura estándar no detectada. Buscando título principal o resumen alternativo...", flush=True)
         h1_principal = soup.find("h1")
         if h1_principal:
             resultado["descripcion"] = h1_principal.get_text(" ", strip=True)
-            print(f"   [¡EXITO! Red 2] Usando título H1 como descripción: '{resultado['descripcion']}'", flush=True)
 
     # 2. EXTRACCIÓN DE FECHAS DESDE METADATOS SUPERIORES (<dt> / <dd>)
     for dt in soup.find_all(["dt", "span", "div"]):
@@ -269,23 +267,18 @@ def obtener_datos_ficha(url: str) -> dict:
         if "fecha de publicación" in texto_dt:
             dd = dt.find_next(["dd", "span", "p"])
             if dd:
-                txt_fecha = dd.get_text(" ", strip=True)
-                parsed = parsear_fecha_bcie(txt_fecha)
-                print(f"   [Calendario] Fecha publicación detectada en cabecera: '{txt_fecha}' -> Parseada: {parsed}", flush=True)
+                parsed = parsear_fecha_bcie(dd.get_text(" ", strip=True))
                 if parsed:
                     resultado["fecha_publicacion"] = parsed
         elif "fecha de cierre" in texto_dt:
             dd = dt.find_next(["dd", "span", "p"])
             if dd:
-                txt_fecha = dd.get_text(" ", strip=True)
-                parsed = parsear_fecha_bcie(txt_fecha)
-                print(f"   [Calendario] Fecha cierre detectada en cabecera: '{txt_fecha}' -> Parseada: {parsed}", flush=True)
+                parsed = parsear_fecha_bcie(dd.get_text(" ", strip=True))
                 if parsed:
                     resultado["fecha_limite"] = parsed
 
     # 3. REVISIÓN DE BLOQUES DE TEXTO INFERIORES SI FALTAN FECHAS
     if not resultado["fecha_publicacion"] or not resultado["fecha_limite"]:
-        print("   [!] Faltan fechas en cabecera. Barriendo bloques de texto <li>...", flush=True)
         items = soup.find_all("li")
         for li in items:
             parrafos = _parrafos_de(li)
@@ -294,7 +287,6 @@ def obtener_datos_ficha(url: str) -> dict:
                     match_partir = re.search(r"a partir de:?\s*(.+)", texto_p, re.IGNORECASE)
                     if match_partir:
                         parsed = parsear_fecha_bcie(match_partir.group(1))
-                        print(f"       -> 'A partir de' encontrado: {match_partir.group(1)} -> {parsed}", flush=True)
                         if parsed:
                             resultado["fecha_publicacion"] = parsed
                 
@@ -302,18 +294,16 @@ def obtener_datos_ficha(url: str) -> dict:
                     match_hasta = re.search(r"hasta:?\s*(.+)", texto_p, re.IGNORECASE)
                     if match_hasta:
                         parsed = parsear_fecha_bcie(match_hasta.group(1))
-                        print(f"       -> 'Hasta' encontrado: {match_hasta.group(1)} -> {parsed}", flush=True)
                         if parsed:
                             resultado["fecha_limite"] = parsed
                     
                     match_fecha_rec = re.search(r"fecha:?\s*(.+)", texto_p, re.IGNORECASE)
                     if match_fecha_rec:
                         parsed = parsear_fecha_bcie(match_fecha_rec.group(1))
-                        print(f"       -> 'Fecha recepción' encontrado: {match_fecha_rec.group(1)} -> {parsed}", flush=True)
                         if parsed:
                             resultado["fecha_limite"] = parsed
 
-    print(f"   [RESUMEN FINAL] Descripcion: {resultado['descripcion']} | Publicacion: {resultado['fecha_publicacion']} | Cierre: {resultado['fecha_limite']}\n", flush=True)
+    print(f"   [RESUMEN FINAL] Descripcion: {str(resultado['descripcion'])[:40]}... | Publicacion: {resultado['fecha_publicacion']} | Cierre: {resultado['fecha_limite']}\n", flush=True)
     return resultado
 
 def extraer_licitaciones_playwright() -> list:
