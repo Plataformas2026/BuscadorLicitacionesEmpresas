@@ -23,7 +23,7 @@ AVISO DE FIABILIDAD -- FORMATO DE FECHA NO VALIDADO
 --------------------------------------------------------------------------
 El script de prueba capturaba las fechas como texto sin parsear (no
 incluía ninguna función que las convirtiera a `date`). `parsear_fecha_bcie`
-intenta varios formatos habituales en español (DD/MM/AAAA,
+intenta varios formatos habituales en portales en español (DD/MM/AAAA,
 AAAA-MM-DD, y "DD de mes de AAAA"), pero cuál usa el BCIE en concreto NO
 se ha podido confirmar contra la página real. Como red de seguridad
 adicional, si `fecha_lim` no se puede parsear pero sí hay
@@ -44,7 +44,7 @@ fecha -- la comparación contra lo ya existente en Supabase
 avisos que no han cambiado desde la última ejecución.
 
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
-Ejecucion local:     python ingesta_bcie.py
+Ejecucion local:      python ingesta_bcie.py
 Ejecucion programada: ver .github/workflows/sincronizar_bcie.yml
    (necesita el paso extra "playwright install --with-deps chromium")
 """
@@ -66,7 +66,7 @@ BASE_URL = "https://www.bcie.org"
 LISTADO_URL = BASE_URL + "/adquisiciones-en-proyectos/avisos-de-adquisicion"
 FUENTE = "BCIE"
 LOTE_ENVIO_SUPABASE = 15
-CAMPOS_COMPARABLES = ("titulo", "pais", "fecha_publicacion", "fecha_limite", "descripcion")
+CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "fecha_publicacion", "fecha_limite")
 
 TIEMPO_ESPERA_CARGA_MS = 45000
 MAX_PAGINAS = 2
@@ -117,20 +117,17 @@ _JS_EXTRAER_FILAS = """
 }
 """
 
-# JS para obtener la descripción del primer elemento de la lista numerada
 _JS_EXTRAER_DESCRIPCION = """
 () => {
-    const elementosLista = Array.from(document.querySelectorAll('ol.list-decimal > li'));
-    for (const li of elementosLista) {
-        const textoLi = li.innerText || '';
-        if (textoLi.includes('Objetivos Generales de la adquisición')) {
-            const parrafo = li.querySelector('p');
-            if (parrafo) {
-                return (parrafo.innerText || '').trim();
-            }
-        }
+    const primerLi = document.querySelector('ol.list-decimal li');
+    if (!primerLi) return null;
+
+    // Busca un párrafo dentro del primer 'li' o toma el texto completo del 'li'
+    const p = primerLi.querySelector('p');
+    if (p && p.innerText.trim()) {
+        return p.innerText.trim();
     }
-    return null;
+    return primerLi.innerText.trim();
 }
 """
 
@@ -169,7 +166,8 @@ def parsear_fecha_bcie(texto: str):
 def extraer_licitaciones_playwright() -> list:
     """
     Abre el portal y recorre hasta MAX_PAGINAS páginas (vía ?page=N),
-    devolviendo TODOS los avisos vistos.
+    devolviendo TODOS los avisos vistos junto con la descripción
+    extraída de su página individual.
     """
     registros_por_url = {}
 
@@ -201,27 +199,30 @@ def extraer_licitaciones_playwright() -> list:
                         url_completa = urljoin(BASE_URL, href)
                         if url_completa in registros_por_url:
                             continue
+
+                        # Extraer descripción accediendo a la URL de detalle del aviso
+                        descripcion = None
+                        try:
+                            pagina_detalle = navegador.new_page(user_agent=CABECERAS_USER_AGENT)
+                            pagina_detalle.goto(url_completa, timeout=30000, wait_until="domcontentloaded")
+                            pagina_detalle.wait_for_selector("ol.list-decimal", timeout=10000)
+                            descripcion = pagina_detalle.evaluate(_JS_EXTRAER_DESCRIPCION)
+                            pagina_detalle.close()
+                        except Exception as err_desc:
+                            print(f"    No se pudo extraer la descripción para {url_completa}: {err_desc}", flush=True)
+                            if 'pagina_detalle' in locals() and not pagina_detalle.is_closed():
+                                pagina_detalle.close()
+
                         registros_por_url[url_completa] = {
                             "id_aviso": f.get("id_aviso") or None,
                             "titulo": f.get("titulo"),
+                            "descripcion": descripcion,
                             "pais": f.get("pais"),
                             "fecha_pub_raw": f.get("fecha_pub"),
                             "fecha_lim_raw": f.get("fecha_lim"),
                             "dias_restantes_raw": f.get("dias_restantes"),
                             "url_oficial": url_completa,
-                            "descripcion": None,
                         }
-
-                # Extracción del detalle de cada licitación (descripción)
-                for url, registro in registros_por_url.items():
-                    try:
-                        print(f"--> Extrayendo descripción desde: {url}", flush=True)
-                        pagina.goto(url, timeout=TIEMPO_ESPERA_CARGA_MS, wait_until="domcontentloaded")
-                        
-                        desc = pagina.evaluate(_JS_EXTRAER_DESCRIPCION)
-                        registro["descripcion"] = desc
-                    except Exception as err_desc:
-                        print(f"    Error extrayendo descripción de {url}: {err_desc}", flush=True)
 
             except Exception as error:
                 print(f"Error durante la navegación con Playwright: {error}", flush=True)
