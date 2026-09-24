@@ -23,10 +23,17 @@ URL_API_AVISO = "https://api.ted.europa.eu/v3/notices/"
 URL_BASE_AVISO = "https://ted.europa.eu/en/notice/-/detail/"
 FUENTE = "TED"
 
-# Campos solicitados
+# Campos solicitados validos para API search v3
 CAMPOS_SOLICITADOS = [
-    "publication-number", "notice-title", "buyer-name", "buyer-country",
-    "publication-date", "deadline", "notice-type", "procedure-description", "description"
+    "publication-number",
+    "notice-title",
+    "buyer-name",
+    "buyer-country",
+    "publication-date",
+    "deadline",
+    "notice-type",
+    "procedure-description",
+    "description"
 ]
 ALCANCE = "ACTIVE"
 LIMITE_POR_PAGINA = 50
@@ -75,7 +82,7 @@ def _valor_multiidioma(valor):
 
 
 def _limpiar_prefijo_titulo(titulo: str) -> str:
-    """1. Quita prefijos tipo 'Germany – ', 'France – ', etc. del título."""
+    """Quita prefijos tipo 'Germany – ', 'France – ', etc. del inicio del título."""
     if not titulo:
         return None
     # Elimina país + guión largo (–) o corto (-) al inicio
@@ -95,15 +102,20 @@ def parsear_fecha_ted(valor):
 
 
 def obtener_consulta_rango_fechas() -> str:
-    """Cambio 1: Genera la consulta limitando a publicaciones entre AYER y HOY."""
+    """Genera la consulta limitando a publicaciones entre AYER y HOY con sintaxis compatible."""
     hoy = date.today()
     ayer = hoy - timedelta(days=1)
     
     fecha_ayer_str = ayer.strftime("%Y%m%d")
     fecha_hoy_str = hoy.strftime("%Y%m%d")
     
-    # Sintaxis experta de TED para rango de fechas
-    return f'FT~"GIZ" AND publication-date>={fecha_ayer_str} AND publication-date<={fecha_hoy_str} SORT BY publication-date DESC'
+    # Sintaxis compatible con TED API v3 sin FT~
+    return (
+        f'(buyer-name ~ "GIZ" OR notice-title ~ "GIZ") '
+        f'AND publication-date >= {fecha_ayer_str} '
+        f'AND publication-date <= {fecha_hoy_str} '
+        f'SORT BY publication-date DESC'
+    )
 
 
 def _pagina_de_resultados(consulta: str, token_siguiente: str = None) -> dict:
@@ -126,8 +138,8 @@ def _pagina_de_resultados(consulta: str, token_siguiente: str = None) -> dict:
 
 def obtener_descripcion_procedimiento(numero_publicacion: str) -> str:
     """
-    Cambio 3: Obtiene la descripción detallada de la sección 2 (Procedure Description)
-    directamente de la API de detalle del aviso sin necesidad de Playwright.
+    Obtiene la descripción detallada de la sección 2 (Procedure Description)
+    directamente de la API de detalle del aviso.
     """
     if not numero_publicacion:
         return None
@@ -137,7 +149,6 @@ def obtener_descripcion_procedimiento(numero_publicacion: str) -> str:
         resp = requests.get(url_detalle, headers={"Accept": "application/json"}, timeout=15)
         if resp.status_code == 200:
             datos = resp.json()
-            # Intenta obtener la descripción del procedimiento (BT-24-Procedure / description)
             desc = (
                 _valor_multiidioma(datos.get("procedure-description")) or
                 _valor_multiidioma(datos.get("description")) or
@@ -179,7 +190,7 @@ def extraer_avisos_api() -> list:
 def construir_registro(aviso: dict) -> dict:
     numero_publicacion = _valor_multiidioma(aviso.get("publication-number")) or ""
     
-    # 2. Limpieza de prefijo "Germany – " en el título
+    # Limpieza de prefijo "Germany – " en el título
     titulo_raw = _valor_multiidioma(aviso.get("notice-title"))
     titulo = _limpiar_prefijo_titulo(titulo_raw)
     
@@ -191,7 +202,7 @@ def construir_registro(aviso: dict) -> dict:
     fecha_publicacion = parsear_fecha_ted(aviso.get("publication-date"))
     fecha_limite = parsear_fecha_ted(aviso.get("deadline"))
 
-    # 3. Obtención de la descripción desde el procedimiento/detalle
+    # Obtención de la descripción desde el procedimiento/detalle
     descripcion = obtener_descripcion_procedimiento(numero_publicacion)
     
     # Fallback en caso de que no haya descripción detallada
