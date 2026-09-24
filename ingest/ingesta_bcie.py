@@ -19,18 +19,41 @@ restantes). Único cambio respecto al script de prueba (aparte de quitar
 el andamiaje propio de Colab): se usa `playwright.sync_api`, igual que el
 resto de scrapers de este proyecto que necesitan un navegador.
 
-AVISO DE FIABILIDAD -- FORMATO DE FECHA NO VALIDADO
+AVISO DE FIABILIDAD -- FECHAS Y DESCRIPCIÓN (corregido con HTML real)
 --------------------------------------------------------------------------
-El script de prueba capturaba las fechas como texto sin parsear (no
-incluía ninguna función que las convirtiera a `date`). `parsear_fecha_bcie`
-intenta varios formatos habituales en portales en español (DD/MM/AAAA,
-AAAA-MM-DD, y "DD de mes de AAAA"), pero cuál usa el BCIE en concreto NO
-se ha podido confirmar contra la página real. Como red de seguridad
-adicional, si `fecha_lim` no se puede parsear pero sí hay
-`dias_restantes` reconocible como número, la fecha límite se calcula como
-hoy + esos días. Revisa el log "Fechas sin reconocer" en la primera
-ejecución manual (workflow_dispatch); si sale alto, hace falta ajustar
-`parsear_fecha_bcie` al formato real.
+Las dos versiones anteriores de este script se basaban en suposiciones
+sin confirmar (formatos de fecha "a ciegas", luego fragmentos de texto
+indexados por un buscador). Esta versión sí se basa en un fragmento de
+HTML real de una ficha de aviso, proporcionado directamente por el
+usuario -- la fuente más fiable que se ha tenido hasta ahora para esta
+fuente. Confirma la estructura exacta: un
+<ol class="list-decimal..."> con un <li> por bloque, cada uno con un
+<span> de cabecera y uno o más <p> de contenido:
+  - <li> "Objetivos Generales de la adquisición:" -> su primer <p> es
+    la DESCRIPCIÓN real de la licitación (antes no se extraía en
+    absoluto, se guardaba siempre None).
+  - <li> "...estará disponible en:" -> contiene "A partir de: ..." y
+    "Hasta: ..." (disponibilidad de la documentación).
+  - <li> "...se recibirán en:" -> contiene "Fecha: ...", que es la
+    fecha límite REAL de presentación de propuestas. Esto corrige una
+    suposición equivocada de la versión anterior: se buscaba el
+    literal "Fecha de recepción de propuesta", que NO aparece en el
+    HTML real -- se mantiene esa búsqueda como red de seguridad
+    adicional (por si alguna ficha antigua sí la usa), pero ya no es
+    el método principal.
+  - El formato de fecha confirmado en el HTML real es "DD-mon-AAAA" en
+    minúsculas (p. ej. "16-sep-2026"), consistente con el "DD-Mon-AAAA"
+    que ya se había confirmado antes por otra vía -- `parsear_fecha_bcie`
+    ya normaliza la capitalización del mes, así que ambas formas
+    funcionan sin cambios.
+Por eso `ejecutar_sincronizacion()` lee la ficha de CADA aviso
+(`obtener_datos_ficha`, con `requests` + BeautifulSoup para recorrer la
+estructura, igual que hace ingesta_caf.py) en vez de fiarse solo de la
+tabla del listado -- más lento pero mucho más fiable, y con solo 2
+páginas de avisos (MAX_PAGINAS) el coste es asumible. Sigue sin poder
+confirmarse en vivo en este entorno (sin salida de red hacia bcie.org):
+revisa los logs "Avisos sin descripción reconocida" y "Fechas sin
+reconocer" en la primera ejecución manual (workflow_dispatch).
 
 SIN VENTANA DE FECHAS
 ------------------------
@@ -53,6 +76,8 @@ import time
 from datetime import date, datetime, timedelta
 from urllib.parse import urljoin
 
+import requests
+from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 from common import (
@@ -69,6 +94,8 @@ LOTE_ENVIO_SUPABASE = 15
 CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "fecha_publicacion", "fecha_limite")
 
 TIEMPO_ESPERA_CARGA_MS = 45000
+TIMEOUT_PETICION = 30
+PAUSA_ENTRE_DETALLES_SEGUNDOS = 0.4
 MAX_PAGINAS = 2
 CAPTURA_DEPURACION = "debug_bcie_tabla.png"
 
@@ -76,6 +103,7 @@ CABECERAS_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+CABECERAS_PETICION = {"User-Agent": CABECERAS_USER_AGENT}
 
 MESES_ES = {
     "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
@@ -85,6 +113,18 @@ MESES_ES = {
 PATRON_FECHA_LARGA_ES = re.compile(
     r"(\d{1,2})\s*(?:de\s+)?(" + "|".join(MESES_ES.keys()) + r")\s*(?:de\s+)?(\d{4})",
     re.IGNORECASE,
+)
+# "10-Jul-2024" -- formato confirmado contra fichas reales del portal (ver
+# aviso de fiabilidad más abajo): mes en abreviatura INGLESA de 3 letras,
+# aunque el resto de la página esté en español.
+PATRON_FECHA_CORTA = re.compile(r"(\d{1,2})[-/\s]([A-Za-z]{3,9})[-/\s](\d{4})")
+
+# Ficha real observada: "Fecha de recepción de propuesta: 10-Jul-2024" es
+# la fecha límite; "A partir de: 02-Jan-2025 Hasta: 18-Feb-2025" es el
+# rango en el que está disponible la documentación (lo más parecido a una
+# fecha de publicación que expone este portal -- ver aviso de fiabilidad).
+PATRON_FECHA_RECEPCION = re.compile(
+    r"[Ff]echa de recepci[oó]n de propuesta[s]?:?\s*(\d{1,2}[-/\s][A-Za-z]{3,9}[-/\s]\d{4})"
 )
 
 # JS de extracción tal cual se validó contra la página real.
@@ -117,20 +157,6 @@ _JS_EXTRAER_FILAS = """
 }
 """
 
-_JS_EXTRAER_DESCRIPCION = """
-() => {
-    const primerLi = document.querySelector('ol.list-decimal li');
-    if (!primerLi) return null;
-
-    // Busca un párrafo dentro del primer 'li' o toma el texto completo del 'li'
-    const p = primerLi.querySelector('p');
-    if (p && p.innerText.trim()) {
-        return p.innerText.trim();
-    }
-    return primerLi.innerText.trim();
-}
-"""
-
 
 def _generar_slug(texto: str) -> str:
     texto_norm = (texto or "").strip().lower()
@@ -139,10 +165,25 @@ def _generar_slug(texto: str) -> str:
 
 
 def parsear_fecha_bcie(texto: str):
-    """Intenta varios formatos habituales en español -- ver aviso de fiabilidad en el docstring."""
+    """
+    Intenta primero 'DD-Mon-AAAA' con mes en inglés (formato confirmado
+    contra fichas reales, ver PATRON_FECHA_CORTA), y como red de
+    seguridad adicional otros formatos habituales en español -- ver
+    aviso de fiabilidad en el docstring del módulo.
+    """
     if not texto:
         return None
     texto = texto.strip()
+
+    coincidencia = PATRON_FECHA_CORTA.search(texto)
+    if coincidencia:
+        dia, mes_texto, anio = coincidencia.groups()
+        for formato_mes in ("%b", "%B"):
+            try:
+                mes = datetime.strptime(mes_texto[:3].capitalize(), "%b").month
+                return date(int(anio), mes, int(dia))
+            except ValueError:
+                continue
 
     for formato in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
         try:
@@ -150,9 +191,9 @@ def parsear_fecha_bcie(texto: str):
         except ValueError:
             continue
 
-    coincidencia = PATRON_FECHA_LARGA_ES.search(texto)
-    if coincidencia:
-        dia, mes_texto, anio = coincidencia.groups()
+    coincidencia_larga = PATRON_FECHA_LARGA_ES.search(texto)
+    if coincidencia_larga:
+        dia, mes_texto, anio = coincidencia_larga.groups()
         mes = MESES_ES.get(mes_texto.lower())
         if mes:
             try:
@@ -163,11 +204,88 @@ def parsear_fecha_bcie(texto: str):
     return None
 
 
+def _parrafos_de(li) -> list:
+    return [p.get_text(" ", strip=True) for p in li.find_all("p")]
+
+
+def obtener_datos_ficha(url: str) -> dict:
+    """
+    Lee la ficha del aviso para sacar su descripción y sus fechas de
+    forma más fiable que la tabla del listado -- ver aviso de
+    fiabilidad en el docstring del módulo.
+
+    Estructura real CONFIRMADA (a partir de un fragmento de HTML real
+    proporcionado por el usuario, no una suposición): un
+    <ol class="list-decimal..."> con un <li> por bloque, cada uno con
+    un <span> de cabecera y uno o más <p> de contenido:
+      - <li> "Objetivos Generales de la adquisición:" -> su primer <p>
+        es la descripción real de la licitación.
+      - <li> "...estará disponible en:" -> contiene "A partir de: ..."
+        y "Hasta: ..." (disponibilidad de la documentación -- lo más
+        parecido a una fecha de publicación que expone este portal).
+      - <li> "...se recibirán en:" -> contiene "Fecha: ...", que es la
+        fecha límite REAL de presentación de propuestas (más fiable
+        que "Hasta:", que solo habla de la documentación).
+    Si esta estructura no aparece (ficha con otro formato), se cae a
+    buscar "Fecha de recepción de propuesta" en todo el texto de la
+    página como red de seguridad adicional (patrón visto en otra
+    consulta, puede que exista en algunas fichas y en otras no).
+    """
+    resultado = {"descripcion": None, "fecha_publicacion": None, "fecha_limite": None}
+
+    try:
+        respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=CABECERAS_PETICION)
+        respuesta.raise_for_status()
+    except Exception as error:
+        print(f"      Error descargando la ficha: {error}", flush=True)
+        return resultado
+
+    soup = BeautifulSoup(respuesta.text, "html.parser")
+    lista = soup.find("ol", class_=re.compile(r"\blist-decimal\b"))
+    items = lista.find_all("li", recursive=False) if lista else []
+
+    for li in items:
+        span = li.find("span")
+        texto_span = (span.get_text(" ", strip=True) if span else "").lower()
+        parrafos = _parrafos_de(li)
+
+        if "objetivos generales" in texto_span:
+            if parrafos:
+                resultado["descripcion"] = parrafos[0]
+            continue
+
+        if "recibir" in texto_span:   # "...se recibirán en:"
+            for texto_p in parrafos:
+                coincidencia = re.match(r"fecha:?\s*(.+)", texto_p, re.IGNORECASE)
+                if coincidencia:
+                    resultado["fecha_limite"] = parsear_fecha_bcie(coincidencia.group(1))
+            continue
+
+        for texto_p in parrafos:
+            coincidencia_partir = re.match(r"a partir de:?\s*(.+)", texto_p, re.IGNORECASE)
+            if coincidencia_partir:
+                resultado["fecha_publicacion"] = parsear_fecha_bcie(coincidencia_partir.group(1))
+            coincidencia_hasta = re.match(r"hasta:?\s*(.+)", texto_p, re.IGNORECASE)
+            if coincidencia_hasta and resultado["fecha_limite"] is None:
+                # respaldo: si el <li> de "se recibirán en" no aparecio
+                # o no traia fecha, se usa el fin de disponibilidad de
+                # la documentacion como aproximacion.
+                resultado["fecha_limite"] = parsear_fecha_bcie(coincidencia_hasta.group(1))
+
+    if resultado["fecha_limite"] is None:
+        texto_plano = soup.get_text(" ", strip=True)
+        coincidencia_recepcion = PATRON_FECHA_RECEPCION.search(texto_plano)
+        if coincidencia_recepcion:
+            resultado["fecha_limite"] = parsear_fecha_bcie(coincidencia_recepcion.group(1))
+
+    return resultado
+
+
+
 def extraer_licitaciones_playwright() -> list:
     """
     Abre el portal y recorre hasta MAX_PAGINAS páginas (vía ?page=N),
-    devolviendo TODOS los avisos vistos junto con la descripción
-    extraída de su página individual.
+    devolviendo TODOS los avisos vistos.
     """
     registros_por_url = {}
 
@@ -199,24 +317,9 @@ def extraer_licitaciones_playwright() -> list:
                         url_completa = urljoin(BASE_URL, href)
                         if url_completa in registros_por_url:
                             continue
-
-                        # Extraer descripción accediendo a la URL de detalle del aviso
-                        descripcion = None
-                        try:
-                            pagina_detalle = navegador.new_page(user_agent=CABECERAS_USER_AGENT)
-                            pagina_detalle.goto(url_completa, timeout=30000, wait_until="domcontentloaded")
-                            pagina_detalle.wait_for_selector("ol.list-decimal", timeout=10000)
-                            descripcion = pagina_detalle.evaluate(_JS_EXTRAER_DESCRIPCION)
-                            pagina_detalle.close()
-                        except Exception as err_desc:
-                            print(f"    No se pudo extraer la descripción para {url_completa}: {err_desc}", flush=True)
-                            if 'pagina_detalle' in locals() and not pagina_detalle.is_closed():
-                                pagina_detalle.close()
-
                         registros_por_url[url_completa] = {
                             "id_aviso": f.get("id_aviso") or None,
                             "titulo": f.get("titulo"),
-                            "descripcion": descripcion,
                             "pais": f.get("pais"),
                             "fecha_pub_raw": f.get("fecha_pub"),
                             "fecha_lim_raw": f.get("fecha_lim"),
@@ -245,8 +348,11 @@ def extraer_licitaciones_playwright() -> list:
 
 
 def construir_registro(item: dict) -> dict:
-    fecha_publicacion = parsear_fecha_bcie(item.get("fecha_pub_raw"))
-    fecha_limite = parsear_fecha_bcie(item.get("fecha_lim_raw"))
+    # Prioridad: datos de la FICHA (más fiables, ver obtener_datos_ficha)
+    # sobre los de la tabla del listado.
+    fecha_publicacion = item.get("fecha_publicacion_detalle") or parsear_fecha_bcie(item.get("fecha_pub_raw"))
+    fecha_limite = item.get("fecha_limite_detalle") or parsear_fecha_bcie(item.get("fecha_lim_raw"))
+    descripcion = item.get("descripcion_detalle")
 
     # Red de seguridad: si la fecha limite no se pudo parsear pero si hay
     # un numero reconocible de "dias restantes", se calcula a partir de
@@ -265,7 +371,7 @@ def construir_registro(item: dict) -> dict:
         "fuente_origen": FUENTE,
         "tipo_aviso": None,
         "titulo": item.get("titulo"),
-        "descripcion": item.get("descripcion"),
+        "descripcion": descripcion,
         "pais": pais,
         "paises": [pais] if pais else [],
         "organismo": "BCIE",
@@ -327,7 +433,25 @@ def ejecutar_sincronizacion():
         )
         return
 
+    print("\nLeyendo la ficha de cada aviso para sacar su descripción y sus fechas (más fiable que la tabla)...", flush=True)
+    for indice, item in enumerate(crudos, start=1):
+        print(f"  [{indice}/{len(crudos)}] {item['titulo'][:90]}", flush=True)
+        datos_ficha = obtener_datos_ficha(item["url_oficial"])
+        item["descripcion_detalle"] = datos_ficha["descripcion"]
+        item["fecha_publicacion_detalle"] = datos_ficha["fecha_publicacion"]
+        item["fecha_limite_detalle"] = datos_ficha["fecha_limite"]
+        time.sleep(PAUSA_ENTRE_DETALLES_SEGUNDOS)
+
     normalizados = [construir_registro(item) for item in crudos]
+
+    sin_descripcion = sum(1 for n in normalizados if not n.get("descripcion"))
+    if sin_descripcion:
+        print(
+            f"Avisos sin descripción reconocida: {sin_descripcion}/{len(normalizados)} -- "
+            "revisa si la ficha usa la misma estructura <ol class=\"list-decimal...\"> con "
+            "\"Objetivos Generales de la adquisición\".",
+            flush=True,
+        )
 
     sin_fecha_limite = sum(1 for n in normalizados if not n.get("fecha_limite"))
     if sin_fecha_limite:
