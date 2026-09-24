@@ -39,7 +39,7 @@ LOTE_ENVIO_SUPABASE = 15
 CAMPOS_COMPARABLES = ("titulo", "pais", "fecha_publicacion", "fecha_limite")
 
 TIEMPO_ESPERA_CARGA_MS = 60000
-MAX_SCROLLS = 150  # Ampliado considerablemente para cubrir registros si no están ordenados
+MAX_SCROLLS = 150  # Realizará los 150 scrolls completos
 PAUSA_ENTRE_SCROLLS_SEGUNDOS = 2.0
 CAPTURA_DEPURACION = "debug_ungm_tabla.png"
 
@@ -200,10 +200,8 @@ def evaluar_licitacion(item: dict):
     return pub_str, deadline_str
 
 
-def extraer_licitaciones_playwright(desde_fecha: date) -> list:
+def extraer_licitaciones_playwright() -> list:
     registros_por_url = {}
-    consecutivos_antiguos = 0
-    UMBRAL_CORTE_ANTIGUOS = 25  # Si vemos 25 filas seguidas más antiguas que el rango, cortamos
 
     try:
         with sync_playwright() as p:
@@ -223,7 +221,6 @@ def extraer_licitaciones_playwright(desde_fecha: date) -> list:
 
                 for indice in range(1, MAX_SCROLLS + 1):
                     filas = pagina.evaluate(_JS_EXTRAER_FILAS)
-                    nuevos_en_scroll = 0
 
                     for item in filas:
                         href = item.get("href")
@@ -236,26 +233,11 @@ def extraer_licitaciones_playwright(desde_fecha: date) -> list:
                             "texto_completo": item.get("texto_completo"),
                             "url_oficial": url_completa,
                         }
-                        nuevos_en_scroll += 1
-
-                        # Control de corte anticipado si los registros vienen desordenados
-                        pub_str, _ = evaluar_licitacion(item)
-                        pub_dt = parsear_fecha_string(pub_str) if pub_str else None
-                        
-                        if pub_dt and pub_dt < desde_fecha:
-                            consecutivos_antiguos += 1
-                        else:
-                            consecutivos_antiguos = 0
 
                     print(
                         f"    Scroll {indice}/{MAX_SCROLLS} -> avisos acumulados: {len(registros_por_url)}",
                         flush=True,
                     )
-
-                    # Si acumulamos muchos registros antiguos seguidos, asumimos que pasamos la ventana de tiempo
-                    if consecutivos_antiguos >= UMBRAL_CORTE_ANTIGUOS:
-                        print(f"--> Se detectaron {UMBRAL_CORTE_ANTIGUOS} registros seguidos anteriores a {desde_fecha}. Finalizando extracción.", flush=True)
-                        break
 
                     pagina.evaluate("window.scrollBy(0, 1800);")
                     time.sleep(PAUSA_ENTRE_SCROLLS_SEGUNDOS)
@@ -374,7 +356,7 @@ def ejecutar_sincronizacion():
     print("=" * 100, flush=True)
     print(f"Ventana de publicación objetivo: {desde} .. {hoy}", flush=True)
 
-    crudos = extraer_licitaciones_playwright(desde_fecha=desde)
+    crudos = extraer_licitaciones_playwright()
     print(f"\nTotal avisos rastreados: {len(crudos)}", flush=True)
 
     if not crudos:
