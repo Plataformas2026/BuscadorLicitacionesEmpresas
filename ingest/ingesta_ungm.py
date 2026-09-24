@@ -8,19 +8,33 @@ LISTADO_URL = "https://www.ungm.org/Public/Notice"
 CABECERAS_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/115.0.0.0 Safari/537.36"
+    "Chrome/120.0.0.0 Safari/537.36"
 )
 TIEMPO_ESPERA_CARGA_MS = 30000
 MAX_SCROLLS = 50
-PAUSA_ENTRE_SCROLLS_SEGUNDOS = 2.5
+PAUSA_ENTRE_SCROLLS_SEGUNDOS = 3.0
 CAPTURA_DEPURACION = "depuracion_error.png"
 
-# Script JS para extraer las filas del DOM
+# Script JS más amplio para probar múltiples selectores comunes en UNGM
 _JS_EXTRAER_FILAS = """
 () => {
-    const filas = Array.from(document.querySelectorAll('#tblNotices tbody tr'));
+    // Probar selectores típicos de UNGM (Tablas de datos o Listados de avisos)
+    let filas = Array.from(document.querySelectorAll('#tblNotices tbody tr, .tblNotices tbody tr, div.table-row, div.dataRow'));
+    
+    // Si no encuentra filas por tabla, busca enlaces que contengan '/Public/Notice/'
+    if (filas.length === 0) {
+        const enlaces = Array.from(document.querySelectorAll("a[href*='/Public/Notice/']"));
+        return enlaces.map(a => ({
+            href: a.getAttribute('href'),
+            titulo: a.innerText.trim(),
+            texto_completo: a.closest('tr, div')?.innerText.trim() || a.innerText.trim(),
+            fecha_pub_texto: '',
+            celdas: []
+        }));
+    }
+
     return filas.map(tr => {
-        const enlace = tr.querySelector('a');
+        const enlace = tr.querySelector("a[href*='/Public/Notice/']") || tr.querySelector('a');
         const celdas = Array.from(tr.querySelectorAll('td')).map(td => td.innerText.trim());
         return {
             href: enlace ? enlace.getAttribute('href') : null,
@@ -34,17 +48,6 @@ _JS_EXTRAER_FILAS = """
 """
 
 
-def asegurar_orden_publicacion_descendente(pagina):
-    """Intenta ordenar por fecha si la interfaz lo requiere."""
-    try:
-        columna_fecha = pagina.locator("th:has-text('Date'), th:has-text('Published')")
-        if columna_fecha.count() > 0:
-            columna_fecha.first.click()
-            time.sleep(1)
-    except Exception:
-        pass
-
-
 def extraer_licitaciones_playwright() -> list:
     registros_por_url = {}
 
@@ -52,28 +55,32 @@ def extraer_licitaciones_playwright() -> list:
         with sync_playwright() as p:
             navegador = None
             try:
-                navegador = p.chromium.launch(headless=True)
+                # Se desactiva la bandera de automatización para evitar detecciones simples
+                navegador = p.chromium.launch(
+                    headless=True,
+                    args=["--disable-blink-features=AutomationControlled"]
+                )
                 contexto = navegador.new_context(
                     user_agent=CABECERAS_USER_AGENT,
-                    viewport={"width": 1280, "height": 900},
+                    viewport={"width": 1440, "height": 900},
                 )
                 pagina = contexto.new_page()
 
-                print(
-                    f"--> Cargando portal de adquisiciones UNGM: {LISTADO_URL}...",
-                    flush=True,
-                )
+                print(f"--> Cargando portal de adquisiciones UNGM: {LISTADO_URL}...", flush=True)
                 pagina.goto(
                     LISTADO_URL,
                     timeout=TIEMPO_ESPERA_CARGA_MS,
-                    wait_until="domcontentloaded",
+                    wait_until="networkidle",  # Esperar a que la red esté inactiva (AJAX completo)
                 )
-                pagina.wait_for_selector(
-                    "#tblNotices", timeout=TIEMPO_ESPERA_CARGA_MS
-                )
-                time.sleep(2)
 
-                asegurar_orden_publicacion_descendente(pagina)
+                # Intentar esperar explícitamente a que aparezca al menos un enlace de aviso
+                try:
+                    pagina.wait_for_selector("a[href*='/Public/Notice/']", timeout=10000)
+                except Exception:
+                    print("⚠️ No se encontró 'a[href*=/Public/Notice/]' tras 10s. Guardando captura...", flush=True)
+                    pagina.screenshot(path=CAPTURA_DEPURACION, full_page=True)
+
+                time.sleep(2)
 
                 sin_nuevos_registros = 0
 
@@ -83,8 +90,11 @@ def extraer_licitaciones_playwright() -> list:
 
                     for item in filas:
                         href = item.get("href")
-                        url_completa = urljoin(BASE_URL, href) if href else None
-                        if not url_completa or url_completa in registros_por_url:
+                        if not href or href == "#" or "javascript:" in href:
+                            continue
+                        
+                        url_completa = urljoin(BASE_URL, href)
+                        if url_completa in registros_por_url:
                             continue
 
                         registros_por_url[url_completa] = {
@@ -101,13 +111,11 @@ def extraer_licitaciones_playwright() -> list:
                         flush=True,
                     )
 
-                    # Si el número total de registros no cambia, sumamos al contador de control
                     if total_actual == conteo_anterior:
                         sin_nuevos_registros += 1
                     else:
                         sin_nuevos_registros = 0
 
-                    # Si tras 3 iteraciones seguidas no hay registros nuevos, termina el raspado
                     if sin_nuevos_registros >= 3:
                         print(
                             "--> Fin del listado: no se detectaron nuevos avisos tras 3 intentos seguidos.",
@@ -115,41 +123,19 @@ def extraer_licitaciones_playwright() -> list:
                         )
                         break
 
-                    # 1. Scroll al final para activar la carga dinámica (Infinite Scroll)
-                    pagina.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+                    # Scroll progresivo hacia el fondo de la página
+                    pagina.evaluate("window.scrollBy(0, 1500);")
                     time.sleep(PAUSA_ENTRE_SCROLLS_SEGUNDOS)
-
-                    # 2. Intento de clic en caso de que exista un botón de apoyo "Show More"
-                    boton_cargar = pagina.locator(
-                        "button:has-text('Show more'), a:has-text('Show more'), #btnMoreNotices"
-                    )
-                    if boton_cargar.count() > 0:
-                        try:
-                            if boton_cargar.first.is_visible():
-                                boton_cargar.first.click(timeout=1000)
-                                time.sleep(2)
-                        except Exception:
-                            pass
 
             except Exception as error:
                 print(f"Error durante la navegación con Playwright: {error}", flush=True)
-                try:
-                    if "pagina" in locals():
-                        pagina.screenshot(path=CAPTURA_DEPURACION, full_page=True)
-                        print(
-                            f"Captura de depuración guardada en {CAPTURA_DEPURACION}.",
-                            flush=True,
-                        )
-                except Exception:
-                    pass
+                if "pagina" in locals():
+                    pagina.screenshot(path=CAPTURA_DEPURACION, full_page=True)
             finally:
                 if navegador is not None:
-                    try:
-                        navegador.close()
-                    except Exception:
-                        pass
+                    navegador.close()
     except Exception as error:
-        print(f"Error inesperado no capturado dentro de Playwright: {error}", flush=True)
+        print(f"Error inesperado: {error}", flush=True)
 
     return list(registros_por_url.values())
 
