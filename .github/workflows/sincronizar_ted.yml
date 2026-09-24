@@ -1,0 +1,36 @@
+name: Sincronizar Licitaciones (TED - GIZ)
+
+on:
+  schedule:
+    - cron: '0 9 * * *'   # todos los dias a las 09:00 UTC
+  workflow_dispatch:
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # A diferencia del resto de fuentes, TED usa su API oficial
+      # (api.ted.europa.eu) en vez de Playwright -- ver docstring de
+      # ingesta_ted.py -- así que no hace falta instalar ningún navegador.
+
+      - name: Ejecutar sincronizacion TED
+        working-directory: ingest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python ingesta_ted.py

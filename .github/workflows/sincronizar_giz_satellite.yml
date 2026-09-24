@@ -1,0 +1,45 @@
+name: Sincronizar Licitaciones (GIZ Satellite)
+
+on:
+  schedule:
+    - cron: '0 10 * * *'   # todos los dias a las 10:00 UTC
+  workflow_dispatch:
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Instalar el navegador de Playwright
+        run: python -m playwright install --with-deps chromium
+
+      - name: Ejecutar sincronizacion GIZ Satellite
+        working-directory: ingest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python ingesta_giz_satellite.py
+
+      - name: Subir captura de depuracion (si el script no reconocio ningun aviso)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-giz-satellite-tabla
+          path: ingest/debug_giz_satellite_tabla.png
+          if-no-files-found: ignore
+          retention-days: 7
