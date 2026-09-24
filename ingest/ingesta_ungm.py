@@ -219,30 +219,38 @@ def parsear_fecha_string(cadena_fecha: str):
             continue
     return None
 
+# Aumenta el tiempo de espera entre cada consulta individual
+PAUSA_ENTRE_FICHAS_SEGUNDOS = 1.5  # Subir de 0.3s a 1.5s o 2.0s
 
-def obtener_datos_ficha(url: str) -> dict:
-    """
-    Visita la ficha propia del aviso y extrae, de sus pares
-    <div class="row"><span class="label">Etiqueta:</span>
-    <span class="value">Valor</span></div>, los datos fiables -- ver
-    aviso de fiabilidad en el docstring del módulo: esta estructura SÍ
-    se ha confirmado contra una página de detalle real completa
-    (a diferencia de las filas del listado).
-    """
+def obtener_datos_ficha(url: str, max_reintentos: int = 3) -> dict:
     resultado = {
         "fecha_publicacion": None, "fecha_limite": None,
         "pais": None, "descripcion": None, "referencia": None,
     }
+    
+    cabeceras = CABECERAS_PETICION.copy()
+    cabeceras["Referer"] = LISTADO_URL  # Simula navegación real desde el listado
 
-    try:
-        respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=CABECERAS_PETICION)
-        respuesta.raise_for_status()
-    except Exception as error:
-        print(f"      Error descargando la ficha: {error}", flush=True)
-        return resultado
+    for intento in range(max_reintentos):
+        try:
+            respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=cabeceras)
+            
+            # Si el servidor responde 429, esperamos más tiempo antes de reintentar
+            if respuesta.status_code == 429:
+                tiempo_espera = (intento + 1) * 5  # Espera 5s, 10s, 15s...
+                print(f"      [429] Demasiadas peticiones. Reintentando en {tiempo_espera}s...", flush=True)
+                time.sleep(tiempo_espera)
+                continue
+                
+            respuesta.raise_for_status()
+            break
+        except Exception as error:
+            if intento == max_reintentos - 1:
+                print(f"      Error descargando la ficha: {error}", flush=True)
+                return resultado
+            time.sleep(2)
 
     soup = BeautifulSoup(respuesta.text, "html.parser")
-
     datos_html = {}
     for fila in soup.select(".row"):
         label = fila.select_one(".label")
