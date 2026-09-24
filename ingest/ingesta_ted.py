@@ -1,58 +1,13 @@
-# -*- coding: utf-8 -*-
+# -*- coding: -*-
 """
 ingesta_ted.py
 ----------------
-Sincroniza avisos de licitación de TED (Tenders Electronic Daily -- el
-diario oficial de contratación pública de la UE) relacionados con GIZ
-contra la tabla `licitaciones_internacionales` de Supabase.
-
-CAMBIO DE ARQUITECTURA DELIBERADO -- API OFICIAL EN VEZ DE PLAYWRIGHT
---------------------------------------------------------------------------
-El usuario avisó de que la tabla de resultados de TED usa clases
-dinámicas de Material UI/React, y pidió selectores semánticos robustos
-para evitar errores. Investigando esto se encontró algo mejor: TED tiene
-una API REST OFICIAL, gratuita y SIN CLAVE para búsqueda de avisos
-(confirmado por la documentación oficial en docs.ted.europa.eu/api y
-por múltiples proyectos de terceros que ya la usan en producción):
-
-    POST https://api.ted.europa.eu/v3/notices/search
-
-Usar esta API en vez de Playwright es estrictamente mejor para este caso
-concreto: nunca se rompe por un cambio de clases CSS/React (el propio
-problema que motivó el aviso de selectores), no hace falta arrancar un
-navegador, y devuelve JSON estructurado en vez de HTML que parsear. Por
-eso ESTE script, a diferencia de ingesta_bid.py/ingesta_undp.py/etc, NO
-usa Playwright -- es el único caso de las fuentes de este proyecto donde
-existe una API pública mejor que la propia tabla web.
-
-AVISO DE FIABILIDAD -- CONTRATO DE LA API NO VERIFICADO EN VIVO
---------------------------------------------------------------------------
-No hay salida de red hacia api.ted.europa.eu en este entorno de
-desarrollo, así que no se ha podido hacer una llamada real. El formato
-de petición/respuesta de abajo (campos, sintaxis de consulta, formato
-multi-idioma de título/comprador) se ha reconstruido a partir de la
-documentación oficial y de varios proyectos de terceros ya en
-producción contra esta misma API -- son fuentes consistentes entre sí,
-pero conviene confirmarlo con una ejecución manual (workflow_dispatch)
-antes de fiarse del cron automático.
-
-QUERY Y ALCANCE
-------------------
-Se traduce la búsqueda del usuario (FT=GIZ, search-scope=ACTIVE) a la
-sintaxis de consulta experta de la API: `FT~"GIZ"` (texto libre) con
-`scope: "ACTIVE"` (solo avisos actualmente activos -- la propia API ya
-acota a lo vigente, así que no hace falta una ventana de días aparte,
-igual que en ingesta_bcie.py). Paginación en modo ITERATION (token
-devuelto por cada llamada), con un tope de seguridad MAX_PAGINAS.
-
-Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
-Ejecucion local:      python ingesta_ted.py
-Ejecucion programada: ver .github/workflows/sincronizar_ted.yml
-   (NO necesita Playwright/navegador -- solo requests)
+Sincroniza avisos de licitación de TED (Tenders Electronic Daily)
+relacionados con GIZ publicados entre AYER y HOY contra Supabase.
 """
 import re
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import requests
 
@@ -64,14 +19,16 @@ from common import (
 )
 
 URL_API_BUSQUEDA = "https://api.ted.europa.eu/v3/notices/search"
+URL_API_AVISO = "https://api.ted.europa.eu/v3/notices/"
 URL_BASE_AVISO = "https://ted.europa.eu/en/notice/-/detail/"
 FUENTE = "TED"
-CONSULTA = 'FT~"GIZ" SORT BY publication-date DESC'
+
+# Campos solicitados
 CAMPOS_SOLICITADOS = [
     "publication-number", "notice-title", "buyer-name", "buyer-country",
-    "publication-date", "deadline", "notice-type",
+    "publication-date", "deadline", "notice-type", "procedure-description", "description"
 ]
-ALCANCE = "ACTIVE"   # avisos actualmente activos -- ver docstring
+ALCANCE = "ACTIVE"
 LIMITE_POR_PAGINA = 50
 MAX_PAGINAS = 10
 TIMEOUT_PETICION = 30
@@ -80,9 +37,6 @@ CAMPOS_COMPARABLES = ("titulo", "pais", "fecha_publicacion", "fecha_limite")
 
 CABECERAS_PETICION = {"Content-Type": "application/json", "Accept": "application/json"}
 
-# Países UE/EEE por su código ISO 3166-1 alfa-3 (el que devuelve
-# 'buyer-country' en esta API) -- ver aviso de fiabilidad: acotado a los
-# países que realmente pueden aparecer en TED, no una lista global.
 PAISES_ISO3_TED = {
     "AUT": "Austria", "BEL": "Bélgica", "BGR": "Bulgaria", "HRV": "Croacia",
     "CYP": "Chipre", "CZE": "República Checa", "DNK": "Dinamarca", "EST": "Estonia",
@@ -103,12 +57,6 @@ def _generar_slug(texto: str) -> str:
 
 
 def _valor_multiidioma(valor):
-    """
-    Los campos de texto de esta API llegan como {"eng": [...], "fra":
-    [...], ...} -- un diccionario de idioma -> lista de valores -- en
-    vez de una cadena simple. Se prefiere inglés y, si no está, el
-    primer idioma que haya. Devuelve None si no hay nada aprovechable.
-    """
     if valor is None:
         return None
     if isinstance(valor, str):
@@ -126,21 +74,41 @@ def _valor_multiidioma(valor):
     return None
 
 
+def _limpiar_prefijo_titulo(titulo: str) -> str:
+    """1. Quita prefijos tipo 'Germany – ', 'France – ', etc. del título."""
+    if not titulo:
+        return None
+    # Elimina país + guión largo (–) o corto (-) al inicio
+    titulo_limpio = re.sub(r"^[A-Za-z\s]+[–\-]\s*", "", titulo)
+    return titulo_limpio.strip()
+
+
 def parsear_fecha_ted(valor):
-    """Las fechas de esta API llegan en ISO 8601 ('2026-09-21' o con hora/zona)."""
     texto = _valor_multiidioma(valor) if isinstance(valor, (dict, list)) else valor
     if not texto:
         return None
-    texto = str(texto).strip()[:10]   # solo la parte de fecha, por si trae hora
+    texto = str(texto).strip()[:10]
     try:
         return datetime.strptime(texto, "%Y-%m-%d").date()
     except ValueError:
         return None
 
 
-def _pagina_de_resultados(token_siguiente: str = None) -> dict:
+def obtener_consulta_rango_fechas() -> str:
+    """Cambio 1: Genera la consulta limitando a publicaciones entre AYER y HOY."""
+    hoy = date.today()
+    ayer = hoy - timedelta(days=1)
+    
+    fecha_ayer_str = ayer.strftime("%Y%m%d")
+    fecha_hoy_str = hoy.strftime("%Y%m%d")
+    
+    # Sintaxis experta de TED para rango de fechas
+    return f'FT~"GIZ" AND publication-date>={fecha_ayer_str} AND publication-date<={fecha_hoy_str} SORT BY publication-date DESC'
+
+
+def _pagina_de_resultados(consulta: str, token_siguiente: str = None) -> dict:
     cuerpo = {
-        "query": CONSULTA,
+        "query": consulta,
         "fields": CAMPOS_SOLICITADOS,
         "limit": LIMITE_POR_PAGINA,
         "scope": ALCANCE,
@@ -156,15 +124,41 @@ def _pagina_de_resultados(token_siguiente: str = None) -> dict:
     return respuesta.json()
 
 
+def obtener_descripcion_procedimiento(numero_publicacion: str) -> str:
+    """
+    Cambio 3: Obtiene la descripción detallada de la sección 2 (Procedure Description)
+    directamente de la API de detalle del aviso sin necesidad de Playwright.
+    """
+    if not numero_publicacion:
+        return None
+    
+    try:
+        url_detalle = f"{URL_API_AVISO}{numero_publicacion}"
+        resp = requests.get(url_detalle, headers={"Accept": "application/json"}, timeout=15)
+        if resp.status_code == 200:
+            datos = resp.json()
+            # Intenta obtener la descripción del procedimiento (BT-24-Procedure / description)
+            desc = (
+                _valor_multiidioma(datos.get("procedure-description")) or
+                _valor_multiidioma(datos.get("description")) or
+                _valor_multiidioma(datos.get("notice-description"))
+            )
+            if desc:
+                return desc
+    except Exception:
+        pass
+    return None
+
+
 def extraer_avisos_api() -> list:
-    """Recorre hasta MAX_PAGINAS páginas de la API (modo ITERATION), devolviendo todos los avisos vistos."""
     avisos = []
     token_siguiente = None
+    consulta = obtener_consulta_rango_fechas()
 
     for indice_pagina in range(1, MAX_PAGINAS + 1):
         print(f"--> Consultando la API de TED (página {indice_pagina})...", flush=True)
         try:
-            cuerpo_respuesta = _pagina_de_resultados(token_siguiente)
+            cuerpo_respuesta = _pagina_de_resultados(consulta, token_siguiente)
         except Exception as error:
             print(f"    Error consultando la API de TED: {error}", flush=True)
             break
@@ -184,7 +178,11 @@ def extraer_avisos_api() -> list:
 
 def construir_registro(aviso: dict) -> dict:
     numero_publicacion = _valor_multiidioma(aviso.get("publication-number")) or ""
-    titulo = _valor_multiidioma(aviso.get("notice-title"))
+    
+    # 2. Limpieza de prefijo "Germany – " en el título
+    titulo_raw = _valor_multiidioma(aviso.get("notice-title"))
+    titulo = _limpiar_prefijo_titulo(titulo_raw)
+    
     comprador = _valor_multiidioma(aviso.get("buyer-name"))
     codigo_pais = _valor_multiidioma(aviso.get("buyer-country"))
     pais = PAISES_ISO3_TED.get((codigo_pais or "").upper(), codigo_pais) if codigo_pais else None
@@ -193,12 +191,17 @@ def construir_registro(aviso: dict) -> dict:
     fecha_publicacion = parsear_fecha_ted(aviso.get("publication-date"))
     fecha_limite = parsear_fecha_ted(aviso.get("deadline"))
 
-    partes_descripcion = []
-    if comprador:
-        partes_descripcion.append(f"Organismo comprador: {comprador}.")
-    if tipo_aviso:
-        partes_descripcion.append(f"Tipo de aviso: {tipo_aviso}.")
-    descripcion = " ".join(partes_descripcion) or None
+    # 3. Obtención de la descripción desde el procedimiento/detalle
+    descripcion = obtener_descripcion_procedimiento(numero_publicacion)
+    
+    # Fallback en caso de que no haya descripción detallada
+    if not descripcion:
+        partes = []
+        if comprador:
+            partes.append(f"Organismo comprador: {comprador}.")
+        if tipo_aviso:
+            partes.append(f"Tipo de aviso: {tipo_aviso}.")
+        descripcion = " ".join(partes) or None
 
     slug_base = numero_publicacion or _generar_slug(titulo or "sin-titulo")
     url_oficial = f"{URL_BASE_AVISO}{numero_publicacion}" if numero_publicacion else None
@@ -224,7 +227,7 @@ def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> 
     a_subir = []
     for datos in normalizados:
         if not datos.get("titulo") or not datos.get("url_oficial"):
-            continue   # sin numero de publicacion no hay forma fiable de identificar el aviso
+            continue
 
         existente = registros_existentes.get(datos["codigo_unico"])
         texto_completo = (
@@ -256,21 +259,17 @@ def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> 
 
 
 def ejecutar_sincronizacion():
+    consulta_activa = obtener_consulta_rango_fechas()
     print("=" * 100, flush=True)
     print("SINCRONIZACION DE LICITACIONES INTERNACIONALES - TED (GIZ, via API oficial)", flush=True)
     print("=" * 100, flush=True)
-    print(f"Consulta: {CONSULTA}  ·  Alcance: {ALCANCE}", flush=True)
+    print(f"Consulta: {consulta_activa}  ·  Alcance: {ALCANCE}", flush=True)
 
     crudos = extraer_avisos_api()
     print(f"\nTotal avisos recibidos de la API (todas las páginas): {len(crudos)}", flush=True)
 
     if not crudos:
-        print(
-            "No se ha recibido ningún aviso. Revisa el log de arriba -- si hay un error HTTP, "
-            "lo más probable es que el contrato de la API (campos/sintaxis) haya cambiado desde "
-            "que se escribió este script (ver aviso de fiabilidad en el docstring).",
-            flush=True,
-        )
+        print("No se ha recibido ningún aviso para las fechas solicitadas (Ayer - Hoy).", flush=True)
         return
 
     normalizados = [construir_registro(a) for a in crudos]
