@@ -2,8 +2,27 @@
 """
 ingesta_ted.py
 ----------------
-Sincroniza avisos de licitación de TED (Tenders Electronic Daily)
-relacionados con GIZ publicados entre AYER y HOY contra Supabase.
+Sincroniza avisos de licitación de TED (Tenders Electronic Daily -- el
+diario oficial de contratación pública de la UE) relacionados con GIZ
+contra la tabla `licitaciones_internacionales` de Supabase.
+
+CAMBIO DE ARQUITECTURA DELIBERADO -- API OFICIAL EN VEZ DE PLAYWRIGHT
+--------------------------------------------------------------------------
+El usuario avisó de que la tabla de resultados de TED usa clases
+dinámicas de Material UI/React, y pidió selectores semánticos robustos
+para evitar errores. Investigando esto se encontró algo mejor: TED tiene
+una API REST OFICIAL, gratuita y SIN CLAVE para búsqueda de avisos
+(confirmado por la documentación oficial en docs.ted.europa.eu/api y
+por múltiples proyectos de terceros que ya la usan en producción):
+
+    POST https://api.ted.europa.eu/v3/notices/search
+
+Usar esta API en vez de Playwright es strictly mejor para este caso
+concreto: nunca se rompe por un cambio de clases CSS/React, no hace
+falta arrancar un navegador, y devuelve JSON estructurado en vez de HTML.
+
+Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+Ejecución local:      python ingesta_ted.py
 """
 import re
 import time
@@ -22,20 +41,12 @@ URL_API_BUSQUEDA = "https://api.ted.europa.eu/v3/notices/search"
 URL_API_AVISO = "https://api.ted.europa.eu/v3/notices/"
 URL_BASE_AVISO = "https://ted.europa.eu/en/notice/-/detail/"
 FUENTE = "TED"
-
-# Campos solicitados validos para API search v3
+CONSULTA = 'FT~"GIZ" SORT BY publication-date DESC'
 CAMPOS_SOLICITADOS = [
-    "publication-number",
-    "notice-title",
-    "buyer-name",
-    "buyer-country",
-    "publication-date",
-    "deadline",
-    "notice-type",
-    "procedure-description",
-    "description"
+    "publication-number", "notice-title", "buyer-name", "buyer-country",
+    "publication-date", "deadline", "notice-type",
 ]
-ALCANCE = "ACTIVE"
+ALCANCE = "ACTIVE"   # avisos actualmente activos -- ver docstring
 LIMITE_POR_PAGINA = 50
 MAX_PAGINAS = 10
 TIMEOUT_PETICION = 30
@@ -82,10 +93,9 @@ def _valor_multiidioma(valor):
 
 
 def _limpiar_prefijo_titulo(titulo: str) -> str:
-    """Quita prefijos tipo 'Germany – ', 'France – ', etc. del inicio del título."""
+    """Elimina prefijos del tipo 'Germany – ', 'France – ', etc. al inicio del título."""
     if not titulo:
         return None
-    # Elimina país + guión largo (–) o corto (-) al inicio
     titulo_limpio = re.sub(r"^[A-Za-z\s]+[–\-]\s*", "", titulo)
     return titulo_limpio.strip()
 
@@ -101,26 +111,9 @@ def parsear_fecha_ted(valor):
         return None
 
 
-def obtener_consulta_rango_fechas() -> str:
-    """Genera la consulta limitando a publicaciones entre AYER y HOY con sintaxis compatible."""
-    hoy = date.today()
-    ayer = hoy - timedelta(days=1)
-    
-    fecha_ayer_str = ayer.strftime("%Y%m%d")
-    fecha_hoy_str = hoy.strftime("%Y%m%d")
-    
-    # Sintaxis compatible con TED API v3 sin FT~
-    return (
-        f'(buyer-name ~ "GIZ" OR notice-title ~ "GIZ") '
-        f'AND publication-date >= {fecha_ayer_str} '
-        f'AND publication-date <= {fecha_hoy_str} '
-        f'SORT BY publication-date DESC'
-    )
-
-
-def _pagina_de_resultados(consulta: str, token_siguiente: str = None) -> dict:
+def _pagina_de_resultados(token_siguiente: str = None) -> dict:
     cuerpo = {
-        "query": consulta,
+        "query": CONSULTA,
         "fields": CAMPOS_SOLICITADOS,
         "limit": LIMITE_POR_PAGINA,
         "scope": ALCANCE,
@@ -137,10 +130,7 @@ def _pagina_de_resultados(consulta: str, token_siguiente: str = None) -> dict:
 
 
 def obtener_descripcion_procedimiento(numero_publicacion: str) -> str:
-    """
-    Obtiene la descripción detallada de la sección 2 (Procedure Description)
-    directamente de la API de detalle del aviso.
-    """
+    """Obtiene la descripción detallada desde el endpoint individual de la API de TED."""
     if not numero_publicacion:
         return None
     
@@ -164,12 +154,11 @@ def obtener_descripcion_procedimiento(numero_publicacion: str) -> str:
 def extraer_avisos_api() -> list:
     avisos = []
     token_siguiente = None
-    consulta = obtener_consulta_rango_fechas()
 
     for indice_pagina in range(1, MAX_PAGINAS + 1):
         print(f"--> Consultando la API de TED (página {indice_pagina})...", flush=True)
         try:
-            cuerpo_respuesta = _pagina_de_resultados(consulta, token_siguiente)
+            cuerpo_respuesta = _pagina_de_resultados(token_siguiente)
         except Exception as error:
             print(f"    Error consultando la API de TED: {error}", flush=True)
             break
@@ -190,7 +179,7 @@ def extraer_avisos_api() -> list:
 def construir_registro(aviso: dict) -> dict:
     numero_publicacion = _valor_multiidioma(aviso.get("publication-number")) or ""
     
-    # Limpieza de prefijo "Germany – " en el título
+    # Limpieza de prefijo de país en el título
     titulo_raw = _valor_multiidioma(aviso.get("notice-title"))
     titulo = _limpiar_prefijo_titulo(titulo_raw)
     
@@ -202,17 +191,16 @@ def construir_registro(aviso: dict) -> dict:
     fecha_publicacion = parsear_fecha_ted(aviso.get("publication-date"))
     fecha_limite = parsear_fecha_ted(aviso.get("deadline"))
 
-    # Obtención de la descripción desde el procedimiento/detalle
+    # Obtención de la descripción de procedimiento vía API de detalle
     descripcion = obtener_descripcion_procedimiento(numero_publicacion)
     
-    # Fallback en caso de que no haya descripción detallada
     if not descripcion:
-        partes = []
+        partes_descripcion = []
         if comprador:
-            partes.append(f"Organismo comprador: {comprador}.")
+            partes_descripcion.append(f"Organismo comprador: {comprador}.")
         if tipo_aviso:
-            partes.append(f"Tipo de aviso: {tipo_aviso}.")
-        descripcion = " ".join(partes) or None
+            partes_descripcion.append(f"Tipo de aviso: {tipo_aviso}.")
+        descripcion = " ".join(partes_descripcion) or None
 
     slug_base = numero_publicacion or _generar_slug(titulo or "sin-titulo")
     url_oficial = f"{URL_BASE_AVISO}{numero_publicacion}" if numero_publicacion else None
@@ -231,6 +219,7 @@ def construir_registro(aviso: dict) -> dict:
         "url_documento": None,
         "fecha_publicacion": fecha_publicacion.isoformat() if fecha_publicacion else None,
         "fecha_limite": fecha_limite.isoformat() if fecha_limite else None,
+        "_fecha_pub_obj": fecha_publicacion,  # Campo auxiliar para el filtrado por fechas
     }
 
 
@@ -246,49 +235,66 @@ def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> 
             f"Pais: {datos.get('pais') or 'No especificado'}"
         )
 
+        # Limpiamos la clave auxiliar temporal antes de enviar
+        datos_enviar = {k: v for k, v in datos.items() if k != "_fecha_pub_obj"}
+
         if existente is None:
-            datos["texto_completo"] = texto_completo
-            datos["embedding"] = generar_embedding(texto_completo)
-            datos["es_novedad"] = True
-            datos["es_actualizada"] = False
-            a_subir.append(datos)
+            datos_enviar["texto_completo"] = texto_completo
+            datos_enviar["embedding"] = generar_embedding(texto_completo)
+            datos_enviar["es_novedad"] = True
+            datos_enviar["es_actualizada"] = False
+            a_subir.append(datos_enviar)
             continue
 
         ha_cambiado = any(
-            str(existente.get(campo)) != str(datos.get(campo)) for campo in CAMPOS_COMPARABLES
+            str(existente.get(campo)) != str(datos_enviar.get(campo)) for campo in CAMPOS_COMPARABLES
         )
         if not ha_cambiado:
             continue
 
-        datos["texto_completo"] = texto_completo
-        datos["embedding"] = generar_embedding(texto_completo)
-        datos["es_novedad"] = False
-        datos["es_actualizada"] = True
-        a_subir.append(datos)
+        datos_enviar["texto_completo"] = texto_completo
+        datos_enviar["embedding"] = generar_embedding(texto_completo)
+        datos_enviar["es_novedad"] = False
+        datos_enviar["es_actualizada"] = True
+        a_subir.append(datos_enviar)
 
     return a_subir
 
 
 def ejecutar_sincronizacion():
-    consulta_activa = obtener_consulta_rango_fechas()
     print("=" * 100, flush=True)
     print("SINCRONIZACION DE LICITACIONES INTERNACIONALES - TED (GIZ, via API oficial)", flush=True)
     print("=" * 100, flush=True)
-    print(f"Consulta: {consulta_activa}  ·  Alcance: {ALCANCE}", flush=True)
+    print(f"Consulta: {CONSULTA}  ·  Alcance: {ALCANCE}", flush=True)
 
     crudos = extraer_avisos_api()
     print(f"\nTotal avisos recibidos de la API (todas las páginas): {len(crudos)}", flush=True)
 
     if not crudos:
-        print("No se ha recibido ningún aviso para las fechas solicitadas (Ayer - Hoy).", flush=True)
+        print("No se ha recibido ningún aviso.", flush=True)
         return
 
     normalizados = [construir_registro(a) for a in crudos]
 
+    # --- FILTRO MANUAL EN PYTHON: solo conservar registros de AYER y HOY ---
+    hoy = date.today()
+    ayer = hoy - timedelta(days=1)
+    
+    normalizados_filtrados = [
+        reg for reg in normalizados 
+        if reg.get("_fecha_pub_obj") and (ayer <= reg["_fecha_pub_obj"] <= hoy)
+    ]
+
+    print(f"Avisos tras filtrar fecha de publicación (Ayer {ayer} - Hoy {hoy}): {len(normalizados_filtrados)}", flush=True)
+
+    if not normalizados_filtrados:
+        print("No hay avisos publicados entre ayer y hoy para procesar.", flush=True)
+        return
+
     supabase = obtener_cliente_supabase()
 
     print("\nComparando con lo ya existente en Supabase...", flush=True)
-    claves_validas = [n["codigo_unico"] for n in normalizados if n.get("titulo") and n.get("url_oficial")]
+    claves_validas = [n["codigo_unico"] for n in normalizados_filtrados if n.get("titulo") and n.get("url_oficial")]
     registros_existentes = obtener_registros_existentes(
         supabase,
         tabla="licitaciones_internacionales",
@@ -297,7 +303,7 @@ def ejecutar_sincronizacion():
         claves=claves_validas,
     )
 
-    lote_final = preparar_lote_para_subir(normalizados, registros_existentes)
+    lote_final = preparar_lote_para_subir(normalizados_filtrados, registros_existentes)
 
     if not lote_final:
         print("No hay avisos nuevos ni cambios que sincronizar.", flush=True)
