@@ -208,15 +208,11 @@ def _parrafos_de(li) -> list:
     return [p.get_text(" ", strip=True) for p in li.find_all("p")]
 
 
-def obtener_datos_ficha(url: str) -> dict:
-    resultado = {"descripcion": None, "fecha_publicacion": None, "fecha_limite": None}
-
-    print(f"\n--- [DEBUG] Analizando URL: {url} ---", flush=True)
+def obtener_datos_ficha(url: str, titulo_fallback: str = None) -> dict:
+    resultado = {"descripcion": titulo_fallback, "fecha_publicacion": None, "fecha_limite": None}
 
     try:
-        # Aseguramos usar las mismas cabeceras globales (CABECERAS_PETICION)
         respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=CABECERAS_PETICION)
-        print(f"   [HTTP Status] {respuesta.status_code}", flush=True)
         respuesta.raise_for_status()
     except Exception as error:
         print(f"     [ERROR] Descargando la ficha: {error}", flush=True)
@@ -224,45 +220,36 @@ def obtener_datos_ficha(url: str) -> dict:
 
     soup = BeautifulSoup(respuesta.text, "html.parser")
 
-    # Comprobación de seguridad por si el HTML vino vacío o bloqueado
-    if len(respuesta.text) < 500:
-        print(f"   [ALERTA] La respuesta HTML es sospechosamente corta ({len(respuesta.text)} chars). Podría ser un bloqueo.", flush=True)
-
-    # 1. BÚSQUEDA DE DESCRIPCIÓN POR "Objetivos Generales"
-    encontrado_por_span = False
-    for span in soup.find_all(["span", "h3", "p", "div"]):
+    # 1. EXTRACCIÓN DE LA DESCRIPCIÓN EXACTA ("Objetivos Generales de la adquisición")
+    encontrado = False
+    for span in soup.find_all(["span", "p", "div", "li"]):
         texto_span = span.get_text(" ", strip=True)
-        if "objetivos generales" in texto_span.lower():
-            contenedor = span.find_parent("li") or span.parent
-            if contenedor:
-                parrafos = contenedor.find_all("p")
-                for p in parrafos:
-                    txt_p = p.get_text(" ", strip=True)
-                    if txt_p and "objetivos generales" not in txt_p.lower():
-                        resultado["descripcion"] = txt_p
-                        encontrado_por_span = True
+        if "objetivos generales de la adquisición" in texto_span.lower():
+            # Buscamos el elemento <p> hermano o hijo inmediato que contiene el texto real
+            padre_li = span.find_parent("li")
+            if padre_li:
+                p_desc = padre_li.find("p")
+                if p_desc:
+                    txt = p_desc.get_text(" ", strip=True)
+                    if txt and "objetivos generales" not in txt.lower():
+                        resultado["descripcion"] = txt
+                        encontrado = True
                         break
-            if encontrado_por_span:
+            if encontrado:
                 break
 
-    # Red de seguridad 1 para descripción
-    if not resultado["descripcion"]:
-        for li in soup.find_all("li"):
-            texto_li = li.get_text(" ", strip=True)
-            if "objetivos generales" in texto_li.lower():
-                parrafos = li.find_all("p")
-                if parrafos:
-                    resultado["descripcion"] = parrafos[0].get_text(" ", strip=True)
+    # Red de seguridad alternativa si por algo cambia el contenedor
+    if not resultado["descripcion"] or resultado["descripcion"] == titulo_fallback:
+        for p in soup.find_all("p"):
+            if "acquisition and delivery" in p.get_text().lower() or len(p.get_text(strip=True)) > 30:
+                # Evitamos coger metadatos de correos o lugares
+                txt = p.get_text(" ", strip=True)
+                if "@" not in txt and "lugar:" not in txt.lower():
+                    resultado["descripcion"] = txt
                     break
 
-    # Red de seguridad 2: Título H1
-    if not resultado["descripcion"]:
-        h1_principal = soup.find("h1")
-        if h1_principal:
-            resultado["descripcion"] = h1_principal.get_text(" ", strip=True)
-
-    # 2. EXTRACCIÓN DE FECHAS DESDE METADATOS SUPERIORES (<dt> / <dd>)
-    for dt in soup.find_all(["dt", "span", "div"]):
+    # 2. EXTRACCIÓN DE FECHAS (Publicación y Cierre) desde los metadatos o texto
+    for dt in soup.find_all(["dt", "span", "p"]):
         texto_dt = dt.get_text(" ", strip=True).lower()
         if "fecha de publicación" in texto_dt:
             dd = dt.find_next(["dd", "span", "p"])
@@ -277,35 +264,20 @@ def obtener_datos_ficha(url: str) -> dict:
                 if parsed:
                     resultado["fecha_limite"] = parsed
 
-    # 3. REVISIÓN DE BLOQUES DE TEXTO INFERIORES SI FALTAN FECHAS
+    # Si faltan fechas, buscamos en los bloques de texto de "Presentación del Proceso"
     if not resultado["fecha_publicacion"] or not resultado["fecha_limite"]:
-        items = soup.find_all("li")
-        for li in items:
-            parrafos = _parrafos_de(li)
-            for texto_p in parrafos:
-                if not resultado["fecha_publicacion"]:
-                    match_partir = re.search(r"a partir de:?\s*(.+)", texto_p, re.IGNORECASE)
-                    if match_partir:
-                        parsed = parsear_fecha_bcie(match_partir.group(1))
-                        if parsed:
-                            resultado["fecha_publicacion"] = parsed
-                
-                if not resultado["fecha_limite"]:
-                    match_hasta = re.search(r"hasta:?\s*(.+)", texto_p, re.IGNORECASE)
-                    if match_hasta:
-                        parsed = parsear_fecha_bcie(match_hasta.group(1))
-                        if parsed:
-                            resultado["fecha_limite"] = parsed
-                    
-                    match_fecha_rec = re.search(r"fecha:?\s*(.+)", texto_p, re.IGNORECASE)
-                    if match_fecha_rec:
-                        parsed = parsear_fecha_bcie(match_fecha_rec.group(1))
-                        if parsed:
-                            resultado["fecha_limite"] = parsed
+        texto_total = soup.get_text(" ", strip=True)
+        
+        match_pub = re.search(r"A partir de:\s*([0-9]{1,2}-[a-zA-Z]{3}-[0-9]{4})", texto_total, re.IGNORECASE)
+        if match_pub and not resultado["fecha_publicacion"]:
+            resultado["fecha_publicacion"] = parsear_fecha_bcie(match_pub.group(1))
 
-    print(f"   [RESUMEN FINAL] Descripcion: {str(resultado['descripcion'])[:40]}... | Publicacion: {resultado['fecha_publicacion']} | Cierre: {resultado['fecha_limite']}\n", flush=True)
+        match_cier = re.search(r"Hasta:\s*([0-9]{1,2}-[a-zA-Z]{3}-[0-9]{4})", texto_total, re.IGNORECASE)
+        if match_cier and not resultado["fecha_limite"]:
+            resultado["fecha_limite"] = parsear_fecha_bcie(match_cier.group(1))
+
+    print(f"   [RESUMEN FINAL] Descripcion: {str(resultado['descripcion'])[:60]}... | Pub: {resultado['fecha_publicacion']} | Cierre: {resultado['fecha_limite']}", flush=True)
     return resultado
-
 def extraer_licitaciones_playwright() -> list:
     """
     Abre el portal y recorre hasta MAX_PAGINAS páginas (vía ?page=N),
