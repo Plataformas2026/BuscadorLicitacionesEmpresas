@@ -209,69 +209,62 @@ def _parrafos_de(li) -> list:
 
 
 def obtener_datos_ficha(url: str) -> dict:
-    """
-    Lee la ficha del aviso para sacar su descripción y sus fechas de
-    forma más fiable que la tabla del listado -- ver aviso de
-    fiabilidad en el docstring del módulo.
-
-    Estructura real CONFIRMADA (a partir de un fragmento de HTML real
-    proporcionado por el usuario, no una suposición): un
-    <ol class="list-decimal..."> con un <li> por bloque, cada uno con
-    un <span> de cabecera y uno o más <p> de contenido:
-      - <li> "Objetivos Generales de la adquisición:" -> su primer <p>
-        es la descripción real de la licitación.
-      - <li> "...estará disponible en:" -> contiene "A partir de: ..."
-        y "Hasta: ..." (disponibilidad de la documentación -- lo más
-        parecido a una fecha de publicación que expone este portal).
-      - <li> "...se recibirán en:" -> contiene "Fecha: ...", que es la
-        fecha límite REAL de presentación de propuestas (más fiable
-        que "Hasta:", que solo habla de la documentación).
-    Si esta estructura no aparece (ficha con otro formato), se cae a
-    buscar "Fecha de recepción de propuesta" en todo el texto de la
-    página como red de seguridad adicional (patrón visto en otra
-    consulta, puede que exista en algunas fichas y en otras no).
-    """
     resultado = {"descripcion": None, "fecha_publicacion": None, "fecha_limite": None}
 
     try:
         respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=CABECERAS_PETICION)
         respuesta.raise_for_status()
     except Exception as error:
-        print(f"      Error descargando la ficha: {error}", flush=True)
+        print(f"     Error descargando la ficha: {error}", flush=True)
         return resultado
 
     soup = BeautifulSoup(respuesta.text, "html.parser")
-    lista = soup.find("ol", class_=re.compile(r"\blist-decimal\b"))
-    items = lista.find_all("li", recursive=False) if lista else []
+    
+    # NUEVA ESTRATEGIA PARA LA DESCRIPCIÓN: Buscar directamente cualquier <span> o texto 
+    # que contenga "Objetivos Generales" sin importar el nivel de listas anidadas.
+    spans = soup.find_all(lambda tag: tag.name == 'span' and 'objetivos generales' in tag.get_text().lower())
+    for span in spans:
+        # El párrafo de descripción suele ser el siguiente hermano o estar dentro del mismo <li> padre
+        li_padre = span.find_parent('li')
+        if li_padre:
+            parrafos = _parrafos_de(li_padre)
+            if parrafos:
+                resultado["descripcion"] = parrafos[0]
+                break
+    
+    # Si por alguna razón no se encontró con el método anterior, buscamos en todos los párrafos de la página
+    if not resultado["descripcion"]:
+        for p in soup.find_all("p"):
+            texto_p = p.get_text(" ", strip=True)
+            if "tiene como finalidad" in texto_p.lower() or "la adquisición de" in texto_p.lower():
+                resultado["descripcion"] = texto_p
+                break
 
+    # Extracción de fechas robusta basada en la estructura de metadatos o etiquetas <dd> / párrafos
+    # (Buscamos las fechas de publicación y cierre directamente en los bloques de la ficha)
+    items = soup.find_all("li")
     for li in items:
         span = li.find("span")
         texto_span = (span.get_text(" ", strip=True) if span else "").lower()
         parrafos = _parrafos_de(li)
 
-        if "objetivos generales" in texto_span:
-            if parrafos:
-                resultado["descripcion"] = parrafos[0]
-            continue
-
         if "recibir" in texto_span:   # "...se recibirán en:"
             for texto_p in parrafos:
-                coincidencia = re.match(r"fecha:?\s*(.+)", texto_p, re.IGNORECASE)
+                coincidencia = re.search(r"fecha:?\s*(\d{1,2}[-/\s][A-Za-z]{3,9}[-/\s]\d{4})", texto_p, re.IGNORECASE)
                 if coincidencia:
                     resultado["fecha_limite"] = parsear_fecha_bcie(coincidencia.group(1))
             continue
 
         for texto_p in parrafos:
-            coincidencia_partir = re.match(r"a partir de:?\s*(.+)", texto_p, re.IGNORECASE)
+            coincidencia_partir = re.search(r"a partir de:?\s*(\d{1,2}[-/\s][A-Za-z]{3,9}[-/\s]\d{4})", texto_p, re.IGNORECASE)
             if coincidencia_partir:
                 resultado["fecha_publicacion"] = parsear_fecha_bcie(coincidencia_partir.group(1))
-            coincidencia_hasta = re.match(r"hasta:?\s*(.+)", texto_p, re.IGNORECASE)
+            
+            coincidencia_hasta = re.search(r"hasta:?\s*(\d{1,2}[-/\s][A-Za-z]{3,9}[-/\s]\d{4})", texto_p, re.IGNORECASE)
             if coincidencia_hasta and resultado["fecha_limite"] is None:
-                # respaldo: si el <li> de "se recibirán en" no aparecio
-                # o no traia fecha, se usa el fin de disponibilidad de
-                # la documentacion como aproximacion.
                 resultado["fecha_limite"] = parsear_fecha_bcie(coincidencia_hasta.group(1))
 
+    # Red de seguridad global para fechas si vinieron vacías
     if resultado["fecha_limite"] is None:
         texto_plano = soup.get_text(" ", strip=True)
         coincidencia_recepcion = PATRON_FECHA_RECEPCION.search(texto_plano)
@@ -279,7 +272,6 @@ def obtener_datos_ficha(url: str) -> dict:
             resultado["fecha_limite"] = parsear_fecha_bcie(coincidencia_recepcion.group(1))
 
     return resultado
-
 
 
 def extraer_licitaciones_playwright() -> list:
