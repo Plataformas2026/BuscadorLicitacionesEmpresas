@@ -3,9 +3,53 @@
 ingesta_ungm.py
 ----------------
 Sincroniza avisos de adquisiciones de UNGM (United Nations Global
-Marketplace) contra la tabla `licitaciones_internacionales` de Supabase,
-leyendo la estructura de la tabla real del portal mediante selectores de clase
-HTML (.label y .value) para garantizar máxima precisión en fechas y país.
+Marketplace) contra la tabla `licitaciones_internacionales` de Supabase.
+
+CAMBIO DE ARQUITECTURA -- FICHA POR AVISO, NO FILAS DEL LISTADO
+--------------------------------------------------------------------------
+Versiones anteriores intentaban leer fecha de publicación, fecha límite
+y país directamente de las filas del listado (`#tblNotices`/
+`.ungm-list-item`), con selectores `.row .label`/`.value` -- pero esa
+estructura de "fila con etiqueta y valor" NO vive en el listado: vive en
+la FICHA de cada aviso individual (`/Public/Notice/<id>`), confirmado
+contra una página de detalle real proporcionada por el usuario. Por eso
+las fechas salían vacías o mal, aunque los selectores en sí fueran
+correctos -- se estaban aplicando sobre el documento equivocado.
+
+Ahora el listado (`extraer_licitaciones_playwright`, con Playwright,
+scroll infinito) SOLO se usa para descubrir título + URL de cada aviso
+-- lo mínimo que sí es fiable ahí. Para cada aviso descubierto,
+`obtener_datos_ficha` visita su propia página con `requests` (la ficha
+es HTML servido por el servidor, no hace falta navegador para leerla,
+igual que en ingesta_bcie.py/ingesta_caf.py) y extrae de ahí, con
+selectores CSS estructurales sobre pares `<div class="row">
+<span class="label">Etiqueta:</span><span class="value">Valor</span>
+</div>`:
+  - "Published on" -> fecha_publicacion
+  - "Deadline on" -> fecha_limite (puede traer hora y zona horaria detrás,
+    p. ej. "26-Sep-2026 12:00 (GMT 2.00)"; el propio patrón de fecha ya
+    ignora ese sobrante)
+  - "Beneficiary countries or territories" -> país (se intenta primero
+    tal cual sobre PAISES_ONU antes de descartar por no encontrarlo)
+  - El panel cuyo título es literalmente "Description" -> la
+    descripción real del aviso (antes era un texto sintético a partir
+    de fragmentos sueltos de la fila del listado)
+
+Con MAX_SCROLLS=150 el listado puede descubrir muchos avisos; visitar
+la ficha de cada uno con `requests` es rápido (sin arrancar navegador
+por aviso) pero sigue siendo una petición HTTP por aviso -- 
+MAX_FICHAS_A_CONSULTAR pone un tope de seguridad razonable para no
+disparar peticiones sin límite si el listado devolviera muchos más
+avisos de los esperados para una ventana de 2 días.
+
+AVISO DE FIABILIDAD
+------------------------
+No hay salida de red hacia ungm.org en este entorno de desarrollo. El
+listado (selectores de descubrimiento de título+URL) sigue sin
+confirmarse en vivo -- revisa "Total avisos rastreados" en la primera
+ejecución manual (workflow_dispatch); si sale en 0, ahí sigue habiendo
+margen de ajuste. La FICHA (fechas, país, descripción) sí se ha
+validado contra una página de detalle real completa.
 
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
 Ejecución local:     python ingesta_ungm.py
@@ -17,6 +61,8 @@ import unicodedata
 from datetime import date, datetime, timedelta
 from urllib.parse import urljoin
 
+import requests
+from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 from common import (
@@ -31,9 +77,12 @@ LISTADO_URL = BASE_URL + "/Public/Notice"
 FUENTE = "UNGM"
 DIAS_ATRAS = 2   # Coge avisos con fecha de publicación de hoy y ayer
 LOTE_ENVIO_SUPABASE = 15
-CAMPOS_COMPARABLES = ("titulo", "pais", "fecha_publicacion", "fecha_limite")
+CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "fecha_publicacion", "fecha_limite")
 
 TIEMPO_ESPERA_CARGA_MS = 60000
+TIMEOUT_PETICION = 30
+PAUSA_ENTRE_FICHAS_SEGUNDOS = 0.3
+MAX_FICHAS_A_CONSULTAR = 400   # red de seguridad -- ver aviso de fiabilidad
 MAX_SCROLLS = 150
 PAUSA_ENTRE_SCROLLS_SEGUNDOS = 2.0
 CAPTURA_DEPURACION = "debug_ungm_tabla.png"
@@ -42,8 +91,11 @@ CABECERAS_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+CABECERAS_PETICION = {"User-Agent": CABECERAS_USER_AGENT}
 
-# JS Optimizado para leer clave/valor exactos desde la estructura HTML de UNGM
+# JS simplificado: el listado SOLO se usa para descubrir título + URL de
+# cada aviso -- ver aviso de fiabilidad más abajo sobre por qué ya no se
+# intentan sacar fechas/país de las filas del listado.
 _JS_EXTRAER_FILAS = """
 () => {
     const resultados = [];
@@ -53,7 +105,6 @@ _JS_EXTRAER_FILAS = """
         const enlace = fila.querySelector('a[href*="/Public/Notice/"]');
         let href = enlace ? enlace.getAttribute('href') : null;
 
-        // Si no hay enlace directo <a>, buscar el noticeId en los botones
         if (!href) {
             const btn = fila.querySelector('[data-noticeid], [data-notice-id]');
             if (btn) {
@@ -66,7 +117,6 @@ _JS_EXTRAER_FILAS = """
 
         if (!href) return;
 
-        // Extraer Título
         let titulo = '';
         const elTitulo = fila.querySelector('.title');
         if (elTitulo) {
@@ -75,30 +125,7 @@ _JS_EXTRAER_FILAS = """
             titulo = (enlace.innerText || enlace.getAttribute('title') || '').trim();
         }
 
-        // Extraer pares Label / Value del HTML
-        const datosClaveValor = {};
-        const filasInternas = fila.querySelectorAll('.row');
-        filasInternas.forEach(r => {
-            const elLabel = r.querySelector('.label');
-            const elValue = r.querySelector('.value');
-            if (elLabel && elValue) {
-                const clave = elLabel.innerText.replace(':', '').trim();
-                const valor = elValue.innerText.trim();
-                datosClaveValor[clave] = valor;
-            }
-        });
-
-        // Tipo de aviso (status tag)
-        const elStatus = fila.querySelector('.status-tag');
-        const tipoAviso = elStatus ? elStatus.innerText.trim() : null;
-
-        resultados.push({
-            titulo: titulo,
-            href: href,
-            datos: datosClaveValor,
-            tipo_aviso: tipoAviso,
-            texto_completo: (fila.innerText || '').replace(/\\s+/g, ' ')
-        });
+        resultados.push({ titulo, href });
     });
 
     return resultados;
@@ -193,6 +220,65 @@ def parsear_fecha_string(cadena_fecha: str):
     return None
 
 
+def obtener_datos_ficha(url: str) -> dict:
+    """
+    Visita la ficha propia del aviso y extrae, de sus pares
+    <div class="row"><span class="label">Etiqueta:</span>
+    <span class="value">Valor</span></div>, los datos fiables -- ver
+    aviso de fiabilidad en el docstring del módulo: esta estructura SÍ
+    se ha confirmado contra una página de detalle real completa
+    (a diferencia de las filas del listado).
+    """
+    resultado = {
+        "fecha_publicacion": None, "fecha_limite": None,
+        "pais": None, "descripcion": None, "referencia": None,
+    }
+
+    try:
+        respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=CABECERAS_PETICION)
+        respuesta.raise_for_status()
+    except Exception as error:
+        print(f"      Error descargando la ficha: {error}", flush=True)
+        return resultado
+
+    soup = BeautifulSoup(respuesta.text, "html.parser")
+
+    datos_html = {}
+    for fila in soup.select(".row"):
+        label = fila.select_one(".label")
+        value = fila.select_one(".value")
+        if label and value:
+            clave = label.get_text(strip=True).rstrip(":")
+            datos_html[clave] = value.get_text(strip=True)
+
+    if datos_html.get("Published on"):
+        resultado["fecha_publicacion"] = parsear_fecha_string(datos_html["Published on"])
+    if datos_html.get("Deadline on"):
+        resultado["fecha_limite"] = parsear_fecha_string(datos_html["Deadline on"])
+    if datos_html.get("Reference"):
+        resultado["referencia"] = datos_html["Reference"]
+
+    pais_raw = datos_html.get("Beneficiary countries or territories")
+    if pais_raw:
+        resultado["pais"] = _detectar_pais(pais_raw)
+
+    # Panel "Description": un <div class="ungm-list-item ..."> cuyo
+    # <div class="title"> dice literalmente "Description", seguido de
+    # un <div> hermano con el texto real del aviso.
+    for panel in soup.select(".ungm-list-item"):
+        titulo_panel = panel.select_one(".title")
+        if titulo_panel and titulo_panel.get_text(strip=True).lower() == "description":
+            hermano = titulo_panel.find_next_sibling("div")
+            if hermano:
+                resultado["descripcion"] = hermano.get_text(" ", strip=True)
+            break
+
+    if resultado["pais"] is None:
+        resultado["pais"] = _detectar_pais(soup.get_text(" ", strip=True))
+
+    return resultado
+
+
 def extraer_licitaciones_playwright() -> list:
     registros_por_url = {}
 
@@ -223,9 +309,6 @@ def extraer_licitaciones_playwright() -> list:
 
                         registros_por_url[url_completa] = {
                             "titulo": item.get("titulo"),
-                            "tipo_aviso": item.get("tipo_aviso"),
-                            "datos": item.get("datos", {}),
-                            "texto_completo": item.get("texto_completo"),
                             "url_oficial": url_completa,
                         }
 
@@ -264,49 +347,27 @@ def extraer_licitaciones_playwright() -> list:
     return list(registros_por_url.values())
 
 
-def construir_registro(item: dict) -> dict:
-    datos_html = item.get("datos", {})
-
-    # Extracción precisa de fechas basada en las etiquetas HTML
-    pub_raw = datos_html.get("Published on")
-    deadline_raw = datos_html.get("Deadline on")
-
-    fecha_publicacion = parsear_fecha_string(pub_raw) if pub_raw else None
-    fecha_limite = parsear_fecha_string(deadline_raw) if deadline_raw else None
-
-    # Extracción directa del país
-    pais_raw = datos_html.get("Beneficiary countries or territories")
-    pais = _detectar_pais(pais_raw) if pais_raw else _detectar_pais(item.get("texto_completo"))
-
+def construir_registro(item: dict, datos_ficha: dict) -> dict:
     titulo = item.get("titulo") or "Aviso de UNGM sin título reconocido"
 
-    # Construcción de descripción enriquecida
-    partes_descripcion = []
-    if deadline_raw:
-        partes_descripcion.append(f"Plazo: {deadline_raw}.")
-    if datos_html.get("Reference"):
-        partes_descripcion.append(f"Ref: {datos_html.get('Reference')}.")
-    
-    texto_extra = (item.get("texto_completo") or "").replace(titulo, "", 1).strip()
-    if texto_extra:
-        partes_descripcion.append(texto_extra[:300])
-    
-    descripcion = " ".join(partes_descripcion) or None
+    descripcion = datos_ficha.get("descripcion")
+    if not descripcion and datos_ficha.get("referencia"):
+        descripcion = f"Ref: {datos_ficha['referencia']}."
 
     return {
         "codigo_unico": f"UNGM-{_id_o_slug(item['url_oficial'])}"[:150],
         "fuente_origen": FUENTE,
-        "tipo_aviso": item.get("tipo_aviso"),
+        "tipo_aviso": None,
         "titulo": titulo,
         "descripcion": descripcion,
-        "pais": pais,
-        "paises": [pais] if pais else [],
+        "pais": datos_ficha.get("pais"),
+        "paises": [datos_ficha["pais"]] if datos_ficha.get("pais") else [],
         "organismo": "UNGM",
         "categoria": None,
         "url_oficial": item["url_oficial"],
         "url_documento": None,
-        "fecha_publicacion": fecha_publicacion.isoformat() if fecha_publicacion else None,
-        "fecha_limite": fecha_limite.isoformat() if fecha_limite else None,
+        "fecha_publicacion": datos_ficha["fecha_publicacion"].isoformat() if datos_ficha.get("fecha_publicacion") else None,
+        "fecha_limite": datos_ficha["fecha_limite"].isoformat() if datos_ficha.get("fecha_limite") else None,
     }
 
 
@@ -362,7 +423,22 @@ def ejecutar_sincronizacion():
         )
         return
 
-    normalizados = [construir_registro(item) for item in crudos]
+    if len(crudos) > MAX_FICHAS_A_CONSULTAR:
+        print(
+            f"Aviso: se han descubierto {len(crudos)} avisos, por encima del tope de seguridad "
+            f"({MAX_FICHAS_A_CONSULTAR}) -- se consultará la ficha solo de los primeros "
+            f"{MAX_FICHAS_A_CONSULTAR}.",
+            flush=True,
+        )
+        crudos = crudos[:MAX_FICHAS_A_CONSULTAR]
+
+    print("\nConsultando la ficha de cada aviso para sacar fechas, país y descripción...", flush=True)
+    normalizados = []
+    for indice, item in enumerate(crudos, start=1):
+        print(f"  [{indice}/{len(crudos)}] {(item.get('titulo') or '')[:90]}", flush=True)
+        datos_ficha = obtener_datos_ficha(item["url_oficial"])
+        normalizados.append(construir_registro(item, datos_ficha))
+        time.sleep(PAUSA_ENTRE_FICHAS_SEGUNDOS)
 
     con_pais = sum(1 for n in normalizados if n.get("pais"))
     print(
