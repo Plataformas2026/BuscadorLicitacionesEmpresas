@@ -19,41 +19,47 @@ restantes). Único cambio respecto al script de prueba (aparte de quitar
 el andamiaje propio de Colab): se usa `playwright.sync_api`, igual que el
 resto de scrapers de este proyecto que necesitan un navegador.
 
-AVISO DE FIABILIDAD -- FECHAS Y DESCRIPCIÓN (corregido con HTML real)
+AVISO DE FIABILIDAD -- FECHAS Y DESCRIPCIÓN (corregido con HTML real completo)
 --------------------------------------------------------------------------
-Las dos versiones anteriores de este script se basaban en suposiciones
-sin confirmar (formatos de fecha "a ciegas", luego fragmentos de texto
-indexados por un buscador). Esta versión sí se basa en un fragmento de
-HTML real de una ficha de aviso, proporcionado directamente por el
-usuario -- la fuente más fiable que se ha tenido hasta ahora para esta
-fuente. Confirma la estructura exacta: un
-<ol class="list-decimal..."> con un <li> por bloque, cada uno con un
-<span> de cabecera y uno o más <p> de contenido:
-  - <li> "Objetivos Generales de la adquisición:" -> su primer <p> es
-    la DESCRIPCIÓN real de la licitación (antes no se extraía en
-    absoluto, se guardaba siempre None).
-  - <li> "...estará disponible en:" -> contiene "A partir de: ..." y
-    "Hasta: ..." (disponibilidad de la documentación).
-  - <li> "...se recibirán en:" -> contiene "Fecha: ...", que es la
-    fecha límite REAL de presentación de propuestas. Esto corrige una
-    suposición equivocada de la versión anterior: se buscaba el
-    literal "Fecha de recepción de propuesta", que NO aparece en el
-    HTML real -- se mantiene esa búsqueda como red de seguridad
-    adicional (por si alguna ficha antigua sí la usa), pero ya no es
-    el método principal.
-  - El formato de fecha confirmado en el HTML real es "DD-mon-AAAA" en
-    minúsculas (p. ej. "16-sep-2026"), consistente con el "DD-Mon-AAAA"
-    que ya se había confirmado antes por otra vía -- `parsear_fecha_bcie`
-    ya normaliza la capitalización del mes, así que ambas formas
-    funcionan sin cambios.
+Tercera vuelta sobre esta misma fuente, cada una con más evidencia real
+que la anterior. Esta versión se basa en una página de detalle COMPLETA
+(no un fragmento) proporcionada por el usuario, que reveló dos fallos
+reales de la versión anterior:
+
+  1. DESCRIPCIÓN: el <span>"Objetivos Generales de la adquisición:"</span>
+     NO cuelga directamente del primer <ol> de la página, como se había
+     asumido -- la página real anida un <ol> dentro de otro (el <li>
+     "Presentación del Proceso" del <ol> exterior contiene un <ol>
+     interior, y ahí es donde vive). Por eso ahora se busca ese <span>
+     por su TEXTO en todo el documento, a cualquier profundidad
+     (`_span_por_texto`), y se toma el <p> que sea su hermano
+     inmediatamente siguiente -- ver `find_next_sibling`, independiente
+     de en qué nivel de anidación esté.
+  2. FECHAS: la misma página reveló un bloque de metadatos <dt>/<dd>
+     limpio cerca de la cabecera ("País", "Fecha de publicación",
+     "Fecha de cierre", "Línea"), mucho más fiable que rebuscar "A
+     partir de"/"Hasta"/"Fecha:" en párrafos sueltos -- ahora es la
+     fuente PRINCIPAL (`_valor_dt_dd`); el rebusque anterior por <li>
+     se mantiene como respaldo si el bloque dt/dd no trae alguna fecha.
+  3. BUG ADICIONAL encontrado al probar con esta página real: el mes
+     abreviado puede venir en ESPAÑOL ("28-ago-2026") o en INGLÉS
+     ("10-Jul-2024") indistintamente. La versión anterior usaba
+     `strptime("%b")`, que solo reconoce abreviaturas en inglés y
+     además depende del locale del sistema -- "oct"/"Jul" coinciden
+     por casualidad entre ambos idiomas y colaban el bug sin dar error,
+     pero "ago" no es una abreviatura inglesa válida ("Aug" sí lo es),
+     así que fallaba en silencio y `fecha_publicacion` se quedaba
+     vacía. Ahora se resuelve con MESES_ABREVIADOS, un diccionario
+     propio que cubre ambos idiomas sin depender del locale.
+
 Por eso `ejecutar_sincronizacion()` lee la ficha de CADA aviso
-(`obtener_datos_ficha`, con `requests` + BeautifulSoup para recorrer la
-estructura, igual que hace ingesta_caf.py) en vez de fiarse solo de la
-tabla del listado -- más lento pero mucho más fiable, y con solo 2
-páginas de avisos (MAX_PAGINAS) el coste es asumible. Sigue sin poder
-confirmarse en vivo en este entorno (sin salida de red hacia bcie.org):
-revisa los logs "Avisos sin descripción reconocida" y "Fechas sin
-reconocer" en la primera ejecución manual (workflow_dispatch).
+(`obtener_datos_ficha`, con `requests` + BeautifulSoup, igual que hace
+ingesta_caf.py) en vez de fiarse solo de la tabla del listado -- más
+lento pero mucho más fiable, y con solo 2 páginas de avisos
+(MAX_PAGINAS) el coste es asumible. Sigue sin poder confirmarse en vivo
+en este entorno (sin salida de red hacia bcie.org): revisa los logs
+"Avisos sin descripción reconocida" y "Fechas sin reconocer" en la
+primera ejecución manual (workflow_dispatch).
 
 SIN VENTANA DE FECHAS
 ------------------------
@@ -114,9 +120,21 @@ PATRON_FECHA_LARGA_ES = re.compile(
     r"(\d{1,2})\s*(?:de\s+)?(" + "|".join(MESES_ES.keys()) + r")\s*(?:de\s+)?(\d{4})",
     re.IGNORECASE,
 )
-# "10-Jul-2024" -- formato confirmado contra fichas reales del portal (ver
-# aviso de fiabilidad más abajo): mes en abreviatura INGLESA de 3 letras,
-# aunque el resto de la página esté en español.
+# "28-ago-2026" / "10-Jul-2024" / "12-oct-2026" -- formato confirmado
+# contra fichas reales (HTML completo proporcionado por el usuario):
+# DD-<mes abreviado>-AAAA, pero el mes puede venir abreviado en ESPAÑOL
+# ("ago", "ene", "abr", "dic"...) o en INGLÉS ("Jul", "Aug", "Jan"...)
+# -- se ha visto research indistintamente en la misma página. Por eso
+# se resuelve con este diccionario propio en vez de `strptime("%b")`
+# (que solo reconoce abreviaturas EN INGLÉS, y además depende del
+# locale del sistema donde se ejecute -- nada fiable): "ago" no es una
+# abreviatura inglesa válida ("Aug" sí lo es), así que strptime lo
+# fallaba en silencio y `fecha_publicacion` se quedaba vacía.
+MESES_ABREVIADOS = {
+    "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+    "jul": 7, "ago": 8, "sep": 9, "set": 9, "oct": 10, "nov": 11, "dic": 12,
+    "jan": 1, "apr": 4, "aug": 8, "dec": 12,   # los que difieren del español
+}
 PATRON_FECHA_CORTA = re.compile(r"(\d{1,2})[-/\s]([A-Za-z]{3,9})[-/\s](\d{4})")
 
 # Ficha real observada: "Fecha de recepción de propuesta: 10-Jul-2024" es
@@ -166,10 +184,11 @@ def _generar_slug(texto: str) -> str:
 
 def parsear_fecha_bcie(texto: str):
     """
-    Intenta primero 'DD-Mon-AAAA' con mes en inglés (formato confirmado
-    contra fichas reales, ver PATRON_FECHA_CORTA), y como red de
-    seguridad adicional otros formatos habituales en español -- ver
-    aviso de fiabilidad en el docstring del módulo.
+    Intenta primero 'DD-Mon-AAAA' (mes abreviado en español o en
+    inglés, ver MESES_ABREVIADOS -- formato confirmado contra fichas
+    reales), y como red de seguridad adicional otros formatos
+    habituales en español -- ver aviso de fiabilidad en el docstring
+    del módulo.
     """
     if not texto:
         return None
@@ -178,12 +197,12 @@ def parsear_fecha_bcie(texto: str):
     coincidencia = PATRON_FECHA_CORTA.search(texto)
     if coincidencia:
         dia, mes_texto, anio = coincidencia.groups()
-        for formato_mes in ("%b", "%B"):
+        mes = MESES_ABREVIADOS.get(mes_texto[:3].lower())
+        if mes:
             try:
-                mes = datetime.strptime(mes_texto[:3].capitalize(), "%b").month
                 return date(int(anio), mes, int(dia))
             except ValueError:
-                continue
+                pass
 
     for formato in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
         try:
@@ -204,80 +223,131 @@ def parsear_fecha_bcie(texto: str):
     return None
 
 
-def _parrafos_de(li) -> list:
-    return [p.get_text(" ", strip=True) for p in li.find_all("p")]
+def _valor_dt_dd(soup, etiqueta_buscada: str):
+    """Busca, en el bloque de metadatos de la ficha (los pares
+    <dt>/<dd> tipo 'País: Belice', 'Fecha de publicación: 28-ago-2026',
+    'Fecha de cierre: 12-oct-2026'), el <dd> del <dt> cuyo texto
+    contenga la etiqueta dada."""
+    etiqueta_norm = etiqueta_buscada.lower()
+    for dt in soup.find_all("dt"):
+        if etiqueta_norm in dt.get_text(" ", strip=True).lower():
+            dd = dt.find_next_sibling("dd")
+            if dd:
+                return dd.get_text(" ", strip=True)
+    return None
 
 
-def obtener_datos_ficha(url: str, titulo_fallback: str = None) -> dict:
-    resultado = {"descripcion": titulo_fallback, "fecha_publicacion": None, "fecha_limite": None}
+def _span_por_texto(soup, fragmento_texto: str):
+    """Busca, en TODO el documento y a CUALQUIER profundidad de
+    anidación de <ol>/<li>, el primer <span> cuyo texto contenga el
+    fragmento dado. Ver aviso de fiabilidad: esto reemplaza a una
+    versión anterior que asumía que el <li> con "Objetivos Generales"
+    colgaba directamente del primer <ol> de la página -- en la ficha
+    real proporcionada por el usuario, ese <li> vive dentro de un <ol>
+    ANIDADO dentro de otro <ol> (el de nivel superior solo tiene
+    "Fuente de Recursos" / "Organismo Ejecutor..." / "Presentación del
+    Proceso" como sus 3 <li> directos), así que buscar por texto en
+    todo el árbol, sin asumir ningún nivel fijo, es la única forma
+    robusta de encontrarlo."""
+    fragmento_norm = fragmento_texto.lower()
+    for span in soup.find_all("span"):
+        if fragmento_norm in span.get_text(" ", strip=True).lower():
+            return span
+    return None
+
+
+def obtener_datos_ficha(url: str) -> dict:
+    """
+    Lee la ficha del aviso para sacar su descripción y sus fechas de
+    forma más fiable que la tabla del listado -- ver aviso de
+    fiabilidad en el docstring del módulo.
+
+    Dos fuentes, confirmadas contra una página real COMPLETA (no solo
+    un fragmento) proporcionada por el usuario:
+
+    1. FECHAS -- bloque de metadatos <dt>/<dd> cerca de la cabecera de
+       la ficha: "Fecha de publicación" y "Fecha de cierre" ya vienen
+       ahí, limpias y etiquetadas sin ambigüedad -- ya no hace falta
+       rebuscar "A partir de"/"Hasta"/"Fecha:" dentro de los <li>
+       anidados para esto (aunque se conserva como respaldo, ver más
+       abajo). Se ha confirmado además que "Fecha de cierre" coincide
+       exactamente con el "Fecha:" que aparece bajo "...se recibirán
+       en:", así que son la misma fecha vista desde dos sitios.
+
+    2. DESCRIPCIÓN -- el <span>"Objetivos Generales de la
+       adquisición:"</span> seguido de su <p> hermano. Este <span> NO
+       vive directamente en el primer <ol> de la página como se asumió
+       en una versión anterior: la estructura real anida un <ol>
+       dentro de otro (el <li> "Presentación del Proceso" del <ol>
+       exterior contiene un <ol> interior, y es AHÍ donde está
+       "Objetivos Generales"). Por eso ya no se busca por posición
+       dentro de una lista concreta, sino por el propio texto del
+       <span>, a cualquier profundidad -- ver _span_por_texto.
+    """
+    resultado = {"descripcion": None, "fecha_publicacion": None, "fecha_limite": None}
 
     try:
         respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=CABECERAS_PETICION)
         respuesta.raise_for_status()
     except Exception as error:
-        print(f"     [ERROR] Descargando la ficha: {error}", flush=True)
+        print(f"      Error descargando la ficha: {error}", flush=True)
         return resultado
 
     soup = BeautifulSoup(respuesta.text, "html.parser")
 
-    # 1. EXTRACCIÓN DE LA DESCRIPCIÓN EXACTA ("Objetivos Generales de la adquisición")
-    encontrado = False
-    for span in soup.find_all(["span", "p", "div", "li"]):
-        texto_span = span.get_text(" ", strip=True)
-        if "objetivos generales de la adquisición" in texto_span.lower():
-            # Buscamos el elemento <p> hermano o hijo inmediato que contiene el texto real
-            padre_li = span.find_parent("li")
-            if padre_li:
-                p_desc = padre_li.find("p")
-                if p_desc:
-                    txt = p_desc.get_text(" ", strip=True)
-                    if txt and "objetivos generales" not in txt.lower():
-                        resultado["descripcion"] = txt
-                        encontrado = True
-                        break
-            if encontrado:
-                break
+    # 1. Fechas: bloque de metadatos dt/dd, fuente principal.
+    texto_fecha_pub = _valor_dt_dd(soup, "fecha de publicación") or _valor_dt_dd(soup, "fecha de publicacion")
+    if texto_fecha_pub:
+        resultado["fecha_publicacion"] = parsear_fecha_bcie(texto_fecha_pub)
 
-    # Red de seguridad alternativa si por algo cambia el contenedor
-    if not resultado["descripcion"] or resultado["descripcion"] == titulo_fallback:
-        for p in soup.find_all("p"):
-            if "acquisition and delivery" in p.get_text().lower() or len(p.get_text(strip=True)) > 30:
-                # Evitamos coger metadatos de correos o lugares
-                txt = p.get_text(" ", strip=True)
-                if "@" not in txt and "lugar:" not in txt.lower():
-                    resultado["descripcion"] = txt
-                    break
+    texto_fecha_lim = _valor_dt_dd(soup, "fecha de cierre")
+    if texto_fecha_lim:
+        resultado["fecha_limite"] = parsear_fecha_bcie(texto_fecha_lim)
 
-    # 2. EXTRACCIÓN DE FECHAS (Publicación y Cierre) desde los metadatos o texto
-    for dt in soup.find_all(["dt", "span", "p"]):
-        texto_dt = dt.get_text(" ", strip=True).lower()
-        if "fecha de publicación" in texto_dt:
-            dd = dt.find_next(["dd", "span", "p"])
-            if dd:
-                parsed = parsear_fecha_bcie(dd.get_text(" ", strip=True))
-                if parsed:
-                    resultado["fecha_publicacion"] = parsed
-        elif "fecha de cierre" in texto_dt:
-            dd = dt.find_next(["dd", "span", "p"])
-            if dd:
-                parsed = parsear_fecha_bcie(dd.get_text(" ", strip=True))
-                if parsed:
-                    resultado["fecha_limite"] = parsed
+    # 2. Descripción: span "Objetivos Generales..." + su <p> hermano,
+    # a cualquier profundidad de anidación.
+    span_objetivos = _span_por_texto(soup, "objetivos generales")
+    if span_objetivos:
+        parrafo = span_objetivos.find_next_sibling("p")
+        if parrafo:
+            resultado["descripcion"] = parrafo.get_text(" ", strip=True)
 
-    # Si faltan fechas, buscamos en los bloques de texto de "Presentación del Proceso"
-    if not resultado["fecha_publicacion"] or not resultado["fecha_limite"]:
-        texto_total = soup.get_text(" ", strip=True)
-        
-        match_pub = re.search(r"A partir de:\s*([0-9]{1,2}-[a-zA-Z]{3}-[0-9]{4})", texto_total, re.IGNORECASE)
-        if match_pub and not resultado["fecha_publicacion"]:
-            resultado["fecha_publicacion"] = parsear_fecha_bcie(match_pub.group(1))
+    # Respaldos, solo si el bloque dt/dd no trajo alguna de las fechas
+    # (ficha con otro formato) -- mismo mecanismo que la versión
+    # anterior, por si acaso.
+    if resultado["fecha_limite"] is None:
+        span_recibiran = _span_por_texto(soup, "se recibirán en") or _span_por_texto(soup, "se recibiran en")
+        if span_recibiran:
+            parrafo = span_recibiran.find_next_sibling("p")
+            if parrafo:
+                coincidencia = re.match(r"fecha:?\s*(.+)", parrafo.get_text(" ", strip=True), re.IGNORECASE)
+                if coincidencia:
+                    resultado["fecha_limite"] = parsear_fecha_bcie(coincidencia.group(1))
 
-        match_cier = re.search(r"Hasta:\s*([0-9]{1,2}-[a-zA-Z]{3}-[0-9]{4})", texto_total, re.IGNORECASE)
-        if match_cier and not resultado["fecha_limite"]:
-            resultado["fecha_limite"] = parsear_fecha_bcie(match_cier.group(1))
+    texto_plano = None
+    if resultado["fecha_publicacion"] is None or resultado["fecha_limite"] is None:
+        texto_plano = soup.get_text(" ", strip=True)
 
-    print(f"   [RESUMEN FINAL] Descripcion: {str(resultado['descripcion'])[:60]}... | Pub: {resultado['fecha_publicacion']} | Cierre: {resultado['fecha_limite']}", flush=True)
+    if resultado["fecha_publicacion"] is None:
+        coincidencia_partir = re.search(
+            r"[Aa] partir de:?\s*(\d{1,2}[-/\s][A-Za-z]{3,9}[-/\s]\d{4})", texto_plano
+        )
+        if coincidencia_partir:
+            resultado["fecha_publicacion"] = parsear_fecha_bcie(coincidencia_partir.group(1))
+
+    if resultado["fecha_limite"] is None:
+        coincidencia_hasta = re.search(r"[Hh]asta:?\s*(\d{1,2}[-/\s][A-Za-z]{3,9}[-/\s]\d{4})", texto_plano)
+        if coincidencia_hasta:
+            resultado["fecha_limite"] = parsear_fecha_bcie(coincidencia_hasta.group(1))
+        else:
+            coincidencia_recepcion = PATRON_FECHA_RECEPCION.search(texto_plano)
+            if coincidencia_recepcion:
+                resultado["fecha_limite"] = parsear_fecha_bcie(coincidencia_recepcion.group(1))
+
     return resultado
+
+
+
 def extraer_licitaciones_playwright() -> list:
     """
     Abre el portal y recorre hasta MAX_PAGINAS páginas (vía ?page=N),
