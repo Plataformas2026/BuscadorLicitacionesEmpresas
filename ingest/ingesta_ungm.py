@@ -4,13 +4,8 @@ ingesta_ungm.py
 ----------------
 Sincroniza avisos de adquisiciones de UNGM (United Nations Global
 Marketplace) contra la tabla `licitaciones_internacionales` de Supabase,
-leyendo la tabla real del portal:
-
-    https://www.ungm.org/Public/Notice
-
-usando Playwright (navegador real, headless, gratuito) -- necesario porque
-la tabla se renderiza con JavaScript y se carga progresivamente con scroll
-("Show more").
+leyendo la estructura de la tabla real del portal mediante selectores de clase
+HTML (.label y .value) para garantizar máxima precisión en fechas y país.
 
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
 Ejecución local:     python ingesta_ungm.py
@@ -39,7 +34,7 @@ LOTE_ENVIO_SUPABASE = 15
 CAMPOS_COMPARABLES = ("titulo", "pais", "fecha_publicacion", "fecha_limite")
 
 TIEMPO_ESPERA_CARGA_MS = 60000
-MAX_SCROLLS = 150  # Realizará los 150 scrolls completos
+MAX_SCROLLS = 150
 PAUSA_ENTRE_SCROLLS_SEGUNDOS = 2.0
 CAPTURA_DEPURACION = "debug_ungm_tabla.png"
 
@@ -48,39 +43,60 @@ CABECERAS_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
+# JS Optimizado para leer clave/valor exactos desde la estructura HTML de UNGM
 _JS_EXTRAER_FILAS = """
 () => {
     const resultados = [];
-    const filas = document.querySelectorAll('#tblNotices tr, #tblNotices .tableRow');
+    const filas = document.querySelectorAll('#tblNotices tr, #tblNotices .tableRow, .ungm-list-item');
 
     filas.forEach(fila => {
         const enlace = fila.querySelector('a[href*="/Public/Notice/"]');
-        if (!enlace) return;
+        let href = enlace ? enlace.getAttribute('href') : null;
 
-        let titulo = (enlace.innerText || '').trim();
-        if (!titulo) {
-            titulo = (enlace.getAttribute('title') || enlace.getAttribute('aria-label') || '').trim();
-        }
-        if (!titulo) {
-            const celdaEnlace = enlace.closest('td, div.tableCell');
-            if (celdaEnlace) {
-                titulo = (celdaEnlace.innerText || '').trim();
-            }
-        }
-        if (!titulo) {
-            const primeraCelda = fila.querySelector('td, div.tableCell');
-            if (primeraCelda) {
-                titulo = (primeraCelda.innerText || '').trim();
+        // Si no hay enlace directo <a>, buscar el noticeId en los botones
+        if (!href) {
+            const btn = fila.querySelector('[data-noticeid], [data-notice-id]');
+            if (btn) {
+                const noticeId = btn.getAttribute('data-noticeid') || btn.getAttribute('data-notice-id');
+                if (noticeId) {
+                    href = '/Public/Notice/' + noticeId;
+                }
             }
         }
 
-        const href = enlace.getAttribute('href');
-        const celdas = Array.from(fila.querySelectorAll('td, div.tableCell')).map(c => c.innerText.trim());
+        if (!href) return;
+
+        // Extraer Título
+        let titulo = '';
+        const elTitulo = fila.querySelector('.title');
+        if (elTitulo) {
+            titulo = elTitulo.innerText.trim();
+        } else if (enlace) {
+            titulo = (enlace.innerText || enlace.getAttribute('title') || '').trim();
+        }
+
+        // Extraer pares Label / Value del HTML
+        const datosClaveValor = {};
+        const filasInternas = fila.querySelectorAll('.row');
+        filasInternas.forEach(r => {
+            const elLabel = r.querySelector('.label');
+            const elValue = r.querySelector('.value');
+            if (elLabel && elValue) {
+                const clave = elLabel.innerText.replace(':', '').trim();
+                const valor = elValue.innerText.trim();
+                datosClaveValor[clave] = valor;
+            }
+        });
+
+        // Tipo de aviso (status tag)
+        const elStatus = fila.querySelector('.status-tag');
+        const tipoAviso = elStatus ? elStatus.innerText.trim() : null;
 
         resultados.push({
             titulo: titulo,
             href: href,
-            celdas: celdas,
+            datos: datosClaveValor,
+            tipo_aviso: tipoAviso,
             texto_completo: (fila.innerText || '').replace(/\\s+/g, ' ')
         });
     });
@@ -177,29 +193,6 @@ def parsear_fecha_string(cadena_fecha: str):
     return None
 
 
-def evaluar_licitacion(item: dict):
-    texto = item.get("texto_completo", "")
-    coincidencias = PATRON_FECHA.findall(texto)
-
-    fechas = []
-    for dia, mes_texto, anio in coincidencias:
-        cadena = f"{int(dia):02d}-{mes_texto.capitalize()}-{anio}"
-        fecha = parsear_fecha_string(cadena)
-        if fecha:
-            fechas.append((cadena, fecha))
-
-    if not fechas:
-        return None, None
-
-    deadline_str, _ = fechas[0]
-    if len(fechas) >= 2:
-        pub_str, _ = fechas[1]
-    else:
-        pub_str, _ = fechas[0]
-
-    return pub_str, deadline_str
-
-
 def extraer_licitaciones_playwright() -> list:
     registros_por_url = {}
 
@@ -230,6 +223,8 @@ def extraer_licitaciones_playwright() -> list:
 
                         registros_por_url[url_completa] = {
                             "titulo": item.get("titulo"),
+                            "tipo_aviso": item.get("tipo_aviso"),
+                            "datos": item.get("datos", {}),
                             "texto_completo": item.get("texto_completo"),
                             "url_oficial": url_completa,
                         }
@@ -269,39 +264,39 @@ def extraer_licitaciones_playwright() -> list:
     return list(registros_por_url.values())
 
 
-def _mejor_titulo_disponible(item: dict) -> str:
-    titulo = (item.get("titulo") or "").strip()
-    if titulo:
-        return titulo
-
-    candidatas = [c.strip() for c in (item.get("celdas") or []) if c and c.strip()]
-    candidatas = [c for c in candidatas if len(c) > 15 and not PATRON_FECHA.fullmatch(c)]
-    if candidatas:
-        return max(candidatas, key=len)
-
-    return "Aviso de UNGM sin título reconocido (revisar extracción)"
-
-
 def construir_registro(item: dict) -> dict:
-    fecha_publicacion_str, fecha_limite_str = evaluar_licitacion(item)
-    fecha_publicacion = parsear_fecha_string(fecha_publicacion_str) if fecha_publicacion_str else None
-    fecha_limite = parsear_fecha_string(fecha_limite_str) if fecha_limite_str else None
+    datos_html = item.get("datos", {})
 
-    pais = _detectar_pais(item.get("texto_completo"))
-    titulo = _mejor_titulo_disponible(item)
+    # Extracción precisa de fechas basada en las etiquetas HTML
+    pub_raw = datos_html.get("Published on")
+    deadline_raw = datos_html.get("Deadline on")
 
+    fecha_publicacion = parsear_fecha_string(pub_raw) if pub_raw else None
+    fecha_limite = parsear_fecha_string(deadline_raw) if deadline_raw else None
+
+    # Extracción directa del país
+    pais_raw = datos_html.get("Beneficiary countries or territories")
+    pais = _detectar_pais(pais_raw) if pais_raw else _detectar_pais(item.get("texto_completo"))
+
+    titulo = item.get("titulo") or "Aviso de UNGM sin título reconocido"
+
+    # Construcción de descripción enriquecida
     partes_descripcion = []
-    if fecha_limite_str:
-        partes_descripcion.append(f"Plazo: {fecha_limite_str}.")
+    if deadline_raw:
+        partes_descripcion.append(f"Plazo: {deadline_raw}.")
+    if datos_html.get("Reference"):
+        partes_descripcion.append(f"Ref: {datos_html.get('Reference')}.")
+    
     texto_extra = (item.get("texto_completo") or "").replace(titulo, "", 1).strip()
     if texto_extra:
         partes_descripcion.append(texto_extra[:300])
+    
     descripcion = " ".join(partes_descripcion) or None
 
     return {
         "codigo_unico": f"UNGM-{_id_o_slug(item['url_oficial'])}"[:150],
         "fuente_origen": FUENTE,
-        "tipo_aviso": None,
+        "tipo_aviso": item.get("tipo_aviso"),
         "titulo": titulo,
         "descripcion": descripcion,
         "pais": pais,
@@ -362,8 +357,7 @@ def ejecutar_sincronizacion():
     if not crudos:
         print(
             "No se ha extraído ningún aviso. Revisa el log de arriba y, si existe, "
-            f"{CAPTURA_DEPURACION} -- lo más probable es que la estructura real de la tabla "
-            "haya cambiado respecto a '#tblNotices'.",
+            f"{CAPTURA_DEPURACION}.",
             flush=True,
         )
         return
@@ -375,13 +369,6 @@ def ejecutar_sincronizacion():
         f"Avisos con país reconocido: {con_pais}/{len(normalizados)}",
         flush=True,
     )
-    sin_titulo = sum(1 for n in normalizados if "sin título reconocido" in (n.get("titulo") or ""))
-    if sin_titulo:
-        print(
-            f"Aviso: {sin_titulo}/{len(normalizados)} avisos se han quedado sin título tras todos "
-            "los respaldos.",
-            flush=True,
-        )
 
     en_ventana = [
         n for n in normalizados
