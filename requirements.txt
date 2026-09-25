@@ -13,3 +13,4 @@ python-dateutil
 pdfplumber
 playwright
 nest-asyncio
+deep-translator
