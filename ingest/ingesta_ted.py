@@ -257,7 +257,7 @@ async def construir_registro_async(aviso: dict) -> dict:
     fecha_publicacion = parsear_fecha_ted(aviso.get("publication-date"))
     fecha_limite_api = parsear_fecha_ted(aviso.get("deadline"))
 
-    # Extracción asíncrona de datos desde la vista renderizada por Playwright
+    # Extracción asíncrona de datos desde la vista renderizada por Playwright SOLO para esta licitación
     datos_ficha = await obtener_datos_ficha_html_async(numero_publicacion)
     fecha_limite = datos_ficha["fecha_limite"] or fecha_limite_api
     descripcion = datos_ficha["descripcion"]
@@ -287,7 +287,6 @@ async def construir_registro_async(aviso: dict) -> dict:
         "url_documento": None,
         "fecha_publicacion": fecha_publicacion.isoformat() if fecha_publicacion else None,
         "fecha_limite": fecha_limite.isoformat() if fecha_limite else None,
-        "_fecha_pub_obj": fecha_publicacion,
     }
 
 
@@ -303,7 +302,7 @@ def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> 
             f"Pais: {datos.get('pais') or 'No especificado'}"
         )
 
-        datos_enviar = {k: v for k, v in datos.items() if k != "_fecha_pub_obj"}
+        datos_enviar = dict(datos)
 
         if existente is None:
             datos_enviar["texto_completo"] = texto_completo
@@ -341,31 +340,34 @@ async def ejecutar_sincronizacion_async():
         print("No se ha recibido ningún aviso.", flush=True)
         return
 
-    # Procesar la lista de avisos de forma asíncrona
-    normalizados = []
-    for aviso in crudos:
-        registro = await construir_registro_async(aviso)
-        normalizados.append(registro)
-
-    # --- FILTRO MANUAL EN PYTHON: solo conservar registros de AYER y HOY ---
+    # --- FILTRO PREVIO POR FECHA (AYER Y HOY) ---
     hoy = date.today()
     ayer = hoy - timedelta(days=1)
 
-    normalizados_filtrados = [
-        reg for reg in normalizados
-        if reg.get("_fecha_pub_obj") and (ayer <= reg["_fecha_pub_obj"] <= hoy)
-    ]
+    crudos_filtrados = []
+    for aviso in crudos:
+        fecha_pub = parsear_fecha_ted(aviso.get("publication-date"))
+        if fecha_pub and (ayer <= fecha_pub <= hoy):
+            crudos_filtrados.append(aviso)
 
-    print(f"Avisos tras filtrar fecha de publicación (Ayer {ayer} - Hoy {hoy}): {len(normalizados_filtrados)}", flush=True)
+    print(f"Avisos a procesar con Playwright tras filtrar por fecha (Ayer {ayer} - Hoy {hoy}): {len(crudos_filtrados)}", flush=True)
 
-    if not normalizados_filtrados:
+    if not crudos_filtrados:
         print("No hay avisos publicados entre ayer y hoy para procesar.", flush=True)
         return
+
+    # Procesar UNICAMENTE las licitaciones filtradas con Playwright
+    normalizados = []
+    for aviso in crudos_filtrados:
+        num_pub = _valor_multiidioma(aviso.get("publication-number"))
+        print(f"   -> Procesando con Playwright licitación: {num_pub}", flush=True)
+        registro = await construir_registro_async(aviso)
+        normalizados.append(registro)
 
     supabase = obtener_cliente_supabase()
 
     print("\nComparando con lo ya existente en Supabase...", flush=True)
-    claves_validas = [n["codigo_unico"] for n in normalizados_filtrados if n.get("titulo") and n.get("url_oficial")]
+    claves_validas = [n["codigo_unico"] for n in normalizados if n.get("titulo") and n.get("url_oficial")]
     registros_existentes = obtener_registros_existentes(
         supabase,
         tabla="licitaciones_internacionales",
@@ -374,7 +376,7 @@ async def ejecutar_sincronizacion_async():
         claves=claves_validas,
     )
 
-    lote_final = preparar_lote_para_subir(normalizados_filtrados, registros_existentes)
+    lote_final = preparar_lote_para_subir(normalizados, registros_existentes)
 
     if not lote_final:
         print("No hay avisos nuevos ni cambios que sincronizar.", flush=True)
@@ -383,7 +385,7 @@ async def ejecutar_sincronizacion_async():
     subidas = subir_en_lotes(
         supabase, "licitaciones_internacionales", "codigo_unico", lote_final, tamano_lote=LOTE_ENVIO_SUPABASE
     )
-    print(f"\nSincronizacion TED completada: {subidas}/{len(lote_final)} registros subidos.", flush=True)
+    print(f"\nSincronización TED completada: {subidas}/{len(lote_final)} registros subidos.", flush=True)
 
 
 def ejecutar_sincronizacion():
