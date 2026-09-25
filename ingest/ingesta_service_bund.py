@@ -125,7 +125,7 @@ LISTADO_URL = (
     BASE_URL + "/Content/DE/Ausschreibungen/Suche/Formular.html"
     "?view=processForm&nn=9465610&sortOrder=dateOfIssue_dt+desc&resultsPerPage=100"
 )
-FUENTE = "SERVICE_BUND"
+FUENTE = "Service-Bund"
 TIMEOUT_CONEXION = 10        # falla rapido si el servidor ni responde a la conexion
 TIMEOUT_LECTURA = 30         # tiempo que se da a que termine de enviar la pagina
 MAX_REINTENTOS_PETICION = 3  # capa de reintentos EXPLICITA, ver aviso de fiabilidad en el docstring
