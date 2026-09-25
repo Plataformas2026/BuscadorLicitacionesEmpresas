@@ -130,23 +130,19 @@ def _valor_multiidioma(valor):
 
 def _limpiar_prefijo_titulo(titulo: str) -> str:
     """
-    Quita los prefijos de país/categoría del título -- confirmado
-    contra una ficha de detalle real: el formato es "País – Categoría
-    – Título real" (a veces solo "Categoría – Título real", 2
-    segmentos en vez de 3), siempre separados por GUIÓN LARGO "–" con
-    espacios alrededor. Se toma el ÚLTIMO segmento tras partir por
-    " – ", lo que funciona igual con 2 o 3 segmentos.
-
-    Importante: se parte ÚNICAMENTE por el guión LARGO "–" (en dash),
-    nunca por el guión corto "-", porque el título real puede contener
-    guiones cortos como parte del texto (p. ej. "Short-Term",
-    "10046558-Short-Term Expert Pool...") -- partir por ambos (como
-    hacía la versión anterior) cortaría el título por la mitad.
+    1. Elimina prefijos de país/categoría separados por " – " o " - ".
+    2. Elimina cualquier ID numérico/alfanumérico inicial seguido de un guión (ej. "10046558-").
     """
     if not titulo:
         return None
-    partes = titulo.split(" – ")
-    return partes[-1].strip() or None
+
+    # Step 1: Quedarnos con el último segmento tras separadores con espacios (" – " o " - ")
+    titulo_limpio = re.sub(r"^.*?\s+[–-]\s+", "", titulo)
+
+    # Step 2: Eliminar el código/ID numérico inicial seguido de un guión si existe
+    titulo_limpio = re.sub(r"^\d+[-–]\s*", "", titulo_limpio)
+
+    return titulo_limpio.strip() or None
 
 
 def parsear_fecha_ted(valor):
