@@ -132,13 +132,16 @@ def _limpiar_prefijo_titulo(titulo: str) -> str:
     if not titulo:
         return None
 
-    # 1. Elimina prefijos de categoría/país terminados en guión largo o corto con espacios
-    #    (ej. "Event services – " o "Medical equipments – ")
-    texto = re.sub(r"^.*?[–-]\s*", "", titulo)
+    # 1. Elimina la categoría inicial antes del guión largo o corto separador.
+    # Usamos re.DOTALL para evitar fallos si hay saltos de línea y buscamos el separador de categoría.
+    texto = re.sub(r"^.*?\s*[–-]\s*", "", titulo)
 
-    # 2. Elimina el código/ID numérico inicial si va seguido de un guión
-    #    (ej. "10046558-Short-Term..." -> "Short-Term...")
-    texto = re.sub(r"^\d+[-–]\s*", "", texto)
+    # 2. Elimina el ID numérico inicial (de 7 u 8 dígitos) y su guión
+    # Ejemplos: "10046558-Short-Term..." -> "Short-Term..."
+    texto = re.sub(r"^\d{7,8}[-–]\s*", "", texto)
+
+    # 3. Caso de respaldo: si la categoría y el código venían juntos en el primer reemplazo
+    texto = re.sub(r"^\d{7,8}[-–]\s*", "", texto)
 
     return texto.strip() or None
 
