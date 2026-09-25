@@ -131,7 +131,7 @@ TIMEOUT_LECTURA = 30         # tiempo que se da a que termine de enviar la pagin
 MAX_REINTENTOS_PETICION = 3  # capa de reintentos EXPLICITA, ver aviso de fiabilidad en el docstring
 CONCURRENCIA_MAXIMA = 6      # peticiones concurrentes a las FICHAS
 LOTE_ENVIO_SUPABASE = 15
-MAX_PAGINAS = 3   # red de seguridad -- ver aviso de fiabilidad sobre la paginacion
+MAX_PAGINAS = 10   # red de seguridad -- ver aviso de fiabilidad sobre la paginacion
 CAPTURA_DEPURACION = "debug_service_bund_listado.html"
 
 CABECERAS_PETICION = {
