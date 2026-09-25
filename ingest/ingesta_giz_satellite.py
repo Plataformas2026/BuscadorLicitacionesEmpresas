@@ -10,7 +10,7 @@ URL: https://ausschreibungen.giz.de/Satellite/company/welcome.do?method=showTabl
 """
 
 import re
-from datetime import date
+from datetime import date, timedelta
 from playwright.sync_api import sync_playwright
 
 from common import (
@@ -36,7 +36,6 @@ CABECERAS_USER_AGENT = (
 
 PATRON_REFERENCIA_TITULO = re.compile(r"^\s*(\d{4,10})\s*[-–]\s*(.+)$")
 
-# Extrae la lista de avisos leyendo directamente las filas (tr) y celdas (td) de la tabla DTVP
 _JS_EXTRAER_FILAS = """
 () => {
     const resultados = [];
@@ -46,11 +45,6 @@ _JS_EXTRAER_FILAS = """
         const celdas = fila.querySelectorAll('td');
         if (celdas.length < 3) continue;
 
-        // Estructura de columnas DTVP:
-        // Columna 0: Veröffentlicht (Fecha Publicación)
-        // Columna 1: Angebots- / Teilnahmefrist (Fecha Límite)
-        // Columna 2: Bezeichnung (Número + Título con el enlace)
-        // Columna 3: Typ (Tipo de procedimiento)
         const fechaPub = (celdas[0]?.innerText || '').trim();
         const fechaLimite = (celdas[1]?.innerText || '').trim();
         
@@ -95,6 +89,10 @@ def parsear_fecha_alemana(texto: str):
 
 def extraer_avisos_playwright() -> list:
     todos_los_avisos = []
+    
+    # Rango de fechas permitido: Hoy y Ayer
+    hoy = date.today()
+    ayer = hoy - timedelta(days=1)
 
     try:
         with sync_playwright() as p:
@@ -107,7 +105,6 @@ def extraer_avisos_playwright() -> list:
                 pagina.goto(LISTADO_URL, timeout=TIEMPO_ESPERA_CARGA_MS, wait_until="domcontentloaded")
 
                 try:
-                    # Esperar a que la tabla o sus filas estén presentes en el DOM
                     pagina.wait_for_selector('table tbody tr', timeout=TIEMPO_ESPERA_CARGA_MS)
                 except Exception as error:
                     print(f"    No apareció la tabla de avisos a tiempo: {error}", flush=True)
@@ -115,29 +112,42 @@ def extraer_avisos_playwright() -> list:
                     print(f"    Captura de depuración guardada en {CAPTURA_DEPURACION}.", flush=True)
                     return []
 
-                # Extracción de la página actual
-                avisos_pagina = pagina.evaluate(_JS_EXTRAER_FILAS)
-                todos_los_avisos.extend(avisos_pagina)
-                print(f"    Avisos reconocidos en la primera página: {len(avisos_pagina)}", flush=True)
-
-                # Paginación: recorrer páginas siguientes si existen
                 pagina_actual = 1
+                alcanzado_limite_fecha = False
+
                 while True:
-                    # Buscar el botón de 'Siguiente página' en la paginación inferior de la plataforma DTVP
+                    avisos_pagina = pagina.evaluate(_JS_EXTRAER_FILAS)
+                    print(f"    Procesando página {pagina_actual} ({len(avisos_pagina)} avisos)...", flush=True)
+
+                    for aviso in avisos_pagina:
+                        fecha_pub = parsear_fecha_alemana(aviso.get("fecha_pub_raw"))
+                        
+                        if fecha_pub:
+                            # Si es de hoy o ayer, lo conservamos
+                            if fecha_pub >= ayer:
+                                todos_los_avisos.append(aviso)
+                            # Como la tabla viene ordenada por fecha descendente,
+                            # si encontramos una fecha anterior a ayer, podemos parar.
+                            elif fecha_pub < ayer:
+                                alcanzado_limite_fecha = True
+                        else:
+                            # Si por algún motivo no se puede parsear la fecha, conservamos por seguridad
+                            todos_los_avisos.append(aviso)
+
+                    if alcanzado_limite_fecha:
+                        print(f"--> Alcanzados avisos con fecha anterior a ayer ({ayer.strftime('%d.%m.%Y')}). Deteniendo paginación.", flush=True)
+                        break
+
+                    # Buscar botón para pasar a la siguiente página
                     boton_siguiente = pagina.query_selector('a.next-page, a[title*="Nächste"], a[title*="weiter"]')
                     if not boton_siguiente or not boton_siguiente.is_visible():
                         break
 
                     pagina_actual += 1
-                    print(f"--> Cargando página {pagina_actual}...", flush=True)
+                    print(f"--> Avanzando a la página {pagina_actual}...", flush=True)
                     boton_siguiente.click()
                     pagina.wait_for_timeout(2000)
                     pagina.wait_for_selector('table tbody tr', timeout=TIEMPO_ESPERA_CARGA_MS)
-
-                    nuevos_avisos = pagina.evaluate(_JS_EXTRAER_FILAS)
-                    if not nuevos_avisos:
-                        break
-                    todos_los_avisos.extend(nuevos_avisos)
 
             except Exception as error:
                 print(f"Error durante la navegación con Playwright: {error}", flush=True)
@@ -166,7 +176,6 @@ def construir_registro(aviso: dict) -> dict:
     fecha_limite_raw = aviso.get("fecha_limite_raw") or ""
     tipo_procedimiento = aviso.get("tipo_procedimiento") or None
 
-    # Extraer referencia y limpiar título (ej: "10041400 - Training: Mehr-bewusst")
     coincidencia_ref = PATRON_REFERENCIA_TITULO.match(titulo_crudo)
     if coincidencia_ref:
         referencia, titulo = coincidencia_ref.groups()
@@ -237,11 +246,11 @@ def ejecutar_sincronizacion():
     print("=" * 100, flush=True)
 
     crudos = extraer_avisos_playwright()
-    print(f"\nTotal avisos rastreados: {len(crudos)}", flush=True)
+    print(f"\nTotal avisos rastreados de hoy y ayer: {len(crudos)}", flush=True)
 
     if not crudos:
         print(
-            "No se ha extraído ningún aviso. Revisa el log de arriba y la captura de depuración "
+            "No se ha extraído ningún aviso reciente. Revisa el log de arriba y la captura de depuración "
             f"({CAPTURA_DEPURACION}).",
             flush=True,
         )
