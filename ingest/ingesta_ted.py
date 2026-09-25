@@ -6,65 +6,29 @@ Sincroniza avisos de licitación de TED (Tenders Electronic Daily -- el
 diario oficial de contratación pública de la UE) relacionados con GIZ
 contra la tabla `licitaciones_internacionales` de Supabase.
 
-CAMBIO DE ARQUITECTURA DELIBERADO -- API OFICIAL EN VEZ DE PLAYWRIGHT
+INTEGRACIÓN CON PLAYWRIGHT ASÍNCRONO
 --------------------------------------------------------------------------
-El usuario avisó de que la tabla de resultados de TED usa clases
-dinámicas de Material UI/React, y pidió selectores semánticos robustos
-para evitar errores. Investigando esto se encontró algo mejor: TED tiene
-una API REST OFICIAL, gratuita y SIN CLAVE para búsqueda de avisos
-(confirmado por la documentación oficial en docs.ted.europa.eu/api y
-por múltiples proyectos de terceros que ya la usan en producción):
+Dado que TED es una aplicación de página única (SPA) desarrollada en Angular,
+las peticiones HTTP simples con `requests` devuelven el cascarón HTML sin
+los datos renderizados.
 
-    POST https://api.ted.europa.eu/v3/notices/search
-
-Usar esta API en vez de Playwright es strictly mejor para este caso
-concreto: nunca se rompe por un cambio de clases CSS/React, no hace
-falta arrancar un navegador, y devuelve JSON estructurado en vez de HTML.
-
-SEGUNDA VUELTA -- TÍTULO, FECHA LÍMITE Y DESCRIPCIÓN (con ficha real)
---------------------------------------------------------------------------
-Contra una ficha de detalle HTML real (`{URL_BASE_AVISO}<num>`), se
-corrigieron tres cosas:
-
-  1. TÍTULO: el patrón real es "País – Categoría – Título real" (a
-     veces solo "Categoría – Título real", 2 segmentos en vez de 3),
-     separados por GUIÓN LARGO "–". La limpieza anterior solo quitaba
-     UN prefijo con una regex que además confundía el guión largo
-     separador con los guiones cortos que el propio título puede
-     llevar dentro (p. ej. "Short-Term"), arriesgándose a cortarlo por
-     la mitad. Ahora se parte por " – " (con espacios) y se toma el
-     ÚLTIMO segmento -- funciona igual con 2 o 3 segmentos y nunca
-     toca los guiones cortos internos.
-  2. FECHA LÍMITE: el campo "deadline" de la API de búsqueda no
-     coincidía con la fecha límite real. La ficha de detalle sí trae
-     un campo "Deadline for receipt of tenders" (BT-131) fiable, en
-     formato DD/MM/AAAA (europeo, distinto del AAAA-MM-DD de la API).
-     `obtener_datos_ficha_html` lo lee de ahí; la fecha de la API
-     queda como respaldo si la ficha no responde.
-  3. DESCRIPCIÓN: antes se intentaba sacar de un endpoint de detalle
-     de la API adivinando nombres de campo ("procedure-description",
-     "description", "notice-description") sin confirmación -- de ahí
-     que casi siempre cayera al texto sintético de respaldo. Ahora se
-     lee directamente de la ficha HTML, sección "2.1. Procedure",
-     campo "Description" -- identificado por su atributo
-     data-labels-key="field|name|BT-24-Procedure". OJO: existe OTRO
-     campo "Description" casi idéntico bajo "5.1. Lot"
-     (data-labels-key="business-term|name|BT-24", SIN el sufijo
-     "-Procedure") -- se apunta específicamente al de Procedure.
-
-Esto añade una petición HTTP por aviso (antes solo se pagaba la
-consulta a la API de búsqueda) -- dado el volumen típico de esta
-fuente (búsqueda acotada a "GIZ"), el coste es asumible.
+En esta versión se utiliza `playwright.async_api` junto con `nest_asyncio`
+para ejecutar un navegador Chromium en segundo plano, esperar el renderizado
+de la página de detalle (`wait_until="networkidle"`) y extraer de forma precisa
+la fecha límite (BT-131) y la descripción (BT-24).
 
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
-Ejecución local:      python ingesta_ted.py
+Ejecución local:     python ingesta_ted.py
 """
+import asyncio
 import re
 import time
 from datetime import date, datetime, timedelta
 
+import nest_asyncio
 import requests
 from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 
 from common import (
     generar_embedding,
@@ -73,15 +37,18 @@ from common import (
     subir_en_lotes,
 )
 
+# Permitir bucles de eventos anidados (necesario en entornos interactivos / Jupyter)
+nest_asyncio.apply()
+
 URL_API_BUSQUEDA = "https://api.ted.europa.eu/v3/notices/search"
-URL_BASE_AVISO = "https://ted.europa.eu/en/notice/-/detail/"
+URL_BASE_AVISO = "https://ted.europa.eu/de/notice/-/detail/"
 FUENTE = "TED"
 CONSULTA = 'FT~"GIZ" SORT BY publication-date DESC'
 CAMPOS_SOLICITADOS = [
     "publication-number", "notice-title", "buyer-name", "buyer-country",
     "publication-date", "deadline", "notice-type",
 ]
-ALCANCE = "ACTIVE"   # avisos actualmente activos -- ver docstring
+ALCANCE = "ACTIVE"
 LIMITE_POR_PAGINA = 50
 MAX_PAGINAS = 10
 TIMEOUT_PETICION = 30
@@ -118,7 +85,7 @@ def _valor_multiidioma(valor):
     if isinstance(valor, list):
         return _valor_multiidioma(valor[0]) if valor else None
     if isinstance(valor, dict):
-        for idioma in ("eng", "en"):
+        for idioma in ("eng", "en", "deu", "de"):
             if idioma in valor and valor[idioma]:
                 return _valor_multiidioma(valor[idioma])
         for lista in valor.values():
@@ -132,12 +99,8 @@ def _limpiar_prefijo_titulo(titulo: str) -> str:
     if not titulo:
         return None
 
-    # 1. Separar por guiones separadores (" – ", " - ", "–", etc.) y tomar la última sección.
-    # Usamos un patrón que captura guiones rodeados de espacios o el guión largo directamente.
     partes = re.split(r"\s+[–-]\s*|\s*–\s*", titulo)
     texto = partes[-1].strip() if partes else titulo.strip()
-
-    # 2. Eliminar el código ID numérico inicial (de 7 u 8 dígitos) y su guión si está presente.
     texto = re.sub(r"^\d{7,8}[-–]\s*", "", texto)
 
     return texto.strip() or None
@@ -152,6 +115,22 @@ def parsear_fecha_ted(valor):
         return datetime.strptime(texto, "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def parsear_fecha_ted_detalle(texto: str):
+    """Extrae y parsea fechas en formato DD/MM/AAAA o AAAA-MM-DD presentes en el HTML."""
+    if not texto:
+        return None
+
+    patron = re.search(r"(\d{2}[/.-]\d{2}[/.-]\d{4})|(\d{4}[/.-]\d{2}[/.-]\d{2})", texto)
+    if patron:
+        fecha_str = patron.group(0)
+        for fmt in ("%d/%m/%Y", "%d.%m.%Y", "%d-%m-%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(fecha_str, fmt).date()
+            except ValueError:
+                continue
+    return None
 
 
 def _pagina_de_resultados(token_siguiente: str = None) -> dict:
@@ -172,73 +151,71 @@ def _pagina_de_resultados(token_siguiente: str = None) -> dict:
     return respuesta.json()
 
 
-def obtener_datos_ficha_html(numero_publicacion: str) -> dict:
+async def obtener_datos_ficha_html_async(numero_publicacion: str) -> dict:
     """
-    Lee la ficha de detalle HTML real del aviso (no la API) para sacar
-    dos cosas que ahí sí están confirmadas con precisión:
-
-      - Descripción: el campo "Description" de la sección "2.1.
-        Procedure", identificado por su atributo
-        data-labels-key="field|name|BT-24-Procedure" -- OJO: existe
-        OTRO campo "Description" casi idéntico bajo "5.1. Lot"
-        (data-labels-key="business-term|name|BT-24", SIN el sufijo
-        "-Procedure"), que es una descripción distinta (más centrada
-        en el lote concreto) -- se apunta específicamente a la de
-        Procedure, tal y como se pidió.
-      - Fecha límite: el campo "Deadline for receipt of tenders"
-        (BT-131), en formato DD/MM/AAAA -- confirmado contra la ficha
-        real, distinto del ISO AAAA-MM-DD que devuelve la API de
-        búsqueda para el campo "deadline".
-
-    Ambos se extraen buscando el <span class="label" data-labels-
-    key="..."> correspondiente y tomando los <span class="data"> que
-    hay dentro de su mismo <div> contenedor (la fecha viene en dos
-    spans .data -- fecha y hora/zona horaria por separado -- se usa
-    solo el primero).
+    Renderiza la página SPA de TED utilizando Playwright asíncrono para esperar
+    la carga completa del DOM vía JavaScript y extraer la descripción (BT-24)
+    y la fecha límite (BT-131).
     """
     resultado = {"descripcion": None, "fecha_limite": None}
     if not numero_publicacion:
         return resultado
 
     url_detalle = f"{URL_BASE_AVISO}{numero_publicacion}"
+
     try:
-        respuesta = requests.get(url_detalle, timeout=TIMEOUT_PETICION)
-        respuesta.raise_for_status()
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+
+            await page.goto(url_detalle, wait_until="networkidle")
+
+            try:
+                await page.wait_for_selector(".notice-detail, [data-labels-key]", timeout=15000)
+            except Exception:
+                pass
+
+            html_renderizado = await page.content()
+            await browser.close()
     except Exception as error:
-        print(f"      Error descargando la ficha de detalle: {error}", flush=True)
+        print(f"      Error cargando con Playwright ({numero_publicacion}): {error}", flush=True)
         return resultado
 
-    soup = BeautifulSoup(respuesta.text, "html.parser")
+    soup = BeautifulSoup(html_renderizado, "html.parser")
 
-    span_desc = soup.find("span", attrs={"data-labels-key": "field|name|BT-24-Procedure"})
-    if span_desc:
-        contenedor = span_desc.find_parent("div")
+    # 1. BÚSQUEDA DE DESCRIPCIÓN (BT-24)
+    desc_elem = soup.find(attrs={"data-labels-key": re.compile(r"BT-24")})
+    if desc_elem:
+        contenedor = desc_elem.find_parent("div")
         if contenedor:
-            span_dato = contenedor.find("span", class_="data")
-            if span_dato:
-                resultado["descripcion"] = span_dato.get_text(" ", strip=True)
+            span_dato = contenedor.find("span", class_="data") or contenedor
+            resultado["descripcion"] = span_dato.get_text(" ", strip=True)
 
-    span_deadline = soup.find("span", attrs={"data-labels-key": "business-term|name|BT-131"})
-    if span_deadline:
-        contenedor = span_deadline.find_parent("div")
+    if not resultado["descripcion"]:
+        for div in soup.find_all("div"):
+            texto = div.get_text(" ", strip=True)
+            if "Beschreibung" in texto or "Description" in texto:
+                if len(texto) > 100:
+                    resultado["descripcion"] = texto
+                    break
+
+    # 2. BÚSQUEDA DE FECHA LÍMITE (BT-131)
+    fecha_elem = soup.find(attrs={"data-labels-key": re.compile(r"BT-131")})
+    if fecha_elem:
+        contenedor = fecha_elem.find_parent("div")
         if contenedor:
-            spans_dato = contenedor.find_all("span", class_="data")
-            if spans_dato:
-                resultado["fecha_limite"] = parsear_fecha_ted_detalle(spans_dato[0].get_text(strip=True))
+            resultado["fecha_limite"] = parsear_fecha_ted_detalle(contenedor.get_text())
 
-    time.sleep(PAUSA_ENTRE_FICHAS_SEGUNDOS)
+    if not resultado["fecha_limite"]:
+        texto_busqueda = re.compile(r"Frist für den Eingang|Deadline for receipt", re.IGNORECASE)
+        elem_texto = soup.find(string=texto_busqueda)
+        if elem_texto:
+            contenedor = elem_texto.find_parent("div")
+            if contenedor:
+                resultado["fecha_limite"] = parsear_fecha_ted_detalle(contenedor.get_text())
+
+    await asyncio.sleep(PAUSA_ENTRE_FICHAS_SEGUNDOS)
     return resultado
-
-
-def parsear_fecha_ted_detalle(texto: str):
-    """Formato DD/MM/AAAA -- confirmado contra la ficha de detalle HTML real (BT-131),
-    distinto del AAAA-MM-DD que usa la API de búsqueda."""
-    if not texto:
-        return None
-    try:
-        return datetime.strptime(texto.strip()[:10], "%d/%m/%Y").date()
-    except ValueError:
-        return None
 
 
 def extraer_avisos_api() -> list:
@@ -266,10 +243,9 @@ def extraer_avisos_api() -> list:
     return avisos
 
 
-def construir_registro(aviso: dict) -> dict:
+async def construir_registro_async(aviso: dict) -> dict:
     numero_publicacion = _valor_multiidioma(aviso.get("publication-number")) or ""
 
-    # Limpieza de prefijo de país/categoría en el título
     titulo_raw = _valor_multiidioma(aviso.get("notice-title"))
     titulo = _limpiar_prefijo_titulo(titulo_raw)
 
@@ -281,10 +257,8 @@ def construir_registro(aviso: dict) -> dict:
     fecha_publicacion = parsear_fecha_ted(aviso.get("publication-date"))
     fecha_limite_api = parsear_fecha_ted(aviso.get("deadline"))
 
-    # Fecha límite y descripción: prioridad a la ficha de detalle HTML
-    # (más fiable, ver obtener_datos_ficha_html), con la de la propia
-    # API de búsqueda como respaldo si la ficha no responde.
-    datos_ficha = obtener_datos_ficha_html(numero_publicacion)
+    # Extracción asíncrona de datos desde la vista renderizada por Playwright
+    datos_ficha = await obtener_datos_ficha_html_async(numero_publicacion)
     fecha_limite = datos_ficha["fecha_limite"] or fecha_limite_api
     descripcion = datos_ficha["descripcion"]
 
@@ -313,7 +287,7 @@ def construir_registro(aviso: dict) -> dict:
         "url_documento": None,
         "fecha_publicacion": fecha_publicacion.isoformat() if fecha_publicacion else None,
         "fecha_limite": fecha_limite.isoformat() if fecha_limite else None,
-        "_fecha_pub_obj": fecha_publicacion,  # Campo auxiliar para el filtrado por fechas
+        "_fecha_pub_obj": fecha_publicacion,
     }
 
 
@@ -329,7 +303,6 @@ def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> 
             f"Pais: {datos.get('pais') or 'No especificado'}"
         )
 
-        # Limpiamos la clave auxiliar temporal antes de enviar
         datos_enviar = {k: v for k, v in datos.items() if k != "_fecha_pub_obj"}
 
         if existente is None:
@@ -355,9 +328,9 @@ def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> 
     return a_subir
 
 
-def ejecutar_sincronizacion():
+async def ejecutar_sincronizacion_async():
     print("=" * 100, flush=True)
-    print("SINCRONIZACION DE LICITACIONES INTERNACIONALES - TED (GIZ, via API oficial)", flush=True)
+    print("SINCRONIZACION DE LICITACIONES INTERNACIONALES - TED (GIZ, via API + Playwright)", flush=True)
     print("=" * 100, flush=True)
     print(f"Consulta: {CONSULTA}  ·  Alcance: {ALCANCE}", flush=True)
 
@@ -368,14 +341,18 @@ def ejecutar_sincronizacion():
         print("No se ha recibido ningún aviso.", flush=True)
         return
 
-    normalizados = [construir_registro(a) for a in crudos]
+    # Procesar la lista de avisos de forma asíncrona
+    normalizados = []
+    for aviso in crudos:
+        registro = await construir_registro_async(aviso)
+        normalizados.append(registro)
 
     # --- FILTRO MANUAL EN PYTHON: solo conservar registros de AYER y HOY ---
     hoy = date.today()
     ayer = hoy - timedelta(days=1)
-    
+
     normalizados_filtrados = [
-        reg for reg in normalizados 
+        reg for reg in normalizados
         if reg.get("_fecha_pub_obj") and (ayer <= reg["_fecha_pub_obj"] <= hoy)
     ]
 
@@ -407,6 +384,10 @@ def ejecutar_sincronizacion():
         supabase, "licitaciones_internacionales", "codigo_unico", lote_final, tamano_lote=LOTE_ENVIO_SUPABASE
     )
     print(f"\nSincronizacion TED completada: {subidas}/{len(lote_final)} registros subidos.", flush=True)
+
+
+def ejecutar_sincronizacion():
+    asyncio.run(ejecutar_sincronizacion_async())
 
 
 if __name__ == "__main__":
