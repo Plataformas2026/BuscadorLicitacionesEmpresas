@@ -40,6 +40,10 @@ CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "fecha_publicacion", "fec
 MAX_PAGINAS = 3
 CAPTURA_DEPURACION = "debug_service_bund_listado.html"
 
+# Control global de estado de tasa para evitar bucles infititos cuando la IP es bloqueada
+BLOQUEADO_POR_GOOGLE = False
+DELIMITADOR_TRADUCCION = " ||| "
+
 CABECERAS_PETICION = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -93,33 +97,59 @@ def parsear_fecha_detalle_bund(texto: str):
     except ValueError:
         return None
 
-async def _traducir_al_ingles(texto: str, reintentos: int = 4) -> str:
-    if not texto or len(texto.strip()) == 0:
-        return None
-    
-    # Si el texto es muy corto o común, evitamos traducir para no desperdiciar peticiones
-    if texto.strip().lower() in ["tender", "germany", "public tender"]:
-        return texto
+
+async def _traducir_bloque_al_ingles(textos: list, reintentos: int = 2) -> list:
+    """
+    Traduce todos los campos de una sola licitación en UNA SOLA petición HTTP.
+    Si detecta un bloqueo de IP por Google (429), pausa la ejecución por 120s.
+    Si el bloqueo persiste, desactiva Google Translate y conserva el texto original.
+    """
+    global BLOQUEADO_POR_GOOGLE
+
+    # Si ya hemos detectado baneo persistente de la IP, devolvemos directo el texto original
+    if BLOQUEADO_POR_GOOGLE:
+        return textos
+
+    textos_limpios = [t if (t and t.strip()) else "" for t in textos]
+    if not any(textos_limpios):
+        return textos
+
+    texto_unido = DELIMITADOR_TRADUCCION.join(textos_limpios)
 
     for intento in range(reintentos):
         try:
-            # Pausa fija de 0.6s entre cada campo para no superar ~1.5 req/sec
-            await asyncio.sleep(0.6)
-            return await asyncio.to_thread(
-                lambda: GoogleTranslator(source="de", target="en").translate(texto)
+            # Pausa de cortesía de 1 segundo entre licitaciones
+            await asyncio.sleep(1.0)
+            
+            traduccion = await asyncio.to_thread(
+                lambda: GoogleTranslator(source="de", target="en").translate(texto_unido)
             )
+
+            partes = traduccion.split(DELIMITADOR_TRADUCCION)
+
+            # Verificamos que el delimitador se haya conservado correctamente
+            if len(partes) == len(textos):
+                return [p.strip() if p.strip() else None for p in partes]
+            else:
+                return textos
+
         except Exception as error:
             error_str = str(error).lower()
             if "too many requests" in error_str or "429" in error_str:
-                espera = (intento + 1) * 5  # Espera progresiva: 5s, 10s, 15s...
-                print(f"      Límite de tasa alcanzado. Enfriando {espera}s...", flush=True)
-                await asyncio.sleep(espera)
+                if intento == 0:
+                    # Primer aviso: Pausa larga de enfriamiento (2 minutos)
+                    print("\n[!] Límite de tasa de Google alcanzado (429). Iniciando enfriamiento prolongado de 120 segundos...", flush=True)
+                    await asyncio.sleep(120)
+                else:
+                    # Si tras la pausa de 2 min vuelve a fallar, marcamos el baneo como persistente
+                    print("[!] La IP sigue bloqueada tras el enfriamiento. Cancelando traducciones restantes para no detener la ingesta.", flush=True)
+                    BLOQUEADO_POR_GOOGLE = True
+                    return textos
             else:
-                print(f"      Aviso: fallo al traducir ('{texto[:40]}...'): {error}", flush=True)
-                return texto
-    
-    # Si tras reintentos falla, devolvemos el texto original en alemán para no perder la licitación
-    return texto
+                print(f"      Aviso: fallo puntual al traducir bloque: {error}", flush=True)
+                return textos
+
+    return textos
 
 
 async def _procesar_aviso(item: dict, semaforo: asyncio.Semaphore) -> dict:
@@ -132,11 +162,11 @@ async def _procesar_aviso(item: dict, semaforo: asyncio.Semaphore) -> dict:
         descripcion_de = datos_ficha.get("descripcion")
         tipo_aviso_de = datos_ficha.get("tipo_aviso")
 
-        # 2. Traducciones protegidas secuencialmente dentro del semáforo para no saturar Google
-        titulo_en = await _traducir_al_ingles(titulo_de)
-        organismo_en = await _traducir_al_ingles(organismo_de)
-        descripcion_en = await _traducir_al_ingles(descripcion_de)
-        tipo_aviso_en = await _traducir_al_ingles(tipo_aviso_de)
+        # 2. Traducción unificada en 1 sola llamada agrupada
+        campos_de = [titulo_de, organismo_de, descripcion_de, tipo_aviso_de]
+        campos_en = await _traducir_bloque_al_ingles(campos_de)
+
+        titulo_en, organismo_en, descripcion_en, tipo_aviso_en = campos_en
 
     fecha_publicacion = item.get("fecha_publicacion_listado")
     fecha_limite = datos_ficha.get("fecha_limite") or item.get("fecha_limite_listado")
@@ -146,7 +176,7 @@ async def _procesar_aviso(item: dict, semaforo: asyncio.Semaphore) -> dict:
     return {
         "codigo_unico": f"BUND-{_generar_slug(slug_base)}"[:150],
         "fuente_origen": FUENTE,
-        "tipo_aviso": tipo_aviso_en or "Tender",
+        "tipo_aviso": tipo_aviso_en or tipo_aviso_de or "Tender",
         "titulo": titulo_en or titulo_de,
         "descripcion": descripcion_en or descripcion_de,
         "pais": "Germany",
@@ -158,6 +188,7 @@ async def _procesar_aviso(item: dict, semaforo: asyncio.Semaphore) -> dict:
         "fecha_publicacion": fecha_publicacion.isoformat() if fecha_publicacion else None,
         "fecha_limite": fecha_limite.isoformat() if fecha_limite else None,
     }
+
 
 def extraer_avisos_listado(desde: date, hasta: date) -> list:
     encontrados = {}
@@ -299,6 +330,7 @@ def obtener_datos_ficha(url: str) -> dict:
 
     return resultado
 
+
 def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> list:
     a_subir = []
     for datos in normalizados:
@@ -386,7 +418,7 @@ async def ejecutar_sincronizacion_async():
     subidas = subir_en_lotes(
         supabase, "licitaciones_internacionales", "codigo_unico", lote_final, tamano_lote=LOTE_ENVIO_SUPABASE
     )
-    print(f"\nSincronizacion service.bund.de completada: {subidas}/{len(lote_final)} registros subidos.", flush=True)
+    print(f"\nSincronización service.bund.de completada: {subidas}/{len(lote_final)} registros subidos.", flush=True)
 
 
 def ejecutar_sincronizacion():
