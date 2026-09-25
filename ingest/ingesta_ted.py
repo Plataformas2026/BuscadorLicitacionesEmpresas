@@ -129,20 +129,18 @@ def _valor_multiidioma(valor):
 
 
 def _limpiar_prefijo_titulo(titulo: str) -> str:
-    """
-    1. Elimina prefijos de país/categoría separados por " – " o " - ".
-    2. Elimina cualquier ID numérico/alfanumérico inicial seguido de un guión (ej. "10046558-").
-    """
     if not titulo:
         return None
 
-    # Step 1: Quedarnos con el último segmento tras separadores con espacios (" – " o " - ")
-    titulo_limpio = re.sub(r"^.*?\s+[–-]\s+", "", titulo)
+    # 1. Elimina prefijos de categoría/país terminados en guión largo o corto con espacios
+    #    (ej. "Event services – " o "Medical equipments – ")
+    texto = re.sub(r"^.*?[–-]\s*", "", titulo)
 
-    # Step 2: Eliminar el código/ID numérico inicial seguido de un guión si existe
-    titulo_limpio = re.sub(r"^\d+[-–]\s*", "", titulo_limpio)
+    # 2. Elimina el código/ID numérico inicial si va seguido de un guión
+    #    (ej. "10046558-Short-Term..." -> "Short-Term...")
+    texto = re.sub(r"^\d+[-–]\s*", "", texto)
 
-    return titulo_limpio.strip() or None
+    return texto.strip() or None
 
 
 def parsear_fecha_ted(valor):
