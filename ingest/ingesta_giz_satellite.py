@@ -2,60 +2,15 @@
 """
 ingesta_giz_satellite.py
 --------------------------
-Sincroniza los avisos de licitación publicados en el propio portal de
-adquisiciones de la GIZ (Vergabemarktplatz GIZ, plataforma cosinex/DTVP)
-contra la tabla `licitaciones_internacionales` de Supabase.
+Sincroniza los avisos de licitación publicados en el portal de adquisiciones 
+de la GIZ (Vergabemarktplatz GIZ, plataforma cosinex/DTVP) contra la tabla 
+`licitaciones_internacionales` de Supabase.
 
-    https://ausschreibungen.giz.de/Satellite/company/welcome.do
-
-A diferencia de TED y Service-Bund (ver sus propios docstrings), para
-esta fuente NO se encontró ninguna API oficial ni feed RSS -- solo el
-listado HTML del propio portal, así que se usa Playwright (navegador
-real, headless), igual que ingesta_bid.py/ingesta_undp.py/etc.
-
-Es el portal PROPIO de la GIZ (no una búsqueda de "GIZ" dentro de un
-portal más general, a diferencia de TED/Service-Bund), así que aquí NO
-hace falta ningún filtro de palabra clave -- todo lo publicado en este
-portal es, por definición, de la GIZ.
-
-AVISO DE FIABILIDAD -- ESTA ES LA FUENTE MENOS VERIFICADA DEL BLOQUE
---------------------------------------------------------------------------
-No hay salida de red hacia ausschreibungen.giz.de en este entorno de
-desarrollo. Lo que sí se ha podido confirmar por búsqueda (páginas
-indexadas, guía oficial en PDF de la GIZ):
-  - La plataforma es cosinex/DTVP (Deutsches Vergabeportal), un software
-    de e-procurement usado por muchas administraciones alemanas.
-  - La URL del listado es .../Satellite/company/welcome.do?method=show
-    Table&fromSearch=1 (confirmada indexada con esos parámetros).
-  - Cada aviso individual vive en .../Satellite/notice/<ID> (ID
-    alfanumérico tipo "CXTRYY6YTVGFLGE9"), y su título sigue siempre el
-    patrón "<código de referencia numérico> - <título>" (confirmado en
-    varios avisos reales indexados, p. ej. "10013531 - Support to
-    SAHPRA's...").
-  - "Angebotsfrist" es el término legal ESTÁNDAR alemán para la fecha
-    límite de una licitación (confirmado en la documentación general
-    de contratación pública alemana, no específico de este portal, pero
-    es el término que también usa Service-Bund) -- se asume que este
-    portal lo usa igual, sin poder confirmarlo en la página real.
-Lo que NO se ha podido confirmar: la estructura exacta de la tabla de
-resultados (si usa JavaScript para pintar las filas, qué columnas
-expone, o si expresa la fecha límite con esa palabra literal). Por eso
-la extracción de fecha límite es deliberadamente defensiva (por patrón
-de texto sobre toda la fila, no por una columna fija) y puede no
-encontrar nada. **Revisa el log "Avisos sin fecha límite reconocida" y
-la captura de depuración tras la primera ejecución manual
-(workflow_dispatch) antes de fiarte del cron automático -- de las tres
-fuentes de este bloque, esta es la que más probablemente necesite un
-ajuste tras verla contra la página real.**
-
-Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
-Ejecucion local:      python ingesta_giz_satellite.py
-Ejecucion programada: ver .github/workflows/sincronizar_giz_satellite.yml
-   (necesita el paso extra "playwright install --with-deps chromium")
+URL: https://ausschreibungen.giz.de/Satellite/company/welcome.do?method=showTable&fromSearch=1
 """
+
 import re
 from datetime import date
-
 from playwright.sync_api import sync_playwright
 
 from common import (
@@ -79,42 +34,40 @@ CABECERAS_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
-# "10013531 - Support to SAHPRA's..." / "81322888 - Consultancy to..."
-# -- patron de titulo confirmado contra avisos reales indexados.
 PATRON_REFERENCIA_TITULO = re.compile(r"^\s*(\d{4,10})\s*[-–]\s*(.+)$")
-PATRON_ANGEBOTSFRIST = re.compile(r"Angebotsfrist:?\s*(\d{1,2}\.\d{1,2}\.\d{4})")
-PATRON_VEROEFFENTLICHT = re.compile(r"Ver(?:[oö]|oe)ffentlich\w*:?\s*(\d{1,2}\.\d{1,2}\.\d{4})", re.IGNORECASE)
 
-# Cada aviso individual vive en /Satellite/notice/<ID> -- ver aviso de
-# fiabilidad en el docstring.
+# Extrae la lista de avisos leyendo directamente las filas (tr) y celdas (td) de la tabla DTVP
 _JS_EXTRAER_FILAS = """
 () => {
     const resultados = [];
-    const vistos = new Set();
-    const enlaces = Array.from(document.querySelectorAll('a[href*="/Satellite/notice/"]'));
+    const filas = Array.from(document.querySelectorAll('table tbody tr'));
 
-    for (const enlace of enlaces) {
-        const href = enlace.getAttribute('href') || '';
-        if (vistos.has(href)) continue;
-        vistos.add(href);
+    for (const fila of filas) {
+        const celdas = fila.querySelectorAll('td');
+        if (celdas.length < 3) continue;
 
-        const titulo = (enlace.innerText || '').trim();
+        // Estructura de columnas DTVP:
+        // Columna 0: Veröffentlicht (Fecha Publicación)
+        // Columna 1: Angebots- / Teilnahmefrist (Fecha Límite)
+        // Columna 2: Bezeichnung (Número + Título con el enlace)
+        // Columna 3: Typ (Tipo de procedimiento)
+        const fechaPub = (celdas[0]?.innerText || '').trim();
+        const fechaLimite = (celdas[1]?.innerText || '').trim();
+        
+        const enlaceEl = celdas[2]?.querySelector('a') || fila.querySelector('a');
+        const titulo = (celdas[2]?.innerText || enlaceEl?.innerText || '').trim();
+        const href = enlaceEl ? enlaceEl.getAttribute('href') : '';
+        const tipo = celdas[3] ? (celdas[3].innerText || '').trim() : '';
 
-        // Texto de la fila/contenedor completo (para poder buscar por
-        // patron "Angebotsfrist"/"Veroeffentlicht" fuera del propio
-        // enlace, ver aviso de fiabilidad).
-        let nodo = enlace;
-        let textoContenedor = '';
-        for (let i = 0; i < 6 && nodo.parentElement; i++) {
-            nodo = nodo.parentElement;
-            const texto = (nodo.innerText || '').trim();
-            if (texto.length > titulo.length + 10) {
-                textoContenedor = texto;
-                break;
-            }
+        if (titulo) {
+            resultados.push({
+                titulo: titulo,
+                href: href,
+                fecha_pub_raw: fechaPub,
+                fecha_limite_raw: fechaLimite,
+                tipo_procedimiento: tipo
+            });
         }
-
-        resultados.push({ titulo, href, texto_contenedor: textoContenedor });
     }
     return resultados;
 }
@@ -141,7 +94,7 @@ def parsear_fecha_alemana(texto: str):
 
 
 def extraer_avisos_playwright() -> list:
-    avisos = []
+    todos_los_avisos = []
 
     try:
         with sync_playwright() as p:
@@ -154,15 +107,37 @@ def extraer_avisos_playwright() -> list:
                 pagina.goto(LISTADO_URL, timeout=TIEMPO_ESPERA_CARGA_MS, wait_until="domcontentloaded")
 
                 try:
-                    pagina.wait_for_selector('a[href*="/Satellite/notice/"]', timeout=TIEMPO_ESPERA_CARGA_MS)
+                    # Esperar a que la tabla o sus filas estén presentes en el DOM
+                    pagina.wait_for_selector('table tbody tr', timeout=TIEMPO_ESPERA_CARGA_MS)
                 except Exception as error:
-                    print(f"    No aparecio ningun aviso reconocible a tiempo: {error}", flush=True)
+                    print(f"    No apareció la tabla de avisos a tiempo: {error}", flush=True)
                     pagina.screenshot(path=CAPTURA_DEPURACION, full_page=True)
-                    print(f"    Captura de depuracion guardada en {CAPTURA_DEPURACION}.", flush=True)
+                    print(f"    Captura de depuración guardada en {CAPTURA_DEPURACION}.", flush=True)
                     return []
 
-                avisos = pagina.evaluate(_JS_EXTRAER_FILAS)
-                print(f"    Avisos reconocidos: {len(avisos)}", flush=True)
+                # Extracción de la página actual
+                avisos_pagina = pagina.evaluate(_JS_EXTRAER_FILAS)
+                todos_los_avisos.extend(avisos_pagina)
+                print(f"    Avisos reconocidos en la primera página: {len(avisos_pagina)}", flush=True)
+
+                # Paginación: recorrer páginas siguientes si existen
+                pagina_actual = 1
+                while True:
+                    # Buscar el botón de 'Siguiente página' en la paginación inferior de la plataforma DTVP
+                    boton_siguiente = pagina.query_selector('a.next-page, a[title*="Nächste"], a[title*="weiter"]')
+                    if not boton_siguiente or not boton_siguiente.is_visible():
+                        break
+
+                    pagina_actual += 1
+                    print(f"--> Cargando página {pagina_actual}...", flush=True)
+                    boton_siguiente.click()
+                    pagina.wait_for_timeout(2000)
+                    pagina.wait_for_selector('table tbody tr', timeout=TIEMPO_ESPERA_CARGA_MS)
+
+                    nuevos_avisos = pagina.evaluate(_JS_EXTRAER_FILAS)
+                    if not nuevos_avisos:
+                        break
+                    todos_los_avisos.extend(nuevos_avisos)
 
             except Exception as error:
                 print(f"Error durante la navegación con Playwright: {error}", flush=True)
@@ -181,38 +156,33 @@ def extraer_avisos_playwright() -> list:
     except Exception as error:
         print(f"Error inesperado no capturado dentro de Playwright: {error}", flush=True)
 
-    return avisos
+    return todos_los_avisos
 
 
 def construir_registro(aviso: dict) -> dict:
     titulo_crudo = (aviso.get("titulo") or "").strip()
     href = aviso.get("href") or ""
-    texto_contenedor = aviso.get("texto_contenedor") or ""
+    fecha_pub_raw = aviso.get("fecha_pub_raw") or ""
+    fecha_limite_raw = aviso.get("fecha_limite_raw") or ""
+    tipo_procedimiento = aviso.get("tipo_procedimiento") or None
 
-    # "10013531 - Support to SAHPRA's..." -> referencia + titulo limpio
+    # Extraer referencia y limpiar título (ej: "10041400 - Training: Mehr-bewusst")
     coincidencia_ref = PATRON_REFERENCIA_TITULO.match(titulo_crudo)
     if coincidencia_ref:
         referencia, titulo = coincidencia_ref.groups()
     else:
         referencia, titulo = None, titulo_crudo
 
-    fecha_limite = None
-    coincidencia_frist = PATRON_ANGEBOTSFRIST.search(texto_contenedor)
-    if coincidencia_frist:
-        fecha_limite = parsear_fecha_alemana(coincidencia_frist.group(1))
+    fecha_publicacion = parsear_fecha_alemana(fecha_pub_raw)
+    fecha_limite = parsear_fecha_alemana(fecha_limite_raw)
 
-    fecha_publicacion = None
-    coincidencia_veroeff = PATRON_VEROEFFENTLICHT.search(texto_contenedor)
-    if coincidencia_veroeff:
-        fecha_publicacion = parsear_fecha_alemana(coincidencia_veroeff.group(1))
-
-    url_oficial = f"{BASE_URL}{href}" if href.startswith("/") else (href or None)
+    url_oficial = f"{BASE_URL}{href}" if href.startswith("/") else (href or LISTADO_URL)
     slug_base = referencia or _generar_slug(titulo or href)
 
     return {
         "codigo_unico": f"GIZSAT-{_generar_slug(slug_base)}"[:150],
         "fuente_origen": FUENTE,
-        "tipo_aviso": None,
+        "tipo_aviso": tipo_procedimiento,
         "titulo": titulo or titulo_crudo or None,
         "descripcion": f"Referencia GIZ: {referencia}." if referencia else None,
         "pais": "Alemania",
@@ -272,8 +242,7 @@ def ejecutar_sincronizacion():
     if not crudos:
         print(
             "No se ha extraído ningún aviso. Revisa el log de arriba y la captura de depuración "
-            f"({CAPTURA_DEPURACION}) -- ver aviso de fiabilidad en el docstring: es la fuente menos "
-            "verificada de este bloque.",
+            f"({CAPTURA_DEPURACION}).",
             flush=True,
         )
         return
@@ -283,9 +252,7 @@ def ejecutar_sincronizacion():
     sin_fecha_limite = sum(1 for n in normalizados if not n.get("fecha_limite"))
     if sin_fecha_limite:
         print(
-            f"Avisos sin fecha límite reconocida: {sin_fecha_limite}/{len(normalizados)} -- "
-            "ver aviso de fiabilidad en el docstring (es posible que este portal no use el "
-            "literal 'Angebotsfrist' o que la fecha viva en otro sitio de la página).",
+            f"Avisos sin fecha límite reconocida o concluidos (p. ej. 'AV'): {sin_fecha_limite}/{len(normalizados)}",
             flush=True,
         )
 
