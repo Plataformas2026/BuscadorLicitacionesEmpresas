@@ -139,7 +139,7 @@ async def _traducir_bloque_al_ingles(textos: list, reintentos: int = 2) -> list:
                 if intento == 0:
                     # Primer aviso: Pausa larga de enfriamiento (2 minutos)
                     print("\n[!] Límite de tasa de Google alcanzado (429). Iniciando enfriamiento prolongado de 120 segundos...", flush=True)
-                    await asyncio.sleep(120)
+                    await asyncio.sleep(60)
                 else:
                     # Si tras la pausa de 2 min vuelve a fallar, marcamos el baneo como persistente
                     print("[!] La IP sigue bloqueada tras el enfriamiento. Cancelando traducciones restantes para no detener la ingesta.", flush=True)
