@@ -18,6 +18,8 @@ from datetime import date, timedelta
 from urllib.parse import urljoin
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 
@@ -34,22 +36,26 @@ LISTADO_URL = (
     "?view=processForm&nn=9465610&sortOrder=dateOfIssue_dt+desc&resultsPerPage=100"
 )
 FUENTE = "SERVICE_BUND"
-TIMEOUT_PETICION = 30
+TIMEOUT_PETICION = 45
 CONCURRENCIA_MAXIMA = 1   # Límite de peticiones/traducciones simultáneas
 LOTE_ENVIO_SUPABASE = 15
 CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "fecha_publicacion", "fecha_limite")
 MAX_PAGINAS = 3
 CAPTURA_DEPURACION = "debug_service_bund_listado.html"
 
-# Control global de estado de tasa para evitar bucles infititos cuando la IP es bloqueada
+# Control global de estado de tasa para evitar bucles infinitos cuando la IP es bloqueada
 BLOQUEADO_POR_GOOGLE = False
 DELIMITADOR_TRADUCCION = " ||| "
 
 CABECERAS_PETICION = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
+        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control": "max-age=0",
+    "Connection": "keep-alive",
 }
 
 PATRON_URL_DETALLE = re.compile(r"IMPORTE/Ausschreibungen/([^\"'?;]+?/[0-9a-zA-Z-]+)\.html")
@@ -57,6 +63,29 @@ PATRON_TITULO_ATTR = re.compile(r"Zur Ausschreibung\s+[\u2018'](.+)[\u2019']$")
 PATRON_FECHA_LISTADO = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{2})\b")
 PATRON_FECHA_DETALLE = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{4})")
 PATRON_BOILERPLATE_HINWEIS = re.compile(r"ist nur die ver(?:[o\u00f6]|oe)ffentlichungsplattform", re.IGNORECASE)
+
+
+def _crear_sesion_http() -> requests.Session:
+    """
+    Crea una sesión de requests configurada con reintentos automáticos
+    y backoff exponencial ante errores HTTP o de conexión.
+    """
+    sesion = requests.Session()
+    estrategia_reintento = Retry(
+        total=3,
+        backoff_factor=2,
+        status_forcelist=[429, 500, 502, 503, 504],
+        raise_on_status=False,
+    )
+    adaptador = HTTPAdapter(max_retries=estrategia_reintento)
+    sesion.mount("https://", adaptador)
+    sesion.mount("http://", adaptador)
+    sesion.headers.update(CABECERAS_PETICION)
+    return sesion
+
+
+# Sesión global con soporte para reintentos
+SESION_HTTP = _crear_sesion_http()
 
 
 def _generar_slug(texto: str) -> str:
@@ -116,8 +145,7 @@ async def _traducir_bloque_al_ingles(textos: list, reintentos: int = 4) -> list:
 
     texto_unido = DELIMITADOR_TRADUCCION.join(textos_limpios)
 
-    # 1. Pausa de cortesía con aleatoriedad (Jitter) de 2.0 a 4.0 segundos entre items
-    # Esto evita ráfagas constantes y simula comportamiento humano/sostenible
+    # Pausa de cortesía con aleatoriedad (Jitter) de 2.0 a 4.0 segundos entre items
     await asyncio.sleep(random.uniform(2.0, 4.0))
 
     for intento in range(reintentos):
@@ -137,8 +165,6 @@ async def _traducir_bloque_al_ingles(textos: list, reintentos: int = 4) -> list:
         except Exception as error:
             error_str = str(error).lower()
             if "too many requests" in error_str or "429" in error_str:
-                # Calculamos una pausa progresiva con backoff exponencial:
-                # Intento 0: ~300s (5 min), Intento 1: ~600s (10 min), etc.
                 tiempo_base = 300 * (2 ** intento) 
                 jitter = random.uniform(5, 20)
                 tiempo_espera = tiempo_base + jitter
@@ -147,19 +173,18 @@ async def _traducir_bloque_al_ingles(textos: list, reintentos: int = 4) -> list:
                     print(
                         f"\n[!] Límite 429 de Google alcanzado (intento {intento + 1}/{reintentos}). "
                         f"Enfriando durante {int(tiempo_espera)} segundos...",
-                        flush=True
+                        flush=True,
                     )
                     await asyncio.sleep(tiempo_espera)
                 else:
                     print(
                         "[!] La IP sigue bloqueada tras múltiples intentos. Cancelando traducciones restantes.",
-                        flush=True
+                        flush=True,
                     )
                     BLOQUEADO_POR_GOOGLE = True
                     return textos
             else:
                 print(f"    Aviso: fallo puntual al traducir bloque: {error}", flush=True)
-                # Pausa corta tras fallo genérico antes del siguiente intento
                 await asyncio.sleep(3.0)
                 if intento == reintentos - 1:
                     return textos
@@ -213,7 +238,7 @@ def extraer_avisos_listado(desde: date, hasta: date) -> list:
         url_pagina = LISTADO_URL + (f"&page={indice_pagina + 1}" if indice_pagina else "")
         print(f"--> Descargando listado (página {indice_pagina + 1}): {url_pagina}", flush=True)
         try:
-            respuesta = requests.get(url_pagina, timeout=TIMEOUT_PETICION, headers=CABECERAS_PETICION)
+            respuesta = SESION_HTTP.get(url_pagina, timeout=TIMEOUT_PETICION)
             respuesta.raise_for_status()
         except Exception as error:
             print(f"    Error descargando el listado: {error}", flush=True)
@@ -300,7 +325,7 @@ def obtener_datos_ficha(url: str) -> dict:
     }
 
     try:
-        respuesta = requests.get(url, timeout=TIMEOUT_PETICION, headers=CABECERAS_PETICION)
+        respuesta = SESION_HTTP.get(url, timeout=TIMEOUT_PETICION)
         respuesta.raise_for_status()
     except Exception as error:
         print(f"      Error descargando la ficha: {error}", flush=True)
