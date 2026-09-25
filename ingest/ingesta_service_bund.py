@@ -98,11 +98,10 @@ def parsear_fecha_detalle_bund(texto: str):
         return None
 
 
-async def _traducir_bloque_al_ingles(textos: list, reintentos: int = 2) -> list:
+async def _traducir_bloque_al_ingles(textos: list, reintentos: int = 4) -> list:
     """
     Traduce todos los campos de una sola licitación en UNA SOLA petición HTTP.
-    Si detecta un bloqueo de IP por Google (429), pausa la ejecución por 120s.
-    Si el bloqueo persiste, desactiva Google Translate y conserva el texto original.
+    Implementa un retraso base con jitter y backoff exponencial ante respuestas 429.
     """
     global BLOQUEADO_POR_GOOGLE
 
@@ -116,11 +115,12 @@ async def _traducir_bloque_al_ingles(textos: list, reintentos: int = 2) -> list:
 
     texto_unido = DELIMITADOR_TRADUCCION.join(textos_limpios)
 
+    # 1. Pausa de cortesía con aleatoriedad (Jitter) de 2.0 a 4.0 segundos entre items
+    # Esto evita ráfagas constantes y simula comportamiento humano/sostenible
+    await asyncio.sleep(random.uniform(2.0, 4.0))
+
     for intento in range(reintentos):
         try:
-            # Pausa de cortesía de 1 segundo entre licitaciones
-            await asyncio.sleep(1.0)
-            
             traduccion = await asyncio.to_thread(
                 lambda: GoogleTranslator(source="de", target="en").translate(texto_unido)
             )
@@ -136,18 +136,32 @@ async def _traducir_bloque_al_ingles(textos: list, reintentos: int = 2) -> list:
         except Exception as error:
             error_str = str(error).lower()
             if "too many requests" in error_str or "429" in error_str:
-                if intento == 0:
-                    # Primer aviso: Pausa larga de enfriamiento (2 minutos)
-                    print("\n[!] Límite de tasa de Google alcanzado (429). Iniciando enfriamiento prolongado de 120 segundos...", flush=True)
-                    await asyncio.sleep(200)
+                # Calculamos una pausa progresiva con backoff exponencial:
+                # Intento 0: ~300s (5 min), Intento 1: ~600s (10 min), etc.
+                tiempo_base = 300 * (2 ** intento) 
+                jitter = random.uniform(5, 20)
+                tiempo_espera = tiempo_base + jitter
+
+                if intento < reintentos - 1:
+                    print(
+                        f"\n[!] Límite 429 de Google alcanzado (intento {intento + 1}/{reintentos}). "
+                        f"Enfriando durante {int(tiempo_espera)} segundos...",
+                        flush=True
+                    )
+                    await asyncio.sleep(tiempo_espera)
                 else:
-                    # Si tras la pausa de 2 min vuelve a fallar, marcamos el baneo como persistente
-                    print("[!] La IP sigue bloqueada tras el enfriamiento. Cancelando traducciones restantes para no detener la ingesta.", flush=True)
+                    print(
+                        "[!] La IP sigue bloqueada tras múltiples intentos. Cancelando traducciones restantes.",
+                        flush=True
+                    )
                     BLOQUEADO_POR_GOOGLE = True
                     return textos
             else:
-                print(f"      Aviso: fallo puntual al traducir bloque: {error}", flush=True)
-                return textos
+                print(f"    Aviso: fallo puntual al traducir bloque: {error}", flush=True)
+                # Pausa corta tras fallo genérico antes del siguiente intento
+                await asyncio.sleep(3.0)
+                if intento == reintentos - 1:
+                    return textos
 
     return textos
 
