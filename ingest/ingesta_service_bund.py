@@ -6,101 +6,8 @@ Sincroniza licitaciones del portal de contratación pública alemán
 service.bund.de contra la tabla `licitaciones_internacionales` de
 Supabase, mediante scraping directo del HTML (sin usar ninguna API).
 
-    Listado:  https://www.service.bund.de/Content/DE/Ausschreibungen/Suche/Formular.html?view=processForm&nn=9465610
+    Listado:  https://www.service.bund.de/Content/DE/Ausschreibungen/Suche/Formular.html
     Ficha:    https://www.service.bund.de/IMPORTE/Ausschreibungen/<sistema>/<id>.html
-
-CUARTA VUELTA -- SE ELIMINA LA TRADUCCIÓN; SE COMPRUEBA SUPABASE ANTES
-DE DESCARGAR NINGUNA FICHA; RED DE SEGURIDAD ADICIONAL ANTE TIMEOUTS
---------------------------------------------------------------------------
-Tres cambios de fondo sobre la versión anterior (que traducía al inglés
-y comparaba contra Supabase DESPUÉS de descargar todas las fichas):
-
-  1. SIN TRADUCCIÓN: se elimina por completo `deep-translator` y toda
-     la lógica de traducción por lotes que se había añadido -- ya no
-     hay ninguna dependencia de un servicio externo de traducción, ni
-     el riesgo de bloqueo/429 que traía consigo. `titulo`,
-     `descripcion`, `organismo` y `tipo_aviso` se guardan tal cual se
-     extraen de la página, en alemán. Esto por sí solo ya hace el
-     proceso mucho más rápido y elimina una fuente entera de fallos.
-
-  2. SUPABASE ANTES QUE LA FICHA: antes se descargaban las fichas de
-     TODOS los avisos del listado y solo al final se comparaba con
-     Supabase para decidir qué subir -- pidiendo la ficha incluso de
-     avisos que ya existían de una ejecución anterior. Ahora
-     `extraer_avisos_listado` ya calcula el `codigo_unico` de cada
-     aviso (a partir del slug de su URL, sin necesidad de la ficha), y
-     `ejecutar_sincronizacion_async` consulta Supabase con esos
-     códigos INMEDIATAMENTE después del listado -- antes de descargar
-     ninguna ficha. Solo se piden las fichas de los avisos cuyo
-     `codigo_unico` NO existe todavía. Si el listado trae, por
-     ejemplo, 100 avisos y 80 ya están en Supabase de ayer, ahora se
-     hacen ~20 peticiones a fichas en vez de 100.
-
-     CONTRAPARTIDA A TENER EN CUENTA: como ya no se descarga la ficha
-     de los avisos que ya existen, tampoco se puede detectar si algo
-     de esos avisos cambió (p. ej. una prórroga de la fecha límite) --
-     `es_actualizada` deja de tener sentido con este diseño y ya no se
-     usa; todo lo que se sube es siempre `es_novedad=True`. Es la
-     contrapartida directa de evitar esas peticiones HTTP, tal y como
-     se pidió; si en algún momento hiciera falta detectar
-     actualizaciones de avisos ya conocidos, habría que volver a
-     descargar su ficha periódicamente (fuera del alcance de este
-     cambio).
-
-  3. RED DE SEGURIDAD ADICIONAL ANTE "Read timed out": la sesión de
-     requests ya reintentaba automáticamente vía `urllib3.Retry`, pero
-     el error seguía apareciendo -- un timeout de LECTURA concreto no
-     siempre lo intercepta `Retry` según la versión/circunstancia
-     exacta de urllib3 (es un problema conocido: `Retry` está pensado
-     sobre todo para reintentar por código de estado HTTP o por fallo
-     de CONEXIÓN, no siempre por fallo de LECTURA tras una conexión ya
-     establecida). Por eso ahora hay una SEGUNDA capa de reintentos,
-     explícita y propia (`_peticion_con_reintentos`), que envuelve cada
-     llamada de red y reintenta ante CUALQUIER
-     `requests.exceptions.RequestException` (de conexión, de lectura,
-     o de otro tipo), con espera creciente entre intentos. Además el
-     timeout ahora se pasa como tupla `(conexión, lectura)` en vez de
-     un único valor -- permite fallar rápido si el servidor ni
-     siquiera responde a la conexión, sin acortar el tiempo que se da
-     a que termine de enviar una página más pesada.
-
-AVISO DE FIABILIDAD -- LISTADO CONFIRMADO CONTRA HTML REAL (100/100)
---------------------------------------------------------------------------
-La extracción del LISTADO se confirmó contra un `debug_service_bund_listado.html`
-real de 100 resultados:
-    <ul class="result-list">
-      <li><a href="IMPORTE/Ausschreibungen/<sistema>/<año>/<mes>/<id>.html;jsessionid=..."
-             title="Zur Ausschreibung 'Título real'">
-        <div aria-labelledby="date"><p><em>Veröffentlicht</em> DD.MM.AA</p></div>
-        <div aria-labelledby="location"><p><em>Angebotsfrist</em> DD.MM.AA</p></div>
-      </a></li>
-      ...
-    </ul>
-Hay AL MENOS 7 sistemas de origen distintos tras "/IMPORTE/Ausschreibungen/"
-(editor/, obb/, asp/, eVergabe/, healyhudson/, subreport/, subreport15/,
-abc/...), con identificadores numéricos, UUID, o alfanuméricos mixtos --
-el patrón de URL cubre los tres formatos. `codigo_unico` usa el PATH
-COMPLETO tras "Ausschreibungen/" (no solo el identificador final):
-"subreport/.../E82212934.html" y "subreport15/.../E82212934.html" son
-avisos DISTINTOS con el mismo identificador final, confirmado en el
-HTML real.
-
-La FICHA DE DETALLE sigue sin confirmarse contra HTML real completo
-(solo fragmentos de texto indexados por un buscador) -- revisa el
-resultado de la primera ejecución real con atención. "Leistungen und
-Erzeugnisse" (el campo `descripcion` primario) es una ETIQUETA DE
-CATEGORÍA corta ("Dienstleistungen", "Bauleistungen"...), no una frase
-descriptiva de la licitación -- se mantiene el respaldo con el párrafo
-más largo de la página que no sea el aviso legal repetido ("Hinweis:
-service.bund.de ist nur die Veröffentlichungsplattform...").
-
-DOS FORMATOS DE FECHA DISTINTOS -- confirmado, no es un error:
-  - Listado: "Veröffentlicht"/"Angebotsfrist" DD.MM.AA (año en 2 dígitos).
-  - Ficha:   "Angebotsfrist" DD.MM.AAAA (año en 4 dígitos).
-
-Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
-Ejecución local:      python ingesta_service_bund.py
-Ejecución programada: ver .github/workflows/sincronizar_service_bund.yml
 """
 import asyncio
 import re
@@ -121,17 +28,25 @@ from common import (
 )
 
 BASE_URL = "https://www.service.bund.de"
-LISTADO_URL = (
-    BASE_URL + "/Content/DE/Ausschreibungen/Suche/Formular.html"
-    "?view=processForm&nn=9465610&sortOrder=dateOfIssue_dt+desc&resultsPerPage=100"
-)
-FUENTE = "Service-Bund"
-TIMEOUT_CONEXION = 10        # falla rapido si el servidor ni responde a la conexion
-TIMEOUT_LECTURA = 30         # tiempo que se da a que termine de enviar la pagina
-MAX_REINTENTOS_PETICION = 3  # capa de reintentos EXPLICITA, ver aviso de fiabilidad en el docstring
-CONCURRENCIA_MAXIMA = 6      # peticiones concurrentes a las FICHAS
+LISTADO_ACTION_URL = BASE_URL + "/Content/DE/Ausschreibungen/Suche/Formular.html"
+
+PARAMS_BASE_LISTADO = {
+    "nn": "4641482",
+    "resourceId": "4641464",
+    "input_": "4641482",
+    "pageLocale": "de",
+    "resultsPerPage": "100",
+    "gts": "4642258_list=dateOfIssue_dt+desc",
+}
+
+PREFIJO_LISTA = "4642258"
+FUENTE = "SERVICE_BUND"
+TIMEOUT_CONEXION = 10
+TIMEOUT_LECTURA = 30
+MAX_REINTENTOS_PETICION = 3
+CONCURRENCIA_MAXIMA = 6
 LOTE_ENVIO_SUPABASE = 15
-MAX_PAGINAS = 10   # red de seguridad -- ver aviso de fiabilidad sobre la paginacion
+MAX_PAGINAS = 15
 CAPTURA_DEPURACION = "debug_service_bund_listado.html"
 
 CABECERAS_PETICION = {
@@ -152,14 +67,6 @@ PATRON_BOILERPLATE_HINWEIS = re.compile(r"ist nur die ver(?:[o\u00f6]|oe)ffentli
 
 
 def _crear_sesion_http() -> requests.Session:
-    """
-    Sesión de requests con reintentos automáticos vía urllib3.Retry
-    (primera capa: sobre todo eficaz ante códigos de estado 429/5xx y
-    fallos de conexión). Se combina con `_peticion_con_reintentos`
-    (segunda capa, explícita) para cubrir también los "Read timed out"
-    que Retry no siempre intercepta -- ver aviso de fiabilidad en el
-    docstring del módulo.
-    """
     sesion = requests.Session()
     estrategia_reintento = Retry(
         total=2,
@@ -178,22 +85,10 @@ def _crear_sesion_http() -> requests.Session:
 SESION_HTTP = _crear_sesion_http()
 
 
-def _peticion_con_reintentos(url: str, max_intentos: int = MAX_REINTENTOS_PETICION):
-    """
-    Descarga una URL con una capa de reintentos EXPLÍCITA, por encima
-    de la que ya hace `SESION_HTTP` vía urllib3.Retry -- ver aviso de
-    fiabilidad en el docstring del módulo sobre por qué hace falta esta
-    segunda capa (un "Read timed out" concreto no siempre lo
-    intercepta Retry). Captura cualquier
-    `requests.exceptions.RequestException` (timeout de conexión, de
-    lectura, error de conexión...) y reintenta con espera creciente.
-    Nunca lanza una excepción hacia el llamador: devuelve None si todos
-    los intentos fallan, para que quien la use decida cómo degradar
-    (nunca debe tumbar el resto del lote por un aviso problemático).
-    """
+def _peticion_con_reintentos(url: str, params: dict = None, max_intentos: int = MAX_REINTENTOS_PETICION):
     for intento in range(1, max_intentos + 1):
         try:
-            respuesta = SESION_HTTP.get(url, timeout=(TIMEOUT_CONEXION, TIMEOUT_LECTURA))
+            respuesta = SESION_HTTP.get(url, params=params, timeout=(TIMEOUT_CONEXION, TIMEOUT_LECTURA))
             respuesta.raise_for_status()
             return respuesta
         except requests.exceptions.RequestException as error:
@@ -217,8 +112,6 @@ def _generar_slug(texto: str) -> str:
 
 
 def _limpiar_texto(texto: str) -> str:
-    """Quita guiones suaves (U+00AD) y normaliza espacios (incluido el
-    espacio de no separación U+00A0, que \\s ya reconoce)."""
     if not texto:
         return None
     texto = texto.replace("\u00ad", "")
@@ -227,8 +120,6 @@ def _limpiar_texto(texto: str) -> str:
 
 
 def parsear_fecha_listado_bund(texto: str):
-    """'DD.MM.AA' -- año en 2 dígitos, tal y como aparece en el
-    LISTADO (distinto del formato de la ficha)."""
     if not texto:
         return None
     coincidencia = PATRON_FECHA_LISTADO.search(texto)
@@ -242,8 +133,6 @@ def parsear_fecha_listado_bund(texto: str):
 
 
 def parsear_fecha_detalle_bund(texto: str):
-    """'DD.MM.AAAA' -- año en 4 dígitos, tal y como aparece en la
-    FICHA de detalle (campo Angebotsfrist)."""
     if not texto:
         return None
     coincidencia = PATRON_FECHA_DETALLE.search(texto)
@@ -257,28 +146,20 @@ def parsear_fecha_detalle_bund(texto: str):
 
 
 def extraer_avisos_listado(desde: date, hasta: date) -> list:
-    """
-    Descarga la página de resultados y devuelve, para cada aviso cuya
-    fecha de publicación (Veröffentlicht) esté entre `desde` y `hasta`
-    (ambos incluidos), un dict con lo mínimo fiable ahí -- incluido ya
-    su `codigo_unico`, calculado aquí mismo a partir del slug de la
-    URL, para poder consultar Supabase ANTES de descargar ninguna
-    ficha (ver "CUARTA VUELTA" en el docstring del módulo). El resto de
-    campos se sacan de la propia ficha de detalle, pero solo para los
-    avisos que resulten ser nuevos.
-    """
     encontrados = {}
-    detenerse = False
 
-    for indice_pagina in range(MAX_PAGINAS):
-        url_pagina = LISTADO_URL + (f"&page={indice_pagina + 1}" if indice_pagina else "")
-        print(f"--> Descargando listado (página {indice_pagina + 1}): {url_pagina}", flush=True)
-        respuesta = _peticion_con_reintentos(url_pagina)
+    for indice_pagina in range(1, MAX_PAGINAS + 1):
+        parametros = dict(PARAMS_BASE_LISTADO)
+        if indice_pagina > 1:
+            parametros["gtp"] = f"{PREFIJO_LISTA}_list={indice_pagina}"
+
+        print(f"--> Descargando listado (página {indice_pagina})...", flush=True)
+        respuesta = _peticion_con_reintentos(LISTADO_ACTION_URL, params=parametros)
         if respuesta is None:
-            print(f"    No se pudo descargar la página {indice_pagina + 1} tras varios intentos, se detiene el listado.", flush=True)
+            print(f"    No se pudo descargar la página {indice_pagina} tras varios intentos, se detiene el listado.", flush=True)
             break
 
-        if indice_pagina == 0:
+        if indice_pagina == 1:
             try:
                 with open(CAPTURA_DEPURACION, "w", encoding="utf-8") as f:
                     f.write(respuesta.text)
@@ -291,9 +172,12 @@ def extraer_avisos_listado(desde: date, hasta: date) -> list:
         print(f"    Avisos en la página (<li> de ul.result-list): {len(items)}", flush=True)
 
         if not items:
+            print("    No se encontraron más elementos en el listado HTML.", flush=True)
             break
 
         fecha_mas_antigua_de_la_pagina = None
+        nuevos_en_esta_pagina = 0
+
         for li in items:
             enlace = li.find("a", href=True)
             if not enlace:
@@ -305,8 +189,6 @@ def extraer_avisos_listado(desde: date, hasta: date) -> list:
                 print(f"    Aviso: no se reconoció el patrón de URL en {href_absoluto[:100]}", flush=True)
                 continue
             url_oficial = href_absoluto.split(";jsessionid=")[0]
-            if url_oficial in encontrados:
-                continue
 
             div_fecha_pub = enlace.find("div", attrs={"aria-labelledby": "date"})
             fecha_publicacion = parsear_fecha_listado_bund(
@@ -324,6 +206,9 @@ def extraer_avisos_listado(desde: date, hasta: date) -> list:
                 fecha_mas_antigua_de_la_pagina = fecha_publicacion
 
             if fecha_publicacion is not None and not (desde <= fecha_publicacion <= hasta):
+                continue
+
+            if url_oficial in encontrados:
                 continue
 
             titulo_attr = enlace.get("title", "")
@@ -344,27 +229,20 @@ def extraer_avisos_listado(desde: date, hasta: date) -> list:
                 "fecha_publicacion_listado": fecha_publicacion,
                 "fecha_limite_listado": fecha_limite_listado,
             }
+            nuevos_en_esta_pagina += 1
 
-        # Si el aviso mas antiguo visto en esta pagina ya es anterior a
-        # `desde`, dado el orden descendente, las paginas siguientes
-        # solo traerian avisos aun mas antiguos -- se para aqui.
+        print(f"    Avisos procesados en esta página dentro de la ventana: {nuevos_en_esta_pagina}", flush=True)
+
+        # Si tras procesar toda la página el aviso más antiguo de la misma ya es anterior a 'desde',
+        # no tiene sentido pedir la siguiente página porque el listado está ordenado descendente.
         if fecha_mas_antigua_de_la_pagina and fecha_mas_antigua_de_la_pagina < desde:
-            detenerse = True
-
-        if detenerse:
+            print(f"    Alcanzada fecha anterior a la ventana objetivo ({fecha_mas_antigua_de_la_pagina} < {desde}). Finalizando paginación.", flush=True)
             break
 
     return list(encontrados.values())
 
 
 def obtener_datos_ficha(url: str) -> dict:
-    """
-    Descarga la ficha de detalle y extrae organismo, descripción, tipo
-    de aviso y fecha límite -- ver aviso de fiabilidad del docstring
-    del módulo. Nunca lanza una excepción hacia el llamador: cualquier
-    fallo de red devuelve el dict vacío, para que un aviso problemático
-    no tumbe el resto del lote.
-    """
     resultado = {
         "titulo": None, "organismo": None, "descripcion": None,
         "tipo_aviso": None, "fecha_limite": None,
@@ -419,9 +297,6 @@ async def _obtener_ficha_de_aviso(item: dict, semaforo: asyncio.Semaphore) -> di
 
 
 def construir_registro(item: dict) -> dict:
-    """Construye el registro final -- todos los campos de texto se
-    guardan tal cual se extraen, en alemán (sin traducción, ver
-    "CUARTA VUELTA" en el docstring del módulo)."""
     datos_ficha = item.get("datos_ficha", {})
     titulo = datos_ficha.get("titulo") or item.get("titulo_listado")
     organismo = datos_ficha.get("organismo")
@@ -429,8 +304,6 @@ def construir_registro(item: dict) -> dict:
     tipo_aviso = datos_ficha.get("tipo_aviso")
 
     fecha_publicacion = item.get("fecha_publicacion_listado")
-    # Prioridad a la fecha límite de la FICHA (formato de año sin
-    # ambigüedad); si no está, se usa la del propio listado.
     fecha_limite = datos_ficha.get("fecha_limite") or item.get("fecha_limite_listado")
 
     return {
@@ -451,14 +324,6 @@ def construir_registro(item: dict) -> dict:
 
 
 def _finalizar_para_subir(registros: list) -> list:
-    """
-    Añade `texto_completo`, `embedding`, `es_novedad` y
-    `es_actualizada` a cada registro. Como estos avisos ya se
-    filtraron ANTES de llegar aquí (solo se procesan los que no
-    existían todavía en Supabase, ver `ejecutar_sincronizacion_async`),
-    todos son siempre novedades -- ya no hace falta comparar campo a
-    campo contra un registro existente.
-    """
     finales = []
     for datos in registros:
         if not datos.get("titulo") or not datos.get("url_oficial"):
