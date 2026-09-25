@@ -1,0 +1,46 @@
+name: Sincronizar Licitaciones (service.bund.de)
+
+on:
+  schedule:
+    - cron: '30 9 * * *'   # todos los dias a las 09:30 UTC
+  workflow_dispatch:
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Este script no usa Playwright (scraping directo con requests +
+      # BeautifulSoup, ver docstring de ingesta_service_bund.py), así
+      # que no hace falta instalar ningún navegador.
+
+      - name: Ejecutar sincronizacion service.bund.de
+        working-directory: ingest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python ingesta_service_bund.py
+
+      - name: Subir captura de depuracion (si el script no detecto ningun aviso)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-service-bund-listado
+          path: ingest/debug_service_bund_listado.html
+          if-no-files-found: ignore
+          retention-days: 7
