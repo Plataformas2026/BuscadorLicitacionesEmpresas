@@ -21,6 +21,41 @@ Usar esta API en vez de Playwright es strictly mejor para este caso
 concreto: nunca se rompe por un cambio de clases CSS/React, no hace
 falta arrancar un navegador, y devuelve JSON estructurado en vez de HTML.
 
+SEGUNDA VUELTA -- TÍTULO, FECHA LÍMITE Y DESCRIPCIÓN (con ficha real)
+--------------------------------------------------------------------------
+Contra una ficha de detalle HTML real (`{URL_BASE_AVISO}<num>`), se
+corrigieron tres cosas:
+
+  1. TÍTULO: el patrón real es "País – Categoría – Título real" (a
+     veces solo "Categoría – Título real", 2 segmentos en vez de 3),
+     separados por GUIÓN LARGO "–". La limpieza anterior solo quitaba
+     UN prefijo con una regex que además confundía el guión largo
+     separador con los guiones cortos que el propio título puede
+     llevar dentro (p. ej. "Short-Term"), arriesgándose a cortarlo por
+     la mitad. Ahora se parte por " – " (con espacios) y se toma el
+     ÚLTIMO segmento -- funciona igual con 2 o 3 segmentos y nunca
+     toca los guiones cortos internos.
+  2. FECHA LÍMITE: el campo "deadline" de la API de búsqueda no
+     coincidía con la fecha límite real. La ficha de detalle sí trae
+     un campo "Deadline for receipt of tenders" (BT-131) fiable, en
+     formato DD/MM/AAAA (europeo, distinto del AAAA-MM-DD de la API).
+     `obtener_datos_ficha_html` lo lee de ahí; la fecha de la API
+     queda como respaldo si la ficha no responde.
+  3. DESCRIPCIÓN: antes se intentaba sacar de un endpoint de detalle
+     de la API adivinando nombres de campo ("procedure-description",
+     "description", "notice-description") sin confirmación -- de ahí
+     que casi siempre cayera al texto sintético de respaldo. Ahora se
+     lee directamente de la ficha HTML, sección "2.1. Procedure",
+     campo "Description" -- identificado por su atributo
+     data-labels-key="field|name|BT-24-Procedure". OJO: existe OTRO
+     campo "Description" casi idéntico bajo "5.1. Lot"
+     (data-labels-key="business-term|name|BT-24", SIN el sufijo
+     "-Procedure") -- se apunta específicamente al de Procedure.
+
+Esto añade una petición HTTP por aviso (antes solo se pagaba la
+consulta a la API de búsqueda) -- dado el volumen típico de esta
+fuente (búsqueda acotada a "GIZ"), el coste es asumible.
+
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
 Ejecución local:      python ingesta_ted.py
 """
@@ -29,6 +64,7 @@ import time
 from datetime import date, datetime, timedelta
 
 import requests
+from bs4 import BeautifulSoup
 
 from common import (
     generar_embedding,
@@ -38,7 +74,6 @@ from common import (
 )
 
 URL_API_BUSQUEDA = "https://api.ted.europa.eu/v3/notices/search"
-URL_API_AVISO = "https://api.ted.europa.eu/v3/notices/"
 URL_BASE_AVISO = "https://ted.europa.eu/en/notice/-/detail/"
 FUENTE = "TED"
 CONSULTA = 'FT~"GIZ" SORT BY publication-date DESC'
@@ -51,7 +86,8 @@ LIMITE_POR_PAGINA = 50
 MAX_PAGINAS = 10
 TIMEOUT_PETICION = 30
 LOTE_ENVIO_SUPABASE = 15
-CAMPOS_COMPARABLES = ("titulo", "pais", "fecha_publicacion", "fecha_limite")
+CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "fecha_publicacion", "fecha_limite")
+PAUSA_ENTRE_FICHAS_SEGUNDOS = 0.3
 
 CABECERAS_PETICION = {"Content-Type": "application/json", "Accept": "application/json"}
 
@@ -93,11 +129,24 @@ def _valor_multiidioma(valor):
 
 
 def _limpiar_prefijo_titulo(titulo: str) -> str:
-    """Elimina prefijos del tipo 'Germany – ', 'France – ', etc. al inicio del título."""
+    """
+    Quita los prefijos de país/categoría del título -- confirmado
+    contra una ficha de detalle real: el formato es "País – Categoría
+    – Título real" (a veces solo "Categoría – Título real", 2
+    segmentos en vez de 3), siempre separados por GUIÓN LARGO "–" con
+    espacios alrededor. Se toma el ÚLTIMO segmento tras partir por
+    " – ", lo que funciona igual con 2 o 3 segmentos.
+
+    Importante: se parte ÚNICAMENTE por el guión LARGO "–" (en dash),
+    nunca por el guión corto "-", porque el título real puede contener
+    guiones cortos como parte del texto (p. ej. "Short-Term",
+    "10046558-Short-Term Expert Pool...") -- partir por ambos (como
+    hacía la versión anterior) cortaría el título por la mitad.
+    """
     if not titulo:
         return None
-    titulo_limpio = re.sub(r"^[A-Za-z\s]+[–\-]\s*", "", titulo)
-    return titulo_limpio.strip()
+    partes = titulo.split(" – ")
+    return partes[-1].strip() or None
 
 
 def parsear_fecha_ted(valor):
@@ -129,26 +178,73 @@ def _pagina_de_resultados(token_siguiente: str = None) -> dict:
     return respuesta.json()
 
 
-def obtener_descripcion_procedimiento(numero_publicacion: str) -> str:
-    """Obtiene la descripción detallada desde el endpoint individual de la API de TED."""
+def obtener_datos_ficha_html(numero_publicacion: str) -> dict:
+    """
+    Lee la ficha de detalle HTML real del aviso (no la API) para sacar
+    dos cosas que ahí sí están confirmadas con precisión:
+
+      - Descripción: el campo "Description" de la sección "2.1.
+        Procedure", identificado por su atributo
+        data-labels-key="field|name|BT-24-Procedure" -- OJO: existe
+        OTRO campo "Description" casi idéntico bajo "5.1. Lot"
+        (data-labels-key="business-term|name|BT-24", SIN el sufijo
+        "-Procedure"), que es una descripción distinta (más centrada
+        en el lote concreto) -- se apunta específicamente a la de
+        Procedure, tal y como se pidió.
+      - Fecha límite: el campo "Deadline for receipt of tenders"
+        (BT-131), en formato DD/MM/AAAA -- confirmado contra la ficha
+        real, distinto del ISO AAAA-MM-DD que devuelve la API de
+        búsqueda para el campo "deadline".
+
+    Ambos se extraen buscando el <span class="label" data-labels-
+    key="..."> correspondiente y tomando los <span class="data"> que
+    hay dentro de su mismo <div> contenedor (la fecha viene en dos
+    spans .data -- fecha y hora/zona horaria por separado -- se usa
+    solo el primero).
+    """
+    resultado = {"descripcion": None, "fecha_limite": None}
     if not numero_publicacion:
-        return None
-    
+        return resultado
+
+    url_detalle = f"{URL_BASE_AVISO}{numero_publicacion}"
     try:
-        url_detalle = f"{URL_API_AVISO}{numero_publicacion}"
-        resp = requests.get(url_detalle, headers={"Accept": "application/json"}, timeout=15)
-        if resp.status_code == 200:
-            datos = resp.json()
-            desc = (
-                _valor_multiidioma(datos.get("procedure-description")) or
-                _valor_multiidioma(datos.get("description")) or
-                _valor_multiidioma(datos.get("notice-description"))
-            )
-            if desc:
-                return desc
-    except Exception:
-        pass
-    return None
+        respuesta = requests.get(url_detalle, timeout=TIMEOUT_PETICION)
+        respuesta.raise_for_status()
+    except Exception as error:
+        print(f"      Error descargando la ficha de detalle: {error}", flush=True)
+        return resultado
+
+    soup = BeautifulSoup(respuesta.text, "html.parser")
+
+    span_desc = soup.find("span", attrs={"data-labels-key": "field|name|BT-24-Procedure"})
+    if span_desc:
+        contenedor = span_desc.find_parent("div")
+        if contenedor:
+            span_dato = contenedor.find("span", class_="data")
+            if span_dato:
+                resultado["descripcion"] = span_dato.get_text(" ", strip=True)
+
+    span_deadline = soup.find("span", attrs={"data-labels-key": "business-term|name|BT-131"})
+    if span_deadline:
+        contenedor = span_deadline.find_parent("div")
+        if contenedor:
+            spans_dato = contenedor.find_all("span", class_="data")
+            if spans_dato:
+                resultado["fecha_limite"] = parsear_fecha_ted_detalle(spans_dato[0].get_text(strip=True))
+
+    time.sleep(PAUSA_ENTRE_FICHAS_SEGUNDOS)
+    return resultado
+
+
+def parsear_fecha_ted_detalle(texto: str):
+    """Formato DD/MM/AAAA -- confirmado contra la ficha de detalle HTML real (BT-131),
+    distinto del AAAA-MM-DD que usa la API de búsqueda."""
+    if not texto:
+        return None
+    try:
+        return datetime.strptime(texto.strip()[:10], "%d/%m/%Y").date()
+    except ValueError:
+        return None
 
 
 def extraer_avisos_api() -> list:
@@ -178,22 +274,26 @@ def extraer_avisos_api() -> list:
 
 def construir_registro(aviso: dict) -> dict:
     numero_publicacion = _valor_multiidioma(aviso.get("publication-number")) or ""
-    
-    # Limpieza de prefijo de país en el título
+
+    # Limpieza de prefijo de país/categoría en el título
     titulo_raw = _valor_multiidioma(aviso.get("notice-title"))
     titulo = _limpiar_prefijo_titulo(titulo_raw)
-    
+
     comprador = _valor_multiidioma(aviso.get("buyer-name"))
     codigo_pais = _valor_multiidioma(aviso.get("buyer-country"))
     pais = PAISES_ISO3_TED.get((codigo_pais or "").upper(), codigo_pais) if codigo_pais else None
     tipo_aviso = _valor_multiidioma(aviso.get("notice-type"))
 
     fecha_publicacion = parsear_fecha_ted(aviso.get("publication-date"))
-    fecha_limite = parsear_fecha_ted(aviso.get("deadline"))
+    fecha_limite_api = parsear_fecha_ted(aviso.get("deadline"))
 
-    # Obtención de la descripción de procedimiento vía API de detalle
-    descripcion = obtener_descripcion_procedimiento(numero_publicacion)
-    
+    # Fecha límite y descripción: prioridad a la ficha de detalle HTML
+    # (más fiable, ver obtener_datos_ficha_html), con la de la propia
+    # API de búsqueda como respaldo si la ficha no responde.
+    datos_ficha = obtener_datos_ficha_html(numero_publicacion)
+    fecha_limite = datos_ficha["fecha_limite"] or fecha_limite_api
+    descripcion = datos_ficha["descripcion"]
+
     if not descripcion:
         partes_descripcion = []
         if comprador:
