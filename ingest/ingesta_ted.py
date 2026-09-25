@@ -22,6 +22,7 @@ Ejecución local:     python ingesta_ted.py
 """
 import asyncio
 import re
+import random
 import time
 from datetime import date, datetime, timedelta
 
