@@ -34,7 +34,7 @@ LISTADO_URL = (
 )
 FUENTE = "SERVICE_BUND"
 TIMEOUT_PETICION = 30
-CONCURRENCIA_MAXIMA = 5   # Límite de peticiones/traducciones simultáneas
+CONCURRENCIA_MAXIMA = 2   # Límite de peticiones/traducciones simultáneas
 LOTE_ENVIO_SUPABASE = 15
 CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "fecha_publicacion", "fecha_limite")
 MAX_PAGINAS = 3
@@ -94,17 +94,63 @@ def parsear_fecha_detalle_bund(texto: str):
         return None
 
 
-async def _traducir_al_ingles(texto: str) -> str:
+async def _traducir_al_ingles(texto: str, reintentos: int = 3) -> str:
     if not texto:
         return None
-    try:
-        return await asyncio.to_thread(
-            lambda: GoogleTranslator(source="de", target="en").translate(texto)
-        )
-    except Exception as error:
-        print(f"      Aviso: fallo al traducir ('{texto[:40]}...'): {error}", flush=True)
-        return texto
+    
+    for intento in range(reintentos):
+        try:
+            # Pausa ligera para mantener la tasa de peticiones bajo control (máx 3-4/seg)
+            await asyncio.sleep(0.25)
+            return await asyncio.to_thread(
+                lambda: GoogleTranslator(source="de", target="en").translate(texto)
+            )
+        except Exception as error:
+            if "too many requests" in str(error).lower() and intento < reintentos - 1:
+                espera = (intento + 1) * 2  # Espera 2s, luego 4s...
+                print(f"      Límite de tasa alcanzado. Reintentando en {espera}s...", flush=True)
+                await asyncio.sleep(espera)
+            else:
+                print(f"      Aviso: fallo al traducir ('{texto[:40]}...'): {error}", flush=True)
+                return texto
 
+
+async def _procesar_aviso(item: dict, semaforo: asyncio.Semaphore) -> dict:
+    async with semaforo:
+        # 1. Scraping HTML de la ficha
+        datos_ficha = await asyncio.to_thread(obtener_datos_ficha, item["url_oficial"])
+
+        titulo_de = datos_ficha.get("titulo") or item.get("titulo_listado")
+        organismo_de = datos_ficha.get("organismo")
+        descripcion_de = datos_ficha.get("descripcion")
+        tipo_aviso_de = datos_ficha.get("tipo_aviso")
+
+        # 2. Traducciones protegidas secuencialmente dentro del semáforo para no saturar Google
+        titulo_en = await _traducir_al_ingles(titulo_de)
+        organismo_en = await _traducir_al_ingles(organismo_de)
+        descripcion_en = await _traducir_al_ingles(descripcion_de)
+        tipo_aviso_en = await _traducir_al_ingles(tipo_aviso_de)
+
+    fecha_publicacion = item.get("fecha_publicacion_listado")
+    fecha_limite = datos_ficha.get("fecha_limite") or item.get("fecha_limite_listado")
+
+    slug_base = item.get("slug_base") or _generar_slug(titulo_en or titulo_de or item["url_oficial"])
+
+    return {
+        "codigo_unico": f"BUND-{_generar_slug(slug_base)}"[:150],
+        "fuente_origen": FUENTE,
+        "tipo_aviso": tipo_aviso_en or "Tender",
+        "titulo": titulo_en or titulo_de,
+        "descripcion": descripcion_en or descripcion_de,
+        "pais": "Germany",
+        "paises": ["Germany"],
+        "organismo": organismo_en or organismo_de or "Federal Republic of Germany",
+        "categoria": None,
+        "url_oficial": item["url_oficial"],
+        "url_documento": None,
+        "fecha_publicacion": fecha_publicacion.isoformat() if fecha_publicacion else None,
+        "fecha_limite": fecha_limite.isoformat() if fecha_limite else None,
+    }
 
 def extraer_avisos_listado(desde: date, hasta: date) -> list:
     encontrados = {}
@@ -245,46 +291,6 @@ def obtener_datos_ficha(url: str) -> dict:
         resultado["descripcion"] = f"{resultado['descripcion']}. {parrafo_largo}"
 
     return resultado
-
-
-async def _procesar_aviso(item: dict, semaforo: asyncio.Semaphore) -> dict:
-    async with semaforo:
-        datos_ficha = await asyncio.to_thread(obtener_datos_ficha, item["url_oficial"])
-
-    titulo_de = datos_ficha.get("titulo") or item.get("titulo_listado")
-    organismo_de = datos_ficha.get("organismo")
-    descripcion_de = datos_ficha.get("descripcion")
-    tipo_aviso_de = datos_ficha.get("tipo_aviso")
-
-    # Traducción de campos en paralelo
-    titulo_en, organismo_en, descripcion_en, tipo_aviso_en = await asyncio.gather(
-        _traducir_al_ingles(titulo_de),
-        _traducir_al_ingles(organismo_de),
-        _traducir_al_ingles(descripcion_de),
-        _traducir_al_ingles(tipo_aviso_de),
-    )
-
-    fecha_publicacion = item.get("fecha_publicacion_listado")
-    fecha_limite = datos_ficha.get("fecha_limite") or item.get("fecha_limite_listado")
-
-    slug_base = item.get("slug_base") or _generar_slug(titulo_en or titulo_de or item["url_oficial"])
-
-    return {
-        "codigo_unico": f"BUND-{_generar_slug(slug_base)}"[:150],
-        "fuente_origen": FUENTE,
-        "tipo_aviso": tipo_aviso_en or "Tender",
-        "titulo": titulo_en or titulo_de,
-        "descripcion": descripcion_en or descripcion_de,
-        "pais": "Germany",
-        "paises": ["Germany"],
-        "organismo": organismo_en or organismo_de or "Federal Republic of Germany",
-        "categoria": None,
-        "url_oficial": item["url_oficial"],
-        "url_documento": None,
-        "fecha_publicacion": fecha_publicacion.isoformat() if fecha_publicacion else None,
-        "fecha_limite": fecha_limite.isoformat() if fecha_limite else None,
-    }
-
 
 def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> list:
     a_subir = []
