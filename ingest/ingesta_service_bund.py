@@ -13,6 +13,7 @@ Ficha:    https://www.service.bund.de/IMPORTE/Ausschreibungen/<sistema>/<id>.htm
 
 import asyncio
 import re
+import random
 from datetime import date, timedelta
 from urllib.parse import urljoin
 
