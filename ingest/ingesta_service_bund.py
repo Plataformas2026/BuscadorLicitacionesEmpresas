@@ -45,7 +45,7 @@ TIMEOUT_CONEXION = 10
 TIMEOUT_LECTURA = 30
 MAX_REINTENTOS_PETICION = 3
 CONCURRENCIA_MAXIMA = 6
-LOTE_ENVIO_SUPABASE = 15
+LOTE_ENVIO_SUPABASE = 15  # Procesamiento y subida en bloques progresivos
 MAX_PAGINAS = 15
 CAPTURA_DEPURACION = "debug_service_bund_listado.html"
 
@@ -233,8 +233,6 @@ def extraer_avisos_listado(desde: date, hasta: date) -> list:
 
         print(f"    Avisos procesados en esta página dentro de la ventana: {nuevos_en_esta_pagina}", flush=True)
 
-        # Si tras procesar toda la página el aviso más antiguo de la misma ya es anterior a 'desde',
-        # no tiene sentido pedir la siguiente página porque el listado está ordenado descendente.
         if fecha_mas_antigua_de_la_pagina and fecha_mas_antigua_de_la_pagina < desde:
             print(f"    Alcanzada fecha anterior a la ventana objetivo ({fecha_mas_antigua_de_la_pagina} < {desde}). Finalizando paginación.", flush=True)
             break
@@ -377,50 +375,91 @@ async def ejecutar_sincronizacion_async():
         f"Avisos ya existentes en Supabase (se omite su ficha): {len(crudos) - len(avisos_nuevos)}/{len(crudos)}",
         flush=True,
     )
-    print(f"Avisos NUEVOS a procesar (se descarga su ficha): {len(avisos_nuevos)}", flush=True)
+    print(f"Avisos NUEVOS a procesar: {len(avisos_nuevos)}", flush=True)
 
     if not avisos_nuevos:
         print("No hay avisos nuevos que procesar.", flush=True)
         return
 
-    print(f"\nDescargando la ficha de cada aviso nuevo (hasta {CONCURRENCIA_MAXIMA} a la vez)...", flush=True)
+    total_nuevos = len(avisos_nuevos)
+    total_subidos_exito = 0
     semaforo = asyncio.Semaphore(CONCURRENCIA_MAXIMA)
-    resultados_ficha = await asyncio.gather(
-        *(_obtener_ficha_de_aviso(item, semaforo) for item in avisos_nuevos),
-        return_exceptions=True,
+
+    # Dividimos los avisos nuevos en lotes pequeños
+    lotes_avisos = [
+        avisos_nuevos[i : i + LOTE_ENVIO_SUPABASE]
+        for i in range(0, total_nuevos, LOTE_ENVIO_SUPABASE)
+    ]
+
+    print(
+        f"\nIniciando procesamiento y subida progresiva en {len(lotes_avisos)} bloques "
+        f"(de máximo {LOTE_ENVIO_SUPABASE} elementos cada uno)...",
+        flush=True,
     )
 
-    items_con_ficha = []
-    for item_original, resultado in zip(avisos_nuevos, resultados_ficha):
-        if isinstance(resultado, Exception):
+    procesados_contador = 0
+
+    for idx_lote, lote_actual in enumerate(lotes_avisos, 1):
+        print(
+            f"\n--- [LOTE {idx_lote}/{len(lotes_avisos)}] Descargando fichas "
+            f"({len(lote_actual)} elementos)... ---",
+            flush=True,
+        )
+
+        async def _obtener_con_print(item):
+            nonlocal procesados_contador
+            res = await _obtener_ficha_de_aviso(item, semaforo)
+            procesados_contador += 1
             print(
-                f"    Aviso: fallo inesperado procesando {item_original.get('url_oficial')}: "
-                f"{resultado} -- se omite este aviso, se sigue con el resto.",
+                f"    [Progreso {procesados_contador}/{total_nuevos}] Ficha obtenida: {item['codigo_unico']}",
                 flush=True,
             )
+            return res
+
+        resultados_ficha = await asyncio.gather(
+            *(_obtener_con_print(item) for item in lote_actual),
+            return_exceptions=True,
+        )
+
+        items_con_ficha = []
+        for item_original, resultado in zip(lote_actual, resultados_ficha):
+            if isinstance(resultado, Exception):
+                print(
+                    f"    Aviso: error procesando {item_original.get('url_oficial')}: {resultado}",
+                    flush=True,
+                )
+                continue
+            items_con_ficha.append(resultado)
+
+        if not items_con_ficha:
+            print(f"    Lote {idx_lote} sin fichas válidas. Pasando al siguiente...", flush=True)
             continue
-        items_con_ficha.append(resultado)
 
-    if not items_con_ficha:
-        print("Ningún aviso nuevo pudo procesarse correctamente.", flush=True)
-        return
+        normalizados = [construir_registro(item) for item in items_con_ficha]
+        
+        print(f"    Generando embeddings para el bloque {idx_lote}...", flush=True)
+        lote_final = await asyncio.to_thread(_finalizar_para_subir, normalizados)
 
-    normalizados = [construir_registro(item) for item in items_con_ficha]
+        if not lote_final:
+            continue
 
-    sin_fecha_limite = sum(1 for n in normalizados if not n.get("fecha_limite"))
-    if sin_fecha_limite:
-        print(f"Avisos sin fecha límite reconocida: {sin_fecha_limite}/{len(normalizados)}.", flush=True)
+        print(f"    Subiendo {len(lote_final)} registros a Supabase...", flush=True)
+        subidos_lote = await asyncio.to_thread(
+            subir_en_lotes,
+            supabase,
+            "licitaciones_internacionales",
+            "codigo_unico",
+            lote_final,
+            tamano_lote=LOTE_ENVIO_SUPABASE,
+        )
+        total_subidos_exito += subidos_lote
+        print(f"    --> ¡Éxito! Lote {idx_lote} completado: {subidos_lote} subidos a Supabase.", flush=True)
 
-    lote_final = _finalizar_para_subir(normalizados)
-
-    if not lote_final:
-        print("No hay avisos válidos que subir.", flush=True)
-        return
-
-    subidas = subir_en_lotes(
-        supabase, "licitaciones_internacionales", "codigo_unico", lote_final, tamano_lote=LOTE_ENVIO_SUPABASE
+    print(
+        f"\nSincronización service.bund.de completada con éxito: "
+        f"{total_subidos_exito}/{total_nuevos} registros subidos a Supabase.",
+        flush=True,
     )
-    print(f"\nSincronizacion service.bund.de completada: {subidas}/{len(lote_final)} registros subidos (todos nuevos).", flush=True)
 
 
 def ejecutar_sincronizacion():
