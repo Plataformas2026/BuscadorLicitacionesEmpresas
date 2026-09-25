@@ -34,7 +34,7 @@ LISTADO_URL = (
 )
 FUENTE = "SERVICE_BUND"
 TIMEOUT_PETICION = 30
-CONCURRENCIA_MAXIMA = 2   # Límite de peticiones/traducciones simultáneas
+CONCURRENCIA_MAXIMA = 1   # Límite de peticiones/traducciones simultáneas
 LOTE_ENVIO_SUPABASE = 15
 CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "fecha_publicacion", "fecha_limite")
 MAX_PAGINAS = 3
@@ -93,26 +93,33 @@ def parsear_fecha_detalle_bund(texto: str):
     except ValueError:
         return None
 
-
-async def _traducir_al_ingles(texto: str, reintentos: int = 3) -> str:
-    if not texto:
+async def _traducir_al_ingles(texto: str, reintentos: int = 4) -> str:
+    if not texto or len(texto.strip()) == 0:
         return None
     
+    # Si el texto es muy corto o común, evitamos traducir para no desperdiciar peticiones
+    if texto.strip().lower() in ["tender", "germany", "public tender"]:
+        return texto
+
     for intento in range(reintentos):
         try:
-            # Pausa ligera para mantener la tasa de peticiones bajo control (máx 3-4/seg)
-            await asyncio.sleep(0.25)
+            # Pausa fija de 0.6s entre cada campo para no superar ~1.5 req/sec
+            await asyncio.sleep(0.6)
             return await asyncio.to_thread(
                 lambda: GoogleTranslator(source="de", target="en").translate(texto)
             )
         except Exception as error:
-            if "too many requests" in str(error).lower() and intento < reintentos - 1:
-                espera = (intento + 1) * 2  # Espera 2s, luego 4s...
-                print(f"      Límite de tasa alcanzado. Reintentando en {espera}s...", flush=True)
+            error_str = str(error).lower()
+            if "too many requests" in error_str or "429" in error_str:
+                espera = (intento + 1) * 5  # Espera progresiva: 5s, 10s, 15s...
+                print(f"      Límite de tasa alcanzado. Enfriando {espera}s...", flush=True)
                 await asyncio.sleep(espera)
             else:
                 print(f"      Aviso: fallo al traducir ('{texto[:40]}...'): {error}", flush=True)
                 return texto
+    
+    # Si tras reintentos falla, devolvemos el texto original en alemán para no perder la licitación
+    return texto
 
 
 async def _procesar_aviso(item: dict, semaforo: asyncio.Semaphore) -> dict:
