@@ -72,7 +72,7 @@ async def detectar_contexto_powerbi(page):
     """
     print("    ⏳ Buscando visor de PowerBI en el DOM y red...", flush=True)
 
-     dominios_powerbi = [
+    dominios_powerbi = [
         "powerbi.com", 
         "powerbigov.us", 
         "analysis.windows.net", 
