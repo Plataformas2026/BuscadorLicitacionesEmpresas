@@ -23,8 +23,22 @@ navegando a las dos pestañas publicas de la ficha de cada aviso:
         Se combinan "Short description", la descripcion de "Procurement (type
         and scope ...)" (solo si aporta algo distinto de la corta) y la
         duracion del contrato ("Duration: 3 months.").
-        Si la ficha no aporta texto descriptivo se mantiene el valor provisional
-        "Referencia GIZ: <n>." que ya generaba la version anterior.
+        SEGUNDA OPCION (fallback): algunos avisos (p. ej. los de tipo UVgO /
+        "Ex post notice") no usan la plantilla eForms anterior sino la plantilla
+        clasica, sin "Scope of the procedure". En ese caso se lee el bloque
+        "Object of the contract" > "Scope of the procurement": el texto de
+        "Type and scope of performance" mas el plazo de "Execution periods"
+        ("Period of service provision: ...").
+        Si la ficha no aporta texto descriptivo por ninguna de las dos vias se
+        mantiene el valor provisional "Referencia GIZ: <n>." que ya generaba la
+        version anterior.
+
+TEXTO PARA EL EMBEDDING
+-----------------------
+`texto_completo` (base del embedding) incluye ahora la linea "Categoria: ..."
+cuando el aviso tiene categoria. Solo afecta a los registros que se suban o
+actualicen a partir de ahora: los ya guardados conservan su embedding anterior
+hasta que cambien o se vuelvan a procesar.
 
 Para no visitar fichas innecesarias, la navegacion al detalle se hace DESPUES de
 consultar Supabase y solo para los avisos que la necesitan: nuevos, con cambios
@@ -34,10 +48,12 @@ que sigan dentro de la ventana de hoy/ayer).
 
 AVISO DE FIABILIDAD
 -------------------
-La estructura HTML de ambas pestañas se ha validado contra el HTML real de UN
-aviso (ID CXTRYYRDYDBPQKKV, suministro de equipos, Irak). Si otro tipo de aviso
-usa otros encabezados, el campo correspondiente queda vacio, se avisa en el log
-y se conserva el valor provisional; la sincronizacion nunca se detiene por ello.
+La estructura HTML se ha validado contra el HTML real de DOS avisos: uno con
+plantilla eForms (ID CXTRYYRDYDBPQKKV, suministro de equipos, Irak) y uno con
+plantilla clasica (ID CXTRYY6DY66CDC0N, trainings MAP, Ex post notice). Si otro
+tipo de aviso usa otros encabezados, el campo correspondiente queda vacio, se
+avisa en el log (con las secciones detectadas) y se conserva el valor
+provisional; la sincronizacion nunca se detiene por ello.
 """
 
 import re
@@ -93,6 +109,8 @@ PREFIJO_DESCRIPCION_PROVISIONAL = "Referencia GIZ:"
 # Encabezados exactos (en minusculas) tal y como aparecen en la version inglesa.
 ETIQUETAS_CATEGORIA = ("subject matter of the contract",)
 ETIQUETAS_ALCANCE = ("scope of the procedure",)
+# Plantilla clasica (fallback): "Object of the contract" > "Scope of the procurement"
+ETIQUETAS_ALCANCE_ALTERNATIVO = ("scope of the procurement",)
 
 # El identificador de la licitacion (p. ej. CXTRYYRDYDBPQKKV) aparece como
 # segmento de ruta tanto en /notice/<ID> como en /project/<ID>/...
@@ -344,22 +362,31 @@ def _frases_duracion(pares: list) -> list:
     return frases
 
 
-def extraer_descripcion_html(html: str):
+def _buscar_fieldset(soup, etiquetas_leyenda: tuple):
+    """<fieldset> cuya <legend> coincide (sin distinguir mayusculas) con alguna de `etiquetas_leyenda`."""
+    for leyenda in soup.find_all("legend"):
+        if (_texto_limpio(leyenda) or "").lower() in etiquetas_leyenda:
+            return leyenda.find_parent("fieldset")
+    return None
+
+
+def _recortar_descripcion(descripcion: str) -> str:
+    if len(descripcion) > MAX_LONGITUD_DESCRIPCION:
+        descripcion = descripcion[: MAX_LONGITUD_DESCRIPCION - 1].rstrip() + "…"
+    return descripcion
+
+
+def _descripcion_scope_of_the_procedure(soup):
     """
-    Pestaña Procedure information -> "Procurement Scope" > "Scope of the procedure".
+    Pestaña Procedure information (plantilla eForms) ->
+    "Procurement Scope" > "Scope of the procedure".
 
     Dentro de ese <fieldset> hay bloques encabezados por <h4 class="sub-headline">
     (Short description / Procurement (type and scope ...) / Scope of the contract /
     Duration of the contract ...). Se recorre en orden de documento y se asigna
     cada valor de solo lectura al ultimo encabezado visto.
     """
-    soup = BeautifulSoup(html or "", "html.parser")
-
-    fieldset = None
-    for leyenda in soup.find_all("legend"):
-        if (_texto_limpio(leyenda) or "").lower() in ETIQUETAS_ALCANCE:
-            fieldset = leyenda.find_parent("fieldset")
-            break
+    fieldset = _buscar_fieldset(soup, ETIQUETAS_ALCANCE)
     if fieldset is None:
         return None
 
@@ -403,10 +430,79 @@ def extraer_descripcion_html(html: str):
     if not textos:
         return None  # sin texto descriptivo, la duracion sola no sirve como descripcion
 
-    descripcion = _unir_frases(textos + duracion)
-    if len(descripcion) > MAX_LONGITUD_DESCRIPCION:
-        descripcion = descripcion[: MAX_LONGITUD_DESCRIPCION - 1].rstrip() + "…"
-    return descripcion
+    return _recortar_descripcion(_unir_frases(textos + duracion))
+
+
+def _descripcion_scope_of_the_procurement(soup):
+    """
+    FALLBACK. Plantilla clasica ->  "Object of the contract" > "Scope of the procurement".
+
+    Estructura real (distinta de la eForms): los valores son <span class="read-only">
+    dentro de bloques encabezados por <h4 class="sub-headline">, y el texto de
+    cada campo puede llevar su <label> justo antes (p. ej. "Period of service
+    provision"). El bloque "Execution periods" NO usa <div class="control-group">,
+    por eso se recorre el fieldset en orden de documento fijandose en label / span.
+
+    Se usa:
+      - "Type and scope of performance"  -> texto descriptivo del alcance
+      - "Execution periods"              -> plazo (equivale a la duracion)
+    El resto de bloques del fieldset (lugar de ejecucion, etc.) se ignoran.
+    """
+    fieldset = _buscar_fieldset(soup, ETIQUETAS_ALCANCE_ALTERNATIVO)
+    if fieldset is None:
+        return None
+
+    secciones = []  # [[titulo_en_minusculas, [(etiqueta, valor), ...]], ...]
+    etiqueta = None
+    for nodo in fieldset.descendants:
+        if not isinstance(nodo, Tag):
+            continue
+        clases = nodo.get("class") or []
+        if nodo.name == "h4" and "sub-headline" in clases:
+            secciones.append([(_texto_limpio(nodo.find("span")) or "").lower(), []])
+            etiqueta = None
+        elif nodo.name == "label" and secciones:
+            etiqueta = _texto_limpio(nodo) or etiqueta
+        elif nodo.name == "span" and "read-only" in clases and secciones:
+            valor = _texto_limpio(nodo)
+            if valor:
+                secciones[-1][1].append((etiqueta, valor))
+            etiqueta = None
+
+    texto = None
+    plazos = []
+    for titulo, pares in secciones:
+        if not pares:
+            continue
+        if titulo.startswith("type and scope"):
+            texto = texto or " ".join(valor for _, valor in pares)
+        elif "execution period" in titulo:
+            plazos = plazos or [f"{et}: {valor}" if et else valor for et, valor in pares]
+
+    if not texto:
+        return None  # los plazos solos no sirven como descripcion
+
+    return _recortar_descripcion(_unir_frases([texto] + plazos))
+
+
+def extraer_descripcion_html(html: str):
+    """
+    Pestaña Procedure information. Primero "Scope of the procedure" (plantilla
+    eForms); si no aporta texto, "Scope of the procurement" (plantilla clasica).
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+    return _descripcion_scope_of_the_procedure(soup) or _descripcion_scope_of_the_procurement(soup)
+
+
+def _leyendas_html(html: str, maximo: int = 8) -> list:
+    """Titulos de seccion (<legend>) de una ficha; solo para diagnosticar en el log."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    vistas = []
+    for leyenda in soup.find_all("legend"):
+        texto = _texto_limpio(leyenda)
+        if texto and texto not in vistas:
+            vistas.append(texto)
+    return vistas[:maximo]
 
 
 # =============================================================================
@@ -494,7 +590,11 @@ def extraer_detalle_aviso(pagina, url_oficial: str) -> dict:
     if html_eforms:
         detalle["descripcion"] = extraer_descripcion_html(html_eforms)
         if not detalle["descripcion"]:
-            print("      Aviso: no se encontró texto en 'Scope of the procedure' (Procedure information).", flush=True)
+            print(
+                "      Aviso: no se encontró texto ni en 'Scope of the procedure' ni en 'Scope of the procurement' "
+                f"(Procedure information). Secciones detectadas: {_leyendas_html(html_eforms)}",
+                flush=True,
+            )
 
     return detalle
 
@@ -632,8 +732,10 @@ def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> 
             continue
 
         existente = registros_existentes.get(datos["codigo_unico"])
+        linea_categoria = f"Categoria: {datos['categoria']}\n" if datos.get("categoria") else ""
         texto_completo = (
             f"Titulo: {datos['titulo']}\n{datos.get('descripcion') or ''}\n"
+            f"{linea_categoria}"
             f"Pais: {datos.get('pais') or 'No especificado'}"
         )
 
