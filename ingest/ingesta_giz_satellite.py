@@ -7,10 +7,43 @@ de la GIZ (Vergabemarktplatz GIZ, plataforma cosinex/DTVP) contra la tabla
 `licitaciones_internacionales` de Supabase.
 
 URL: https://ausschreibungen.giz.de/Satellite/company/welcome.do?method=showTable&fromSearch=1
+
+CAMPOS DE DETALLE (categoria y descripcion)
+-------------------------------------------
+El listado no trae ni categoria ni una descripcion real, asi que se completan
+navegando a las dos pestañas publicas de la ficha de cada aviso:
+
+  1. Overview  (.../project/<ID>/en/overview)
+     -> `categoria`: apartado "Subject matter of the contract". Cada entrada
+        tiene el formato "<b>CODIGO-CPV</b> Texto de la categoria"; se elimina
+        el codigo y se conserva solo el texto (varias entradas se unen con "; ").
+
+  2. Procedure information  (.../project/<ID>/en/processdata/eforms)
+     -> `descripcion`: bloque "Procurement Scope" > "Scope of the procedure".
+        Se combinan "Short description", la descripcion de "Procurement (type
+        and scope ...)" (solo si aporta algo distinto de la corta) y la
+        duracion del contrato ("Duration: 3 months.").
+        Si la ficha no aporta texto descriptivo se mantiene el valor provisional
+        "Referencia GIZ: <n>." que ya generaba la version anterior.
+
+Para no visitar fichas innecesarias, la navegacion al detalle se hace DESPUES de
+consultar Supabase y solo para los avisos que la necesitan: nuevos, con cambios
+en el listado, o ya guardados pero todavia sin categoria/descripcion real
+(esto ultimo rellena automaticamente los avisos subidos por la version anterior
+que sigan dentro de la ventana de hoy/ayer).
+
+AVISO DE FIABILIDAD
+-------------------
+La estructura HTML de ambas pestañas se ha validado contra el HTML real de UN
+aviso (ID CXTRYYRDYDBPQKKV, suministro de equipos, Irak). Si otro tipo de aviso
+usa otros encabezados, el campo correspondiente queda vacio, se avisa en el log
+y se conserva el valor provisional; la sincronizacion nunca se detiene por ello.
 """
 
 import re
 from datetime import date, timedelta
+
+from bs4 import BeautifulSoup, Tag
 from playwright.sync_api import sync_playwright
 
 from common import (
@@ -26,7 +59,13 @@ FUENTE = "GIZ-Satellite"
 TIEMPO_ESPERA_CARGA_MS = 45000
 TIMEOUT_PETICION = 30
 LOTE_ENVIO_SUPABASE = 15
-CAMPOS_COMPARABLES = ("titulo", "fecha_limite")
+
+# Campos que vienen del listado y campos que vienen de la ficha de detalle.
+# Cualquier diferencia en cualquiera de ellos marca el aviso como actualizado.
+CAMPOS_LISTADO = ("titulo", "fecha_limite")
+CAMPOS_DETALLE = ("categoria", "descripcion")
+CAMPOS_COMPARABLES = CAMPOS_LISTADO + CAMPOS_DETALLE
+
 CAPTURA_DEPURACION = "debug_giz_satellite_tabla.png"
 
 CABECERAS_USER_AGENT = (
@@ -35,6 +74,37 @@ CABECERAS_USER_AGENT = (
 )
 
 PATRON_REFERENCIA_TITULO = re.compile(r"^\s*(\d{4,10})\s*[-–]\s*(.+)$")
+
+# --- Fichas de detalle ------------------------------------------------------
+PLANTILLA_URL_DETALLE = BASE_URL + "/Satellite/public/company/project/{id}/en/{pestana}"
+PESTANA_OVERVIEW = "overview"
+PESTANA_EFORMS = "processdata/eforms"
+
+TIEMPO_ESPERA_DETALLE_MS = TIMEOUT_PETICION * 1000
+MAX_REINTENTOS_DETALLE = 3
+PAUSA_ENTRE_REINTENTOS_S = 3
+PAUSA_ENTRE_FICHAS_MS = 500
+MAX_LONGITUD_DESCRIPCION = 5000
+
+# Valor provisional que ya generaba la version anterior cuando el titulo traia
+# un numero de referencia. Sirve de respaldo y para reconocer registros antiguos.
+PREFIJO_DESCRIPCION_PROVISIONAL = "Referencia GIZ:"
+
+# Encabezados exactos (en minusculas) tal y como aparecen en la version inglesa.
+ETIQUETAS_CATEGORIA = ("subject matter of the contract",)
+ETIQUETAS_ALCANCE = ("scope of the procedure",)
+
+# El identificador de la licitacion (p. ej. CXTRYYRDYDBPQKKV) aparece como
+# segmento de ruta tanto en /notice/<ID> como en /project/<ID>/...
+PATRON_ID_LICITACION = re.compile(
+    r"(?:^|/)(?:notice|project)/([A-Za-z0-9]{8,})(?=[/?#;]|$)"
+)
+
+# Codigo numerico inicial (CPV "31682210-5", numeros de referencia...). Exige
+# que termine en espacio/fin para no comerse texto como "3D printing".
+PATRON_CODIGO_INICIAL = re.compile(r"^\s*\d[\d\-.]*(?=\s|$)\s*[-–:]?\s*")
+
+_TIPOS_RECURSO_PRESCINDIBLES = {"image", "media", "font", "stylesheet"}
 
 _JS_EXTRAER_FILAS = """
 () => {
@@ -169,6 +239,314 @@ def extraer_avisos_playwright() -> list:
     return todos_los_avisos
 
 
+# =============================================================================
+# FICHAS DE DETALLE: parseo (funciones puras, sin red) 
+# =============================================================================
+
+def _texto_limpio(nodo):
+    """Texto plano de un nodo HTML con espacios normalizados, o None si esta vacio."""
+    if nodo is None:
+        return None
+    texto = nodo.get_text(" ", strip=True).replace("\u00ad", "")
+    texto = re.sub(r"\s+", " ", texto).strip()
+    return texto or None
+
+
+def _quitar_codigo_inicial(texto):
+    """Elimina codigos numericos iniciales (CPV, referencias). Devuelve None si no queda texto."""
+    if not texto:
+        return None
+    while True:
+        limpio = PATRON_CODIGO_INICIAL.sub("", texto, count=1)
+        if limpio == texto:
+            break
+        texto = limpio
+    texto = texto.strip()
+    return texto or None
+
+
+def extraer_categoria_html(html: str):
+    """
+    Pestaña Overview -> apartado "Subject matter of the contract".
+
+    Estructura real:
+        <div class="sub-headline-container"><h4 class="sub-headline"><span>Subject matter of the contract </span>...
+        <div class="control-group"><p><b>31682210-5</b> Instrumentation and control equipment</p></div>
+        <div class="control-group"><p><b>38000000-5</b> Laboratory, optical ...</p></div>
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+
+    for h4 in soup.select("h4.sub-headline"):
+        titulo = (_texto_limpio(h4.find("span")) or "").lower()
+        if titulo not in ETIQUETAS_CATEGORIA:
+            continue
+
+        cabecera = h4.find_parent("div", class_="sub-headline-container") or h4
+        categorias = []
+
+        for hermano in cabecera.find_next_siblings():
+            clases = hermano.get("class") or []
+            if "sub-headline-container" in clases:
+                break  # empieza otro apartado
+            if "control-group" not in clases:
+                continue
+
+            for parrafo in (hermano.find_all("p") or [hermano]):
+                # Se trabaja sobre una copia para quitar el <b> del codigo sin alterar el arbol
+                copia = BeautifulSoup(str(parrafo), "html.parser")
+                for negrita in copia.find_all("b"):
+                    negrita.decompose()
+                texto = _quitar_codigo_inicial(_texto_limpio(copia))
+                if texto and texto not in categorias:
+                    categorias.append(texto)
+
+        if categorias:
+            return "; ".join(categorias)
+
+    return None
+
+
+def _unir_frases(partes: list) -> str:
+    """Une fragmentos asegurando que cada uno termina en signo de puntuacion."""
+    frases = []
+    for parte in partes:
+        parte = (parte or "").strip()
+        if not parte:
+            continue
+        if parte[-1] not in ".!?":
+            parte += "."
+        frases.append(parte)
+    return " ".join(frases)
+
+
+def _normalizar_para_comparar(texto: str) -> str:
+    return re.sub(r"\s+", " ", (texto or "").strip().lower()).rstrip(".")
+
+
+def _frases_duracion(pares: list) -> list:
+    """
+    Convierte los pares (etiqueta, valor) del bloque de duracion en frases.
+    El campo "Duration" solo indica el TIPO de duracion ("Duration in months"),
+    asi que se ignora; el dato real esta en "Duration in months" -> "3".
+    """
+    frases = []
+    for etiqueta, valor in pares:
+        etiqueta = etiqueta or ""
+        if etiqueta.strip().lower() == "duration":
+            continue
+        coincidencia = re.match(r"duration in (\w+)$", etiqueta.strip(), re.IGNORECASE)
+        if coincidencia:
+            frases.append(f"Duration: {valor} {coincidencia.group(1).lower()}")
+        elif etiqueta:
+            frases.append(f"{etiqueta}: {valor}")
+        else:
+            frases.append(valor)
+    return frases
+
+
+def extraer_descripcion_html(html: str):
+    """
+    Pestaña Procedure information -> "Procurement Scope" > "Scope of the procedure".
+
+    Dentro de ese <fieldset> hay bloques encabezados por <h4 class="sub-headline">
+    (Short description / Procurement (type and scope ...) / Scope of the contract /
+    Duration of the contract ...). Se recorre en orden de documento y se asigna
+    cada valor de solo lectura al ultimo encabezado visto.
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+
+    fieldset = None
+    for leyenda in soup.find_all("legend"):
+        if (_texto_limpio(leyenda) or "").lower() in ETIQUETAS_ALCANCE:
+            fieldset = leyenda.find_parent("fieldset")
+            break
+    if fieldset is None:
+        return None
+
+    secciones = []  # [[titulo_en_minusculas, [(etiqueta, valor), ...]], ...]
+    for nodo in fieldset.descendants:
+        if not isinstance(nodo, Tag):
+            continue
+        clases = nodo.get("class") or []
+        if nodo.name == "h4" and "sub-headline" in clases:
+            secciones.append([(_texto_limpio(nodo.find("span")) or "").lower(), []])
+        elif nodo.name == "div" and "control-group" in clases and secciones:
+            valor = _texto_limpio(nodo.select_one("span.read-only"))
+            if valor:
+                etiqueta = _texto_limpio(nodo.select_one("label.description span"))
+                secciones[-1][1].append((etiqueta, valor))
+
+    corta = alcance = None
+    duracion = []
+    for titulo, pares in secciones:
+        if not pares:
+            continue
+        if "short description" in titulo:
+            corta = corta or " ".join(valor for _, valor in pares)
+        elif titulo.startswith("procurement"):
+            alcance = alcance or " ".join(valor for _, valor in pares)
+        elif "duration" in titulo:
+            duracion = duracion or _frases_duracion(pares)
+
+    textos = []
+    if corta and alcance:
+        c, a = _normalizar_para_comparar(corta), _normalizar_para_comparar(alcance)
+        if c in a:
+            textos.append(alcance)      # la larga ya contiene a la corta
+        elif a in c:
+            textos.append(corta)
+        else:
+            textos.extend([corta, alcance])
+    else:
+        textos.extend(t for t in (corta, alcance) if t)
+
+    if not textos:
+        return None  # sin texto descriptivo, la duracion sola no sirve como descripcion
+
+    descripcion = _unir_frases(textos + duracion)
+    if len(descripcion) > MAX_LONGITUD_DESCRIPCION:
+        descripcion = descripcion[: MAX_LONGITUD_DESCRIPCION - 1].rstrip() + "…"
+    return descripcion
+
+
+# =============================================================================
+# FICHAS DE DETALLE: navegacion con Playwright
+# =============================================================================
+
+def _id_desde_url(url: str):
+    coincidencia = PATRON_ID_LICITACION.search(url or "")
+    return coincidencia.group(1) if coincidencia else None
+
+
+def _bloquear_recursos_prescindibles(ruta):
+    """Evita descargar imagenes, fuentes y CSS: solo interesa el texto de la ficha."""
+    try:
+        if ruta.request.resource_type in _TIPOS_RECURSO_PRESCINDIBLES:
+            ruta.abort()
+        else:
+            ruta.continue_()
+    except Exception:
+        pass
+
+
+def _resolver_urls_detalle(pagina, url_oficial: str):
+    """
+    Devuelve (url_overview, url_eforms) del aviso, o (None, None).
+    Si la URL del listado ya lleva el ID (/notice/<ID> o /project/<ID>/...) no
+    se navega; si no (p. ej. un enlace de reenvio), se sigue la redireccion y se
+    lee el ID de la URL final.
+    """
+    identificador = _id_desde_url(url_oficial)
+
+    if not identificador and url_oficial and url_oficial != LISTADO_URL:
+        try:
+            pagina.goto(url_oficial, timeout=TIEMPO_ESPERA_DETALLE_MS, wait_until="domcontentloaded")
+            identificador = _id_desde_url(pagina.url)
+        except Exception as error:
+            print(f"      No se pudo seguir el enlace del aviso: {error}", flush=True)
+
+    if not identificador:
+        return None, None
+
+    return (
+        PLANTILLA_URL_DETALLE.format(id=identificador, pestana=PESTANA_OVERVIEW),
+        PLANTILLA_URL_DETALLE.format(id=identificador, pestana=PESTANA_EFORMS),
+    )
+
+
+def _abrir_ficha_con_reintentos(pagina, url: str):
+    """Navega a `url` y devuelve su HTML; reintenta con espera creciente. None si falla."""
+    for intento in range(1, MAX_REINTENTOS_DETALLE + 1):
+        try:
+            pagina.goto(url, timeout=TIEMPO_ESPERA_DETALLE_MS, wait_until="domcontentloaded")
+            pagina.wait_for_selector("#content", timeout=TIEMPO_ESPERA_DETALLE_MS, state="attached")
+            return pagina.content()
+        except Exception as error:
+            if intento < MAX_REINTENTOS_DETALLE:
+                espera = intento * PAUSA_ENTRE_REINTENTOS_S
+                print(
+                    f"      Intento {intento}/{MAX_REINTENTOS_DETALLE} fallido ({error}). "
+                    f"Reintentando en {espera}s...",
+                    flush=True,
+                )
+                pagina.wait_for_timeout(espera * 1000)
+            else:
+                print(f"      Ficha no disponible tras {MAX_REINTENTOS_DETALLE} intentos: {url}", flush=True)
+    return None
+
+
+def extraer_detalle_aviso(pagina, url_oficial: str) -> dict:
+    """Visita las pestañas Overview y Procedure information de un aviso."""
+    detalle = {"categoria": None, "descripcion": None}
+
+    url_overview, url_eforms = _resolver_urls_detalle(pagina, url_oficial)
+    if not url_overview:
+        print(f"      No se pudo determinar el identificador de la licitacion en: {url_oficial}", flush=True)
+        return detalle
+
+    html_overview = _abrir_ficha_con_reintentos(pagina, url_overview)
+    if html_overview:
+        detalle["categoria"] = extraer_categoria_html(html_overview)
+        if not detalle["categoria"]:
+            print("      Aviso: no se encontró 'Subject matter of the contract' en la pestaña Overview.", flush=True)
+
+    html_eforms = _abrir_ficha_con_reintentos(pagina, url_eforms)
+    if html_eforms:
+        detalle["descripcion"] = extraer_descripcion_html(html_eforms)
+        if not detalle["descripcion"]:
+            print("      Aviso: no se encontró texto en 'Scope of the procedure' (Procedure information).", flush=True)
+
+    return detalle
+
+
+def extraer_detalles_playwright(registros: list) -> dict:
+    """
+    Abre UN navegador y recorre las fichas de los registros indicados.
+    Devuelve {codigo_unico: {"categoria": ..., "descripcion": ...}}.
+    Un fallo en un aviso nunca interrumpe a los demas.
+    """
+    detalles = {}
+    if not registros:
+        return detalles
+
+    try:
+        with sync_playwright() as p:
+            navegador = None
+            try:
+                navegador = p.chromium.launch(headless=True)
+                pagina = navegador.new_page(user_agent=CABECERAS_USER_AGENT)
+                pagina.route("**/*", _bloquear_recursos_prescindibles)
+
+                total = len(registros)
+                for indice, registro in enumerate(registros, start=1):
+                    codigo = registro["codigo_unico"]
+                    print(f"    [{indice}/{total}] Ficha de detalle de {codigo}...", flush=True)
+                    try:
+                        detalles[codigo] = extraer_detalle_aviso(pagina, registro["url_oficial"])
+                    except Exception as error:
+                        print(f"      Error inesperado con {codigo}: {error}", flush=True)
+
+                    if indice < total:
+                        pagina.wait_for_timeout(PAUSA_ENTRE_FICHAS_MS)
+
+            except Exception as error:
+                print(f"Error durante la navegación a las fichas de detalle: {error}", flush=True)
+            finally:
+                if navegador is not None:
+                    try:
+                        navegador.close()
+                    except Exception:
+                        pass
+    except Exception as error:
+        print(f"Error inesperado no capturado en las fichas de detalle: {error}", flush=True)
+
+    return detalles
+
+
+# =============================================================================
+# CONSTRUCCION DE REGISTROS Y SUBIDA
+# =============================================================================
+
 def construir_registro(aviso: dict) -> dict:
     titulo_crudo = (aviso.get("titulo") or "").strip()
     href = aviso.get("href") or ""
@@ -193,7 +571,8 @@ def construir_registro(aviso: dict) -> dict:
         "fuente_origen": FUENTE,
         "tipo_aviso": tipo_procedimiento,
         "titulo": titulo or titulo_crudo or None,
-        "descripcion": f"Referencia GIZ: {referencia}." if referencia else None,
+        # Valor provisional; se sustituye por la descripcion real de la ficha si se obtiene
+        "descripcion": f"{PREFIJO_DESCRIPCION_PROVISIONAL} {referencia}." if referencia else None,
         "pais": "Alemania",
         "paises": ["Alemania"],
         "organismo": "GIZ",
@@ -203,6 +582,47 @@ def construir_registro(aviso: dict) -> dict:
         "fecha_publicacion": fecha_publicacion.isoformat() if fecha_publicacion else None,
         "fecha_limite": fecha_limite.isoformat() if fecha_limite else None,
     }
+
+
+def _es_descripcion_provisional(texto) -> bool:
+    return not texto or str(texto).strip().startswith(PREFIJO_DESCRIPCION_PROVISIONAL)
+
+
+def _necesita_detalle(registro: dict, existente) -> bool:
+    """
+    True si merece la pena visitar la ficha del aviso:
+      - es nuevo;
+      - ya existe pero todavia no tiene categoria o descripcion real
+        (registros subidos por la version anterior, o ficha que fallo);
+      - cambió algo en el listado (titulo / fecha limite).
+    """
+    if existente is None:
+        return True
+    if _es_descripcion_provisional(existente.get("descripcion")) or not existente.get("categoria"):
+        return True
+    return any(str(existente.get(campo)) != str(registro.get(campo)) for campo in CAMPOS_LISTADO)
+
+
+def fusionar_detalle(registro: dict, detalle, existente) -> None:
+    """
+    Vuelca categoria/descripcion en el registro (modifica `registro`).
+    Prioridad: dato recien extraido > dato ya guardado en Supabase > provisional.
+    Asi un fallo puntual de red nunca borra datos buenos ya almacenados, y los
+    avisos cuya ficha no se visitó quedan idénticos a lo que hay en la base.
+    """
+    detalle = detalle or {}
+    existente = existente or {}
+
+    categoria = detalle.get("categoria") or existente.get("categoria") or None
+
+    descripcion = detalle.get("descripcion")
+    if not descripcion and not _es_descripcion_provisional(existente.get("descripcion")):
+        descripcion = existente.get("descripcion")
+
+    registro["categoria"] = categoria
+    if descripcion:
+        registro["descripcion"] = descripcion
+    # si no hay nada mejor, se conserva el provisional puesto por construir_registro
 
 
 def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> list:
@@ -276,6 +696,28 @@ def ejecutar_sincronizacion():
         columnas=("id", "codigo_unico") + CAMPOS_COMPARABLES,
         claves=claves_validas,
     )
+
+    # Fichas de detalle: solo para los avisos que las necesitan
+    pendientes = [
+        n for n in normalizados
+        if n.get("titulo") and n.get("url_oficial")
+        and _necesita_detalle(n, registros_existentes.get(n["codigo_unico"]))
+    ]
+    print(f"\nAvisos que requieren ficha de detalle: {len(pendientes)}/{len(normalizados)}", flush=True)
+    detalles = extraer_detalles_playwright(pendientes)
+
+    if pendientes:
+        con_categoria = sum(1 for d in detalles.values() if d.get("categoria"))
+        con_descripcion = sum(1 for d in detalles.values() if d.get("descripcion"))
+        print(
+            f"Fichas leídas: {len(detalles)}/{len(pendientes)} | con categoría: {con_categoria} "
+            f"| con descripción: {con_descripcion}",
+            flush=True,
+        )
+
+    for registro in normalizados:
+        codigo = registro["codigo_unico"]
+        fusionar_detalle(registro, detalles.get(codigo), registros_existentes.get(codigo))
 
     lote_final = preparar_lote_para_subir(normalizados, registros_existentes)
 
