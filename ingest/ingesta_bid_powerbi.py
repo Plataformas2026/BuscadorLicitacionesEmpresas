@@ -19,7 +19,7 @@ from common import (
 )
 
 URL_IADB = "https://www.iadb.org/es/como-trabajar-juntos/adquisiciones/adquisiciones-para-proyectos/avisos-de-adquisiciones"
-FUENTE = "BID"
+FUENTE = "BID-PowerBI"
 LOTE_ENVIO_SUPABASE = 15
 CAPTURA_DEPURACION = "powerbi_tabla_extraida.png"
 
@@ -72,7 +72,7 @@ async def extraer_licitaciones_iadb() -> list:
         )
         page = await context.new_page()
 
-        print(f"--> [1/5] Cargando la página del BID: {URL_IADB}...")
+        print(f"--> [1/5] Cargando la página del BID: {URL_IADB}...", flush=True)
         await page.goto(URL_IADB, wait_until="networkidle", timeout=60000)
 
         # Cierre de cookies
@@ -80,15 +80,18 @@ async def extraer_licitaciones_iadb() -> list:
             btn_cookie = page.locator('#onetrust-accept-btn-handler, button:has-text("Aceptar")').first
             if await btn_cookie.is_visible(timeout=5000):
                 await btn_cookie.click()
+                print("    ✔ Banner de cookies aceptado.", flush=True)
                 await page.wait_for_timeout(2000)
         except Exception:
             pass
 
         # Bajar hacia el marco
+        print("--> Descendiendo en la página para activar la carga del reporte...", flush=True)
         await page.evaluate("window.scrollBy(0, 500)")
         await page.wait_for_timeout(3000)
 
         # Localizar iframe
+        print("--> Buscando iframe de PowerBI...", flush=True)
         frame_powerbi = None
         for intento in range(10):
             for frame in page.frames:
@@ -100,28 +103,30 @@ async def extraer_licitaciones_iadb() -> list:
             await page.wait_for_timeout(2000)
 
         target_context = frame_powerbi if frame_powerbi else page
-        print(f"    ✔ Frame activo: {target_context.url}")
+        print(f"    ✔ Frame activo: {target_context.url}", flush=True)
 
         # Esperar contenido
+        print("--> Esperando renderizado de celdas en PowerBI...", flush=True)
         try:
             await target_context.wait_for_selector('.pivotTable, [role="gridcell"]', timeout=45000)
             await page.wait_for_timeout(3000)
+            print("    ✔ Elementos de la tabla localizados.", flush=True)
         except Exception as e:
-            print(f"⚠️ Alerta: {e}")
+            print(f"⚠️ Alerta esperando selectores: {e}", flush=True)
 
         # Enfocar la tabla sin alterar el orden
         try:
             celda = target_context.locator('[role="gridcell"], .pivotTableCellWrap').first
             await celda.click(force=True)
             await page.wait_for_timeout(1000)
-            print("    ✔ Foco fijado en la primera celda.")
+            print("    ✔ Foco fijado en la primera celda.", flush=True)
         except Exception as e:
-            print(f"⚠️ No se pudo fijar el foco: {e}")
+            print(f"⚠️ No se pudo fijar el foco: {e}", flush=True)
 
         # ----------------------------------------------------------------------
         # ESCANEO SECUENCIAL SUAVE (MICRO-SCROLL DE FLECHAS ABAJO)
         # ----------------------------------------------------------------------
-        print("--> Escaneando datos progresivamente (evitando saltos)...")
+        print("--> Escaneando datos progresivamente (evitando saltos)...", flush=True)
         
         TOTAL_PASADAS = 80
         pasadas_sin_cambios = 0
@@ -138,12 +143,12 @@ async def extraer_licitaciones_iadb() -> list:
                     licitaciones_raw.append(texto)
                     nuevos_elementos += 1
 
-            print(f"    Pasada {i}/{TOTAL_PASADAS}: {nuevos_elementos} campos nuevos (Total acumulado: {len(licitaciones_raw)})")
+            print(f"    Pasada {i}/{TOTAL_PASADAS}: {nuevos_elementos} campos nuevos (Total acumulado: {len(licitaciones_raw)})", flush=True)
 
             if nuevos_elementos == 0 and len(licitaciones_raw) > 0:
                 pasadas_sin_cambios += 1
                 if pasadas_sin_cambios >= 8:
-                    print("\n    ✔ Final del reporte alcanzado correctamente.")
+                    print("\n    ✔ Final del reporte alcanzado correctamente.", flush=True)
                     break
             else:
                 pasadas_sin_cambios = 0
@@ -162,10 +167,15 @@ async def extraer_licitaciones_iadb() -> list:
             # Pausa de 3 segundos para sincronización de red con Azure/PowerBI
             await page.wait_for_timeout(3000)
 
-        # Impresión final
-        print("\n" + "=" * 80)
-        print(f"TOTAL DE REGISTROS EXTRAÍDOS SINCRO: {len(licitaciones_raw)}")
-        print("=" * 80)
+        # Impresión final en consola
+        print("\n" + "=" * 80, flush=True)
+        print(f"TOTAL DE REGISTROS EXTRAÍDOS SINCRO: {len(licitaciones_raw)}", flush=True)
+        print("=" * 80, flush=True)
+
+        for idx, item in enumerate(licitaciones_raw, 1):
+            print(f"[{idx}] {item}", flush=True)
+
+        print("=" * 80, flush=True)
 
         await page.screenshot(path=CAPTURA_DEPURACION, full_page=True)
         await browser.close()
@@ -177,12 +187,8 @@ async def extraer_licitaciones_iadb() -> list:
 # ESTRUCTURACIÓN Y SUBIDA A SUPABASE
 # ==============================================================================
 def agrupar_y_normalizar(elementos_raw: list) -> list:
-    """
-    Agrupa los elementos extraídos en bloques para constituir licitaciones individuales.
-    """
     normalizados = []
     
-    # Agrupamos los textos en bloques de 5 campos (por defecto en tablas pivote del BID)
     TAMAÑO_BLOQUE = 5
     bloques = [elementos_raw[i:i + TAMAÑO_BLOQUE] for i in range(0, len(elementos_raw), TAMAÑO_BLOQUE)]
 
@@ -275,7 +281,6 @@ async def ejecutar_sincronizacion():
 
     normalizados = agrupar_y_normalizar(crudos)
 
-    # Filtrar posibles duplicados
     normalizados_unicos = {}
     for item in normalizados:
         normalizados_unicos[item["codigo_unico"]] = item
