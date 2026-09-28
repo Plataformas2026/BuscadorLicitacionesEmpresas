@@ -29,7 +29,7 @@ from common import (
 
 BASE_URL = "https://www.iadb.org"
 URL_IADB = f"{BASE_URL}/es/como-trabajar-juntos/adquisiciones/adquisiciones-para-proyectos/avisos-de-adquisiciones"
-FUENTE = "BID-PowerBI"
+FUENTE = "BID"
 
 TIEMPO_ESPERA_CARGA_MS = 60000
 LOTE_ENVIO_SUPABASE = 15
