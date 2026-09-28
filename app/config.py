@@ -36,6 +36,20 @@ GROQ_MODELO = _config("GROQ_MODELO", "openai/gpt-oss-20b")
 
 MODELO_EMBEDDING = "intfloat/multilingual-e5-small"  # 384 dimensiones
 
-FUENTES_LICITACIONES = ["AfDB", "BID", "BEO/IADB", "CAF", "AFD", "UGPE", "UNDP", "UNGM", "BCIE", "World Bank", "TED", "Service-Bund", "GIZ-Satellite"]  # se irán añadiendo más bancos/organismos aquí
+FUENTES_LICITACIONES = [
+    "AfDB",
+    "AFD",
+    "BCIE",
+    "BEO/IADB",
+    "BID",
+    "CAF",
+    "GIZ-Satellite",
+    "Service-Bund",
+    "TED",
+    "UGPE",
+    "UNDP",
+    "UNGM",
+    "World Bank",
+]
 
 TIPOS_EMPRESA = ["Pública", "Privada"]
