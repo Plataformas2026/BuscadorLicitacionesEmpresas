@@ -2,10 +2,8 @@ name: Sincronización BID PowerBI
 
 on:
   schedule:
-    # Todos los días a las 06:00 UTC
     - cron: "0 6 * * *"
 
-  # Permite ejecutar manualmente el workflow
   workflow_dispatch:
 
 jobs:
@@ -29,36 +27,37 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Instalar Chromium de Playwright
+      - name: Instalar Chromium y dependencias
         run: |
           python -m playwright install --with-deps chromium
 
       - name: Verificar estructura del proyecto
         run: |
-          echo "Directorio de trabajo:"
+          echo "=== ROOT ==="
           pwd
-
-          echo ""
-          echo "Archivos relevantes:"
           ls -la
+
+          echo "=== APP ==="
           ls -la app
+
+          echo "=== INGEST ==="
           ls -la ingest
 
-          echo ""
-          echo "Python:"
+          echo "=== PYTHON ==="
           python --version
 
-          echo ""
-          echo "Playwright:"
+          echo "=== PLAYWRIGHT ==="
           python -m playwright --version
+
+      - name: Verificar import de common
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -c "import sys; sys.path.insert(0, 'app'); import common; print('OK: common.py cargado desde:', common.__file__)"
 
       - name: Ejecutar ingesta BID
         env:
           PYTHONUNBUFFERED: "1"
-
-          # El root del repositorio queda disponible para:
-          # from app.common import ...
-          # o imports de otros módulos del proyecto.
           PYTHONPATH: ${{ github.workspace }}
 
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -68,7 +67,7 @@ jobs:
         run: |
           python -m ingest.ingesta_bid_powerbi
 
-      - name: Guardar captura de Power BI si existe
+      - name: Guardar captura de Power BI
         if: always()
         uses: actions/upload-artifact@v4
         with:
