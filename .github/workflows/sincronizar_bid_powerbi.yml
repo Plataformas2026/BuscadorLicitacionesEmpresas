@@ -1,16 +1,17 @@
-name: Sincronizar Licitaciones (BID PowerBI)
+name: Sincronización BID PowerBI
 
 on:
   schedule:
-    - cron: '0 6 * * *'   # todos los días a las 06:00 UTC
-  workflow_dispatch:
+    # Se ejecuta todos los días a las 06:00 UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch: # Permite ejecución manual desde la interfaz de GitHub
 
 jobs:
-  sincronizar:
+  ingesta-bid:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout del repositorio
+      - name: Checkout del código
         uses: actions/checkout@v4
 
       - name: Configurar Python
@@ -24,22 +25,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Instalar navegadores de Playwright y dependencias del sistema
+      - name: Instalar dependencias del sistema, fuentes y Xvfb (Entorno gráfico tipo Colab)
         run: |
-          npx playwright install chromium --with-deps
+          sudo apt-get update
+          sudo apt-get install -y xvfb fonts-liberation libnss3 libgbm-dev libasound2
+          npx playwright install-deps chromium
+          python -m playwright install chromium
 
-      - name: Ejecutar sincronización BID PowerBI
-        working-directory: ingest
+      - name: Ejecutar ingesta BID en Pantalla Virtual (Xvfb)
         env:
+          PYTHONUNBUFFERED: "1"
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: python ingesta_bid_powerbi.py
-
-      - name: Guardar captura de depuración en caso de error o verificación
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: powerbi-screenshot
-          path: ingest/powerbi_tabla_extraida.png
-          if-no-files-found: ignore
+        run: |
+          xvfb-run --auto-servernum --server-args="-screen 0 1600x1000x24" python ingesta_bid_powerbi.py
