@@ -33,8 +33,10 @@ jobs:
           python -m playwright install chromium
 
       - name: Ejecutar ingesta BID en Pantalla Virtual (Xvfb)
+        working-directory: ingest
         env:
           PYTHONUNBUFFERED: "1"
+          PYTHONPATH: "../app"
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
