@@ -19,7 +19,7 @@ from common import (
 )
 
 URL_IADB = "https://www.iadb.org/es/como-trabajar-juntos/adquisiciones/adquisiciones-para-proyectos/avisos-de-adquisiciones"
-FUENTE = "BID-PowerBI"
+FUENTE = "BID"
 LOTE_ENVIO_SUPABASE = 15
 CAPTURA_DEPURACION = "powerbi_tabla_extraida.png"
 
@@ -58,9 +58,7 @@ def parsear_fecha(texto: str):
 # ==============================================================================
 # SCRIPT CON SCROLL CONTROLADO PARA EVITAR DESORDEN O SALTOS DE TIEMPO (ORIGINAL)
 # ==============================================================================
-async def extraer_licitaciones_iadb() -> list:
-    licitaciones_raw = []
-
+async def extraer_licitaciones_iadb():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -73,44 +71,55 @@ async def extraer_licitaciones_iadb() -> list:
         page = await context.new_page()
 
         print(f"--> [1/5] Cargando la página del BID: {URL_IADB}...", flush=True)
-        await page.goto(URL_IADB, wait_until="networkidle", timeout=60000)
+        await page.goto(URL_IADB, wait_until="domcontentloaded", timeout=60000)
 
         # Cierre de cookies
         try:
             btn_cookie = page.locator('#onetrust-accept-btn-handler, button:has-text("Aceptar")').first
             if await btn_cookie.is_visible(timeout=5000):
                 await btn_cookie.click()
-                print("    ✔ Banner de cookies aceptado.", flush=True)
                 await page.wait_for_timeout(2000)
         except Exception:
             pass
 
-        # Bajar hacia el marco
-        print("--> Descendiendo en la página para activar la carga del reporte...", flush=True)
-        await page.evaluate("window.scrollBy(0, 500)")
-        await page.wait_for_timeout(3000)
+        # Bajar progresivamente para activar la carga diferida (lazy loading) del iframe
+        print("--> Descendiendo en la página para activar la carga del iframe...", flush=True)
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
+        await page.wait_for_timeout(5000)
 
-        # Localizar iframe
+        # Localizar iframe (primero por elemento HTML selector, luego en page.frames)
         print("--> Buscando iframe de PowerBI...", flush=True)
         frame_powerbi = None
-        for intento in range(10):
+
+        for intento in range(15):
+            # Opción A: Buscar por el elemento <iframe> en el DOM
+            iframe_element = page.locator('iframe[src*="powerbi.com"], iframe[src*="app.powerbi"]').first
+            if await iframe_element.count() > 0:
+                frame_powerbi = await iframe_element.content_frame()
+                if frame_powerbi:
+                    break
+
+            # Opción B: Recorrer los frames activos
             for frame in page.frames:
                 if ("powerbi.com" in frame.url or "app.powerbi" in frame.url) and frame.url != "about:blank":
                     frame_powerbi = frame
                     break
+
             if frame_powerbi:
                 break
+
+            await page.evaluate("window.scrollBy(0, 300)")
             await page.wait_for_timeout(2000)
 
         target_context = frame_powerbi if frame_powerbi else page
         print(f"    ✔ Frame activo: {target_context.url}", flush=True)
 
-        # Esperar contenido
-        print("--> Esperando renderizado de celdas en PowerBI...", flush=True)
+        # Esperar contenido dentro del frame
         try:
-            await target_context.wait_for_selector('.pivotTable, [role="gridcell"]', timeout=45000)
+            print("--> Esperando renderizado de celdas en PowerBI...", flush=True)
+            await target_context.wait_for_selector('.pivotTable, [role="gridcell"], .pivotTableCellWrap', timeout=60000)
             await page.wait_for_timeout(3000)
-            print("    ✔ Elementos de la tabla localizados.", flush=True)
+            print("    ✔ Celdas encontradas correctamente.", flush=True)
         except Exception as e:
             print(f"⚠️ Alerta esperando selectores: {e}", flush=True)
 
@@ -128,6 +137,7 @@ async def extraer_licitaciones_iadb() -> list:
         # ----------------------------------------------------------------------
         print("--> Escaneando datos progresivamente (evitando saltos)...", flush=True)
         
+        licitaciones_raw = []
         TOTAL_PASADAS = 80
         pasadas_sin_cambios = 0
 
@@ -153,7 +163,7 @@ async def extraer_licitaciones_iadb() -> list:
             else:
                 pasadas_sin_cambios = 0
 
-            # En lugar de PageDown (salto brusco), impulsamos con pulsaciones controladas de ArrowDown y Scroll progresivo
+            # Teclas de dirección y scroll en contenedores internos
             for _ in range(8):
                 await page.keyboard.press("ArrowDown")
             
@@ -164,23 +174,18 @@ async def extraer_licitaciones_iadb() -> list:
                 }
             """)
 
-            # Pausa de 3 segundos para sincronización de red con Azure/PowerBI
             await page.wait_for_timeout(3000)
 
-        # Impresión final en consola
+        # Impresión final
         print("\n" + "=" * 80, flush=True)
         print(f"TOTAL DE REGISTROS EXTRAÍDOS SINCRO: {len(licitaciones_raw)}", flush=True)
         print("=" * 80, flush=True)
-
         for idx, item in enumerate(licitaciones_raw, 1):
             print(f"[{idx}] {item}", flush=True)
 
-        print("=" * 80, flush=True)
-
-        await page.screenshot(path=CAPTURA_DEPURACION, full_page=True)
+        await page.screenshot(path="powerbi_tabla_extraida.png", full_page=True)
         await browser.close()
-
-    return licitaciones_raw
+        return licitaciones_raw
 
 
 # ==============================================================================
