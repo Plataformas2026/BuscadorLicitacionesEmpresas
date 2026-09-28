@@ -3,20 +3,11 @@ ingesta_bid_powerbi.py
 --------------------------
 Sincroniza los avisos de licitación del Banco Interamericano de Desarrollo (BID / IADB)
 incrustados en el reporte PowerBI contra la tabla `licitaciones_internacionales` de Supabase.
-
-URL: https://www.iadb.org/es/como-trabajar-juntos/adquisiciones/adquisiciones-para-proyectos/avisos-de-adquisiciones
-
-MECANISMO DE EXTRACCIÓN:
-- Automatización mediante Playwright asíncrono para navegar al iframe de PowerBI.
-- Micro-scroll mediante emulación de teclado (ArrowDown) y actualización del scrollTop
-  para renderizar celdas de forma virtualizada sin perder registros.
-- Parseo por filas/matriz utilizando BeautifulSoup.
-- Integración con Supabase, cálculo de embeddings y deduplicación basada en `codigo_unico`.
 """
 
 import asyncio
 import re
-from datetime import date, timedelta
+from datetime import date
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
@@ -29,7 +20,7 @@ from common import (
 
 BASE_URL = "https://www.iadb.org"
 URL_IADB = f"{BASE_URL}/es/como-trabajar-juntos/adquisiciones/adquisiciones-para-proyectos/avisos-de-adquisiciones"
-FUENTE = "BID"
+FUENTE = "BID-PowerBI"
 
 TIEMPO_ESPERA_CARGA_MS = 60000
 LOTE_ENVIO_SUPABASE = 15
@@ -55,7 +46,6 @@ def parsear_fecha(texto: str):
     if not texto:
         return None
     
-    # Formato ISO / Estándar (YYYY-MM-DD)
     coincidencia_iso = re.search(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", texto)
     if coincidencia_iso:
         anio, mes, dia = coincidencia_iso.groups()
@@ -64,7 +54,6 @@ def parsear_fecha(texto: str):
         except ValueError:
             pass
 
-    # Formato Latam/Europa (DD/MM/YYYY)
     coincidencia_lat = re.search(r"(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})", texto)
     if coincidencia_lat:
         dia, mes, anio = coincidencia_lat.groups()
@@ -76,23 +65,46 @@ def parsear_fecha(texto: str):
     return None
 
 
+async def obtener_frame_powerbi(page):
+    """
+    Busca activamente el iframe de PowerBI mediante wait_for_selector o inspección de URL.
+    """
+    print("    ⏳ Esperando que el iframe de PowerBI cargue en el DOM...", flush=True)
+    
+    # 1. Intentar esperar directamente al elemento iframe en el DOM
+    try:
+        await page.wait_for_selector('iframe[src*="powerbi"]', timeout=30000)
+    except Exception:
+        print("    ⚠️ No se detectó iframe por atributo src en el tiempo esperado. Buscando en frames cargados...", flush=True)
+
+    # 2. Polling de frames activos
+    for intento in range(15):
+        for frame in page.frames:
+            url_frame = frame.url.lower()
+            if any(domain in url_frame for domain in ["powerbi.com", "app.powerbi", "pbivisuals"]):
+                return frame
+        await page.wait_for_timeout(2000)
+
+    return None
+
+
 async def extraer_licitaciones_iadb() -> list:
     filas_extraidas = []
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-web-security"]
         )
         context = await browser.new_context(
             user_agent=USER_AGENT,
-            viewport={"width": 1400, "height": 900}
+            viewport={"width": 1600, "height": 1000}
         )
         page = await context.new_page()
 
         print(f"--> [1/4] Cargando la página del BID: {URL_IADB}...", flush=True)
         try:
-            await page.goto(URL_IADB, wait_until="networkidle", timeout=TIEMPO_ESPERA_CARGA_MS)
+            await page.goto(URL_IADB, wait_until="domcontentloaded", timeout=TIEMPO_ESPERA_CARGA_MS)
         except Exception as e:
             print(f"⚠️ Aviso al cargar URL principal: {e}", flush=True)
 
@@ -105,39 +117,39 @@ async def extraer_licitaciones_iadb() -> list:
         except Exception:
             pass
 
-        # Desplazamiento inicial para enfocar el marco
-        await page.evaluate("window.scrollBy(0, 500)")
-        await page.wait_for_timeout(3000)
+        # Scroll hacia abajo para forzar la carga diferida (lazy load) del iframe
+        await page.evaluate("window.scrollBy(0, 600)")
+        await page.wait_for_timeout(4000)
 
-        # Localizar iframe de PowerBI
-        frame_powerbi = None
-        for _ in range(10):
-            for frame in page.frames:
-                if ("powerbi.com" in frame.url or "app.powerbi" in frame.url) and frame.url != "about:blank":
-                    frame_powerbi = frame
-                    break
-            if frame_powerbi:
-                break
-            await page.wait_for_timeout(2000)
+        # Detectar el frame
+        frame_powerbi = await obtener_frame_powerbi(page)
 
-        target_context = frame_powerbi if frame_powerbi else page
-        print(f"    ✔ Frame activo localizado: {target_context.url}", flush=True)
+        if not frame_powerbi:
+            print("❌ CRÍTICO: No se pudo localizar el iframe de PowerBI. Abortando extracción.", flush=True)
+            await page.screenshot(path=CAPTURA_DEPURACION, full_page=True)
+            await browser.close()
+            return []
 
-        # Esperar contenido de la tabla
+        print(f"    ✔ Frame activo localizado correctamente: {frame_powerbi.url}", flush=True)
+
+        # Esperar a que la tabla o cuadrícula interactiva de PowerBI cargue dentro del iframe
         try:
-            await target_context.wait_for_selector('.pivotTable, [role="gridcell"], .rowText', timeout=45000)
+            await frame_powerbi.wait_for_selector(
+                '.pivotTable, [role="gridcell"], .rowText, .visual-pvTable', 
+                timeout=45000
+            )
             await page.wait_for_timeout(3000)
         except Exception as e:
-            print(f"⚠️ Alerta esperando elementos de la tabla: {e}", flush=True)
+            print(f"⚠️ Alerta esperando elementos dentro del iframe: {e}", flush=True)
 
-        # Fijar foco en celda inicial
+        # Fijar foco dentro del iframe
         try:
-            celda = target_context.locator('[role="gridcell"], .pivotTableCellWrap').first
-            await celda.click(force=True)
+            celda = frame_powerbi.locator('[role="gridcell"], .pivotTableCellWrap, .visual-pvTable').first
+            await celda.click(force=True, timeout=5000)
             await page.wait_for_timeout(1000)
             print("    ✔ Foco fijado en la matriz de datos.", flush=True)
         except Exception as e:
-            print(f"⚠️ No se pudo fijar el foco directamente: {e}", flush=True)
+            print(f"⚠️ No se pudo hacer clic en la celda: {e}", flush=True)
 
         # ----------------------------------------------------------------------
         # ESCANEO SECUENCIAL CON MICRO-SCROLL
@@ -149,16 +161,19 @@ async def extraer_licitaciones_iadb() -> list:
         registros_vistas = set()
 
         for i in range(1, TOTAL_PASADAS + 1):
-            frame_html = await target_context.content()
+            frame_html = await frame_powerbi.content()
             soup = BeautifulSoup(frame_html, 'html.parser')
             
-            # Estrategia de extracción por filas de cuadrícula / tabla pivotada
             filas_html = soup.select('[role="row"], .pivotTable .row')
             nuevos_elementos = 0
 
             if filas_html:
                 for fila in filas_html:
-                    celdas = [c.get_text(strip=True) for c in fila.select('[role="gridcell"], .pivotTableCellWrap, .cell-interactive') if c.get_text(strip=True)]
+                    celdas = [
+                        c.get_text(strip=True) 
+                        for c in fila.select('[role="gridcell"], .pivotTableCellWrap, .cell-interactive') 
+                        if c.get_text(strip=True)
+                    ]
                     if celdas:
                         clave_fila = " | ".join(celdas)
                         if clave_fila not in registros_vistas:
@@ -166,7 +181,6 @@ async def extraer_licitaciones_iadb() -> list:
                             filas_extraidas.append(celdas)
                             nuevos_elementos += 1
             else:
-                # Fallback: captura por celdas agrupadas si no hay marcado explícito de filas
                 celdas = soup.select('.pivotTableCellWrap, [role="gridcell"], .rowText, .cell-interactive')
                 textos = [c.get_text(strip=True) for c in celdas if c.get_text(strip=True)]
                 if textos:
@@ -186,18 +200,19 @@ async def extraer_licitaciones_iadb() -> list:
             else:
                 pasadas_sin_cambios = 0
 
-            # Desplazamiento progresivo por teclado y DOM
+            # Mandar pulsaciones de teclado para navegar
             for _ in range(8):
                 await page.keyboard.press("ArrowDown")
             
-            await target_context.evaluate("""
+            # Forzar desplazamiento del scrollbar interno de PowerBI
+            await frame_powerbi.evaluate("""
                 () => {
-                    const contenedores = document.querySelectorAll('.scrollWrapper, .viewport, [role="grid"], .pivotTable');
+                    const contenedores = document.querySelectorAll('.scrollWrapper, .viewport, [role="grid"], .pivotTable, .visual-pvTable');
                     contenedores.forEach(c => c.scrollTop += 250);
                 }
             """)
 
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(2500)
 
         await page.screenshot(path=CAPTURA_DEPURACION, full_page=True)
         await browser.close()
@@ -206,13 +221,8 @@ async def extraer_licitaciones_iadb() -> list:
 
 
 def construir_registro(datos_raw: list) -> dict:
-    """
-    Normaliza el bloque o arreglo de celdas extraído de PowerBI a la estructura
-    de Supabase.
-    """
     cadena_texto = " - ".join(datos_raw) if isinstance(datos_raw, list) else str(datos_raw)
     
-    # Asignación de campos defensiva basada en posición o patrón
     titulo = datos_raw[0] if len(datos_raw) > 0 else "Aviso BID sin título"
     pais = datos_raw[1] if len(datos_raw) > 1 else "Internacional"
     organismo = "BID - Banco Interamericano de Desarrollo"
@@ -236,7 +246,7 @@ def construir_registro(datos_raw: list) -> dict:
         "fuente_origen": FUENTE,
         "tipo_aviso": "Licitación / Adquisición",
         "titulo": titulo[:500],
-        "descripcion": f"Detalle extraído de PowerBI: {cadena_texto}"[:MAX_LONGITUD_DESCRIPCION] if 'MAX_LONGITUD_DESCRIPCION' in globals() else cadena_texto[:5000],
+        "descripcion": f"Detalle extraído de PowerBI: {cadena_texto}"[:5000],
         "pais": pais[:100],
         "paises": [pais[:100]],
         "organismo": organismo,
@@ -299,7 +309,6 @@ async def ejecutar_sincronizacion():
 
     normalizados = [construir_registro(c) for c in crudos]
 
-    # Filtrar posibles duplicados generados durante las pasadas
     normalizados_unicos = {}
     for item in normalizados:
         normalizados_unicos[item["codigo_unico"]] = item
