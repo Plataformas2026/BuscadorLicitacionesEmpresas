@@ -10,13 +10,43 @@ Sincroniza los avisos de licitación del Banco Interamericano de Desarrollo
 import asyncio
 import os
 import re
+import sys
 from datetime import date
 from pathlib import Path
 
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import (
+    async_playwright,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
-from app.common import (
+
+# ============================================================================
+# RUTAS DEL PROYECTO
+# ============================================================================
+
+# Estructura esperada:
+#
+# BuscadorLicitacionesEmpresas/
+# ├── app/
+# │   └── common.py
+# ├── ingest/
+# │   └── ingesta_bid_powerbi.py
+# └── .github/
+#     └── workflows/
+#
+ROOT_DIR = Path(__file__).resolve().parent.parent
+APP_DIR = ROOT_DIR / "app"
+
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
+
+
+# ============================================================================
+# IMPORTS DEL PROYECTO
+# ============================================================================
+
+from common import (
     generar_embedding,
     obtener_cliente_supabase,
     obtener_registros_existentes,
@@ -33,9 +63,6 @@ URL_IADB = (
 FUENTE = "BID"
 LOTE_ENVIO_SUPABASE = 15
 
-# Guardamos la captura en el root del repositorio para que GitHub Actions
-# pueda subirla fácilmente como artifact.
-ROOT_DIR = Path(__file__).resolve().parent.parent
 CAPTURA_DEPURACION = ROOT_DIR / "powerbi_tabla_extraida.png"
 
 CAMPOS_COMPARABLES = (
@@ -45,6 +72,7 @@ CAMPOS_COMPARABLES = (
     "organismo",
     "descripcion",
 )
+
 
 
 def _generar_slug(texto: str) -> str:
