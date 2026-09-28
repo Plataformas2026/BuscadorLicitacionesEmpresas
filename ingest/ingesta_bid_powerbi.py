@@ -19,7 +19,7 @@ from common import (
 )
 
 URL_IADB = "https://www.iadb.org/es/como-trabajar-juntos/adquisiciones/adquisiciones-para-proyectos/avisos-de-adquisiciones"
-FUENTE = "BID-PowerBI"
+FUENTE = "BID"
 LOTE_ENVIO_SUPABASE = 15
 CAPTURA_DEPURACION = "powerbi_tabla_extraida.png"
 
