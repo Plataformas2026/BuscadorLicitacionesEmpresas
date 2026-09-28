@@ -28,7 +28,7 @@ jobs:
       - name: Instalar dependencias del sistema, fuentes y Xvfb (Entorno gráfico tipo Colab)
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb fonts-liberation libnss3 libgbm-dev libasound2
+          sudo apt-get install -y xvfb fonts-liberation libnss3 libgbm-dev libasound2t64
           npx playwright install-deps chromium
           python -m playwright install chromium
 
