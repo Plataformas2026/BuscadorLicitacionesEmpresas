@@ -22,7 +22,7 @@ BASE_URL = "https://www.iadb.org"
 URL_IADB = f"{BASE_URL}/es/como-trabajar-juntos/adquisiciones/adquisiciones-para-proyectos/avisos-de-adquisiciones"
 FUENTE = "BID-PowerBI"
 
-TIEMPO_ESPERA_CARGA_MS = 60000
+TIEMPO_ESPERA_CARGA_MS = 90000
 LOTE_ENVIO_SUPABASE = 15
 
 CAMPOS_LISTADO = ("titulo", "fecha_limite", "pais", "organismo", "descripcion")
@@ -32,7 +32,7 @@ CAPTURA_DEPURACION = "powerbi_tabla_extraida.png"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
 
 
@@ -65,25 +65,44 @@ def parsear_fecha(texto: str):
     return None
 
 
-async def obtener_frame_powerbi(page):
+async def detectar_contexto_powerbi(page):
     """
-    Busca activamente el iframe de PowerBI mediante wait_for_selector o inspección de URL.
+    Escanea recursivamente marcos e inspecciona el DOM por si el reporte está en
+    un iframe, un objeto embebido o Web Components.
     """
-    print("    ⏳ Esperando que el iframe de PowerBI cargue en el DOM...", flush=True)
-    
-    # 1. Intentar esperar directamente al elemento iframe en el DOM
-    try:
-        await page.wait_for_selector('iframe[src*="powerbi"]', timeout=30000)
-    except Exception:
-        print("    ⚠️ No se detectó iframe por atributo src en el tiempo esperado. Buscando en frames cargados...", flush=True)
+    print("    ⏳ Buscando visor de PowerBI en el DOM y red...", flush=True)
 
-    # 2. Polling de frames activos
-    for intento in range(15):
+     dominios_powerbi = [
+        "powerbi.com", 
+        "powerbigov.us", 
+        "analysis.windows.net", 
+        "pbivisuals",
+        "powerbi"
+    ]
+
+    for intento in range(20):
+        # 1. Buscar en la lista de frames activos
         for frame in page.frames:
             url_frame = frame.url.lower()
-            if any(domain in url_frame for domain in ["powerbi.com", "app.powerbi", "pbivisuals"]):
+            if any(domain in url_frame for domain in dominios_powerbi) and url_frame != "about:blank":
                 return frame
+
+        # 2. Verificar si existen etiquetas iframe presentes aunque no hayan cambiado URL aún
+        iframes = await page.locator("iframe").all()
+        for iframe in iframes:
+            src = (await iframe.get_attribute("src") or "").lower()
+            if any(domain in src for domain in dominios_powerbi):
+                content_frame = await iframe.content_frame()
+                if content_frame:
+                    return content_frame
+
         await page.wait_for_timeout(2000)
+
+    # 3. Fallback: Si no se aísla un iframe, verificar si los componentes viven en la página principal
+    hay_componente_tabla = await page.locator('.pivotTable, [role="gridcell"], .visual-pvTable').count()
+    if hay_componente_tabla > 0:
+        print("    ℹ️ Matriz detectada directamente en el contexto principal.", flush=True)
+        return page
 
     return None
 
@@ -94,62 +113,70 @@ async def extraer_licitaciones_iadb() -> list:
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-web-security"]
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-web-security",
+                "--disable-blink-features=AutomationControlled",
+            ]
         )
         context = await browser.new_context(
             user_agent=USER_AGENT,
-            viewport={"width": 1600, "height": 1000}
+            viewport={"width": 1600, "height": 1000},
+            device_scale_factor=1,
         )
+        
+        # Ocultar indicador de automatización
         page = await context.new_page()
+        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         print(f"--> [1/4] Cargando la página del BID: {URL_IADB}...", flush=True)
         try:
-            await page.goto(URL_IADB, wait_until="domcontentloaded", timeout=TIEMPO_ESPERA_CARGA_MS)
+            await page.goto(URL_IADB, wait_until="networkidle", timeout=TIEMPO_ESPERA_CARGA_MS)
         except Exception as e:
-            print(f"⚠️ Aviso al cargar URL principal: {e}", flush=True)
+            print(f"⚠️ Aviso de tiempo límite al cargar: {e}", flush=True)
 
         # Cierre de banner de cookies
         try:
-            btn_cookie = page.locator('#onetrust-accept-btn-handler, button:has-text("Aceptar")').first
+            btn_cookie = page.locator('#onetrust-accept-btn-handler, button:has-text("Aceptar"), button:has-text("Accept")').first
             if await btn_cookie.is_visible(timeout=5000):
                 await btn_cookie.click()
                 await page.wait_for_timeout(2000)
         except Exception:
             pass
 
-        # Scroll hacia abajo para forzar la carga diferida (lazy load) del iframe
-        await page.evaluate("window.scrollBy(0, 600)")
-        await page.wait_for_timeout(4000)
+        # Desplazamiento progresivo para disparar lazy loading
+        for _ in range(3):
+            await page.evaluate("window.scrollBy(0, 400)")
+            await page.wait_for_timeout(1500)
 
-        # Detectar el frame
-        frame_powerbi = await obtener_frame_powerbi(page)
+        # Localizar el contexto (Iframe o Página)
+        target_context = await detectar_contexto_powerbi(page)
 
-        if not frame_powerbi:
-            print("❌ CRÍTICO: No se pudo localizar el iframe de PowerBI. Abortando extracción.", flush=True)
-            await page.screenshot(path=CAPTURA_DEPURACION, full_page=True)
-            await browser.close()
-            return []
+        if not target_context:
+            print("⚠️ No se aisló un iframe de PowerBI independiente. Forzando extracción sobre el documento raíz...", flush=True)
+            target_context = page
 
-        print(f"    ✔ Frame activo localizado correctamente: {frame_powerbi.url}", flush=True)
+        print(f"    ✔ Contexto activo: {getattr(target_context, 'url', 'Pagina Principal')}", flush=True)
 
-        # Esperar a que la tabla o cuadrícula interactiva de PowerBI cargue dentro del iframe
+        # Esperar a que la tabla renderice datos
         try:
-            await frame_powerbi.wait_for_selector(
-                '.pivotTable, [role="gridcell"], .rowText, .visual-pvTable', 
-                timeout=45000
+            await target_context.wait_for_selector(
+                '.pivotTable, [role="gridcell"], .rowText, .visual-pvTable, .cell-interactive', 
+                timeout=40000
             )
             await page.wait_for_timeout(3000)
         except Exception as e:
-            print(f"⚠️ Alerta esperando elementos dentro del iframe: {e}", flush=True)
+            print(f"⚠️ Alerta esperando elementos de la tabla: {e}", flush=True)
 
-        # Fijar foco dentro del iframe
+        # Intentar fijar el foco
         try:
-            celda = frame_powerbi.locator('[role="gridcell"], .pivotTableCellWrap, .visual-pvTable').first
+            celda = target_context.locator('[role="gridcell"], .pivotTableCellWrap, .visual-pvTable').first
             await celda.click(force=True, timeout=5000)
             await page.wait_for_timeout(1000)
             print("    ✔ Foco fijado en la matriz de datos.", flush=True)
         except Exception as e:
-            print(f"⚠️ No se pudo hacer clic en la celda: {e}", flush=True)
+            print(f"⚠️ No se pudo fijar el foco directamente: {e}", flush=True)
 
         # ----------------------------------------------------------------------
         # ESCANEO SECUENCIAL CON MICRO-SCROLL
@@ -161,7 +188,7 @@ async def extraer_licitaciones_iadb() -> list:
         registros_vistas = set()
 
         for i in range(1, TOTAL_PASADAS + 1):
-            frame_html = await frame_powerbi.content()
+            frame_html = await target_context.content()
             soup = BeautifulSoup(frame_html, 'html.parser')
             
             filas_html = soup.select('[role="row"], .pivotTable .row')
@@ -200,12 +227,11 @@ async def extraer_licitaciones_iadb() -> list:
             else:
                 pasadas_sin_cambios = 0
 
-            # Mandar pulsaciones de teclado para navegar
+            # Desplazamiento
             for _ in range(8):
                 await page.keyboard.press("ArrowDown")
             
-            # Forzar desplazamiento del scrollbar interno de PowerBI
-            await frame_powerbi.evaluate("""
+            await target_context.evaluate("""
                 () => {
                     const contenedores = document.querySelectorAll('.scrollWrapper, .viewport, [role="grid"], .pivotTable, .visual-pvTable');
                     contenedores.forEach(c => c.scrollTop += 250);
