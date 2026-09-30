@@ -3,13 +3,11 @@ name: Sincronización BID PowerBI
 on:
   schedule:
     - cron: "0 6 * * *"
-
   workflow_dispatch:
 
 jobs:
   ingesta-bid:
     runs-on: ubuntu-latest
-
     timeout-minutes: 30
 
     steps:
@@ -33,27 +31,55 @@ jobs:
 
       - name: Verificar estructura del proyecto
         run: |
-          echo "=== ROOT ==="
+          echo "========================================"
+          echo "ROOT"
+          echo "========================================"
           pwd
           ls -la
 
-          echo "=== APP ==="
+          echo "========================================"
+          echo "APP"
+          echo "========================================"
+          test -d app || {
+            echo "ERROR: no existe el directorio app/"
+            exit 1
+          }
           ls -la app
 
-          echo "=== INGEST ==="
+          echo "========================================"
+          echo "INGEST"
+          echo "========================================"
+          test -d ingest || {
+            echo "ERROR: no existe el directorio ingest/"
+            exit 1
+          }
           ls -la ingest
 
-          echo "=== PYTHON ==="
+          echo "========================================"
+          echo "BUSCANDO common.py"
+          echo "========================================"
+          find . -name "common.py" -type f -print
+
+          echo "========================================"
+          echo "PYTHON"
+          echo "========================================"
           python --version
 
-          echo "=== PLAYWRIGHT ==="
+          echo "========================================"
+          echo "PLAYWRIGHT"
+          echo "========================================"
           python -m playwright --version
 
       - name: Verificar import de common
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          python -c "import sys; sys.path.insert(0, 'app'); import common; print('OK: common.py cargado desde:', common.__file__)"
+          test -f app/common.py || {
+            echo "ERROR: app/common.py no existe"
+            exit 1
+          }
+
+          python -c "import sys; sys.path.insert(0, '${{ github.workspace }}/app'); import common; print('OK: common.py cargado desde:', common.__file__)"
 
       - name: Ejecutar ingesta BID
         env:
