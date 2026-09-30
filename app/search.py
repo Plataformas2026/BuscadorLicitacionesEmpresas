@@ -124,7 +124,7 @@ def listar_guardados(supabase: Client) -> list:
 # Última revisión por fuente (persistencia)
 # ------------------------------------------------------------------
 TABLA_REVISIONES = "revisiones_fuentes"
-FUENTE_REVISION_BID = "Banco Interamericano de Desarrollo"
+FUENTE_REVISION_BID = "BID"
 
 
 def obtener_ultima_revision(supabase: Client, fuente: str):
