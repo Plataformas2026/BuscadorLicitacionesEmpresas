@@ -357,7 +357,7 @@ def _seccion_ultima_revision_bid(supabase: Client):
     updated_at = (revision or {}).get("updated_at") or "sin-datos"
 
     with st.container(border=True):
-        st.markdown("#### Última revisión: Banco Interamericano de Desarrollo")
+       # st.markdown("#### Última revisión: Banco Interamericano de Desarrollo")
 
         # Mensaje de confirmación tras guardar (sobrevive al st.rerun()).
         if st.session_state.pop("revision_bid_guardada", False):
