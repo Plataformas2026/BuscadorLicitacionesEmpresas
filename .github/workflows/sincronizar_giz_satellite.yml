@@ -2,7 +2,7 @@ name: Sincronizar Licitaciones (GIZ Satellite)
 
 on:
   schedule:
-    - cron: '0 10 * * *'   # todos los dias a las 10:00 UTC
+    - cron: '0 5 * * *'   # todos los dias a las 10:00 UTC
   workflow_dispatch:
 
 jobs:
