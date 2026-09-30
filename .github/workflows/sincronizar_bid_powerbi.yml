@@ -41,7 +41,7 @@ jobs:
           echo "APP"
           echo "========================================"
           test -d app || {
-            echo "ERROR: no existe el directorio app/"
+            echo "ERROR: no existe app/"
             exit 1
           }
           ls -la app
@@ -50,15 +50,21 @@ jobs:
           echo "INGEST"
           echo "========================================"
           test -d ingest || {
-            echo "ERROR: no existe el directorio ingest/"
+            echo "ERROR: no existe ingest/"
             exit 1
           }
           ls -la ingest
 
           echo "========================================"
-          echo "BUSCANDO common.py"
+          echo "COMMON"
           echo "========================================"
-          find . -name "common.py" -type f -print
+          test -f ingest/common.py || {
+            echo "ERROR: no existe ingest/common.py"
+            exit 1
+          }
+
+          echo "OK: ingest/common.py existe"
+          ls -l ingest/common.py
 
           echo "========================================"
           echo "PYTHON"
@@ -72,19 +78,41 @@ jobs:
 
       - name: Verificar import de common
         env:
-          PYTHONPATH: ${{ github.workspace }}
+          PYTHONPATH: ${{ github.workspace }}/ingest
         run: |
-          test -f app/common.py || {
-            echo "ERROR: app/common.py no existe"
-            exit 1
-          }
+          python -c "import common; print('OK: common.py cargado desde:', common.__file__)"
 
-          python -c "import sys; sys.path.insert(0, '${{ github.workspace }}/app'); import common; print('OK: common.py cargado desde:', common.__file__)"
+      - name: Verificar funciones de common
+        env:
+          PYTHONPATH: ${{ github.workspace }}/ingest
+        run: |
+          python - <<'PY'
+          import common
+
+          funciones = [
+              "generar_embedding",
+              "obtener_cliente_supabase",
+              "obtener_registros_existentes",
+              "subir_en_lotes",
+          ]
+
+          print("common.py:", common.__file__)
+
+          for nombre in funciones:
+              if not hasattr(common, nombre):
+                  raise RuntimeError(
+                      f"Falta la función {nombre} en common.py"
+                  )
+
+              print(f"OK: {nombre}")
+
+          print("Todas las funciones de common.py están disponibles.")
+          PY
 
       - name: Ejecutar ingesta BID
         env:
           PYTHONUNBUFFERED: "1"
-          PYTHONPATH: ${{ github.workspace }}
+          PYTHONPATH: ${{ github.workspace }}/ingest
 
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
