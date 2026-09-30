@@ -2,7 +2,7 @@ name: Sincronizar Licitaciones (UGPE)
 
 on:
   schedule:
-    - cron: '15 7 * * *'    # Todos los días a las 07:15 UTC (después de CAF)
+    - cron: '15 2 * * *'    # Todos los días a las 07:15 UTC (después de CAF)
   workflow_dispatch:
 
 jobs:
