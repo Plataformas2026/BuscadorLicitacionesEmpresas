@@ -449,7 +449,7 @@ def _seccion_ultima_revision_bid(supabase: Client):
             st.success("Revisión guardada correctamente.")
 
         if revision:
-            st.caption(f"Última actualización BID: {updated_at[:16].replace('T', ' ')} UTC")
+            st.caption(f"Última actualización BID https://www.iadb.org/es/como-trabajar-juntos/adquisiciones/adquisiciones-para-proyectos/avisos-de-adquisiciones : {updated_at[:16].replace('T', ' ')} UTC")
         else:
             st.caption("Todavía no hay ninguna revisión guardada.")
 
