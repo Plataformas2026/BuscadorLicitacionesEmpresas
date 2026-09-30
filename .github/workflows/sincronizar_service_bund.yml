@@ -2,7 +2,7 @@ name: Sincronizar Licitaciones (service.bund.de)
 
 on:
   schedule:
-    - cron: '30 9 * * *'   # todos los dias a las 09:30 UTC
+    - cron: '30 5 * * *'   # todos los dias a las 09:30 UTC
   workflow_dispatch:
 
 jobs:
