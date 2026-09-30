@@ -431,4 +431,7 @@ def render_tab1(supabase: Client, encoder: SentenceTransformer):
         _vista_guardados(supabase)
     else:
         _vista_buscar(supabase, encoder)
-        _seccion_ultima_revision_bid(supabase)
+        #_seccion_ultima_revision_bid(supabase)
+        col_revision, col_vacio = st.columns([35, 65])
+        with col_revision:
+          _seccion_ultima_revision_bid(supabase)
