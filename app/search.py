@@ -120,7 +120,35 @@ def listar_guardados(supabase: Client) -> list:
         .execute()
     )
     return respuesta.data or []
+# ------------------------------------------------------------------
+# Última revisión por fuente (persistencia)
+# ------------------------------------------------------------------
+TABLA_REVISIONES = "revisiones_fuentes"
+FUENTE_REVISION_BID = "Banco Interamericano de Desarrollo"
 
+
+def obtener_ultima_revision(supabase: Client, fuente: str):
+    """Devuelve el dict de la última revisión guardada para `fuente`, o None si no hay."""
+    respuesta = (
+        supabase.table(TABLA_REVISIONES)
+        .select("fuente_origen, titulo_licitacion, fecha_publicacion, updated_at")
+        .eq("fuente_origen", fuente)
+        .limit(1)
+        .execute()
+    )
+    filas = respuesta.data or []
+    return filas[0] if filas else None
+
+
+def guardar_ultima_revision(supabase: Client, fuente: str, titulo: str, fecha: str):
+    """Inserta o actualiza (upsert) la última revisión de `fuente`."""
+    datos = {
+        "fuente_origen": fuente,
+        "titulo_licitacion": titulo.strip(),
+        "fecha_publicacion": fecha.strip() or None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    supabase.table(TABLA_REVISIONES).upsert(datos, on_conflict="fuente_origen").execute()
 
 # ------------------------------------------------------------------
 # Interfaz
@@ -317,7 +345,57 @@ def _vista_guardados(supabase: Client):
         return
     _tabla_licitaciones(supabase, guardados, contexto="favoritos")
 
+def _seccion_ultima_revision_bid(supabase: Client):
+    try:
+        revision = obtener_ultima_revision(supabase, FUENTE_REVISION_BID)
+    except Exception as e:
+        st.warning(f"No se pudo leer la última revisión del BID: {e}")
+        return
 
+    titulo_guardado = (revision or {}).get("titulo_licitacion") or ""
+    fecha_guardada = (revision or {}).get("fecha_publicacion") or ""
+    updated_at = (revision or {}).get("updated_at") or "sin-datos"
+
+    with st.container(border=True):
+        st.markdown("#### Última revisión: Banco Interamericano de Desarrollo")
+
+        # Mensaje de confirmación tras guardar (sobrevive al st.rerun()).
+        if st.session_state.pop("revision_bid_guardada", False):
+            st.success("Revisión guardada correctamente.")
+
+        if revision:
+            st.caption(f"Última actualización: {updated_at[:16].replace('T', ' ')} UTC")
+        else:
+            st.caption("Todavía no hay ninguna revisión guardada.")
+
+        # `updated_at` va en la key de los widgets: si otra persona guarda un
+        # cambio, el valor mostrado se refresca en vez de quedarse con el
+        # texto antiguo que Streamlit conserva por key.
+        with st.form(key="form_revision_bid"):
+            titulo = st.text_input(
+                "Título de licitación",
+                value=titulo_guardado,
+                key=f"revision_bid_titulo_{updated_at}",
+            )
+            fecha = st.text_input(
+                "Fecha de publicación",
+                value=fecha_guardada,
+                placeholder="ej. September 25, 2026",
+                key=f"revision_bid_fecha_{updated_at}",
+            )
+            guardar = st.form_submit_button("Guardar / Actualizar revisión", use_container_width=True)
+
+        if guardar:
+            if not titulo.strip():
+                st.error("Indica el título de la licitación antes de guardar.")
+            else:
+                try:
+                    guardar_ultima_revision(supabase, FUENTE_REVISION_BID, titulo, fecha)
+                except Exception as e:
+                    st.error(f"No se pudo guardar la revisión: {e}")
+                else:
+                    st.session_state["revision_bid_guardada"] = True
+                    st.rerun()
 def render_tab1(supabase: Client, encoder: SentenceTransformer):
     st.subheader("Buscador de Licitaciones")
     # st.caption("Fuente activa en esta primera versión: Banco Africano de Desarrollo (AfDB).")
@@ -336,3 +414,4 @@ def render_tab1(supabase: Client, encoder: SentenceTransformer):
         _vista_guardados(supabase)
     else:
         _vista_buscar(supabase, encoder)
+        _seccion_ultima_revision_bid(supabase)
