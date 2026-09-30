@@ -252,17 +252,34 @@ def _vista_buscar(supabase: Client, encoder: SentenceTransformer):
             placeholder="ej. perforación de pozos de agua, construcción de carreteras...",
             key="tab1_consulta_texto",
         )
+
     with col_fuente:
-        filtro_fuente = st.multiselect("Fuente", FUENTES_LICITACIONES, key="tab1_filtro_fuente")
-    with col_lugar:
-        lugares_disponibles = obtener_lugares_disponibles(supabase)
-        filtro_lugar = st.multiselect("Lugar", lugares_disponibles, key="tab1_filtro_lugar")
-    with col_cierre:
-        filtro_fecha_cierre = st.date_input(
-            "Fecha de cierre (a partir de)", value=date.today(), key="tab1_filtro_fecha_cierre"
+        filtro_fuente = st.multiselect(
+            "Fuente",
+            FUENTES_LICITACIONES,
+            key="tab1_filtro_fuente",
         )
 
-    buscar_click = st.button("Buscar licitaciones", key="tab1_buscar", use_container_width=True)
+    with col_lugar:
+        lugares_disponibles = obtener_lugares_disponibles(supabase)
+        filtro_lugar = st.multiselect(
+            "Lugar",
+            lugares_disponibles,
+            key="tab1_filtro_lugar",
+        )
+
+    with col_cierre:
+        filtro_fecha_cierre = st.date_input(
+            "Fecha de cierre (a partir)",
+            value=date.today(),
+            key="tab1_filtro_fecha_cierre",
+        )
+
+    buscar_click = st.button(
+        "Buscar licitaciones",
+        key="tab1_buscar",
+        use_container_width=True,
+    )
 
     if "tab1_resultados" not in st.session_state:
         st.session_state.tab1_resultados = None
@@ -270,56 +287,124 @@ def _vista_buscar(supabase: Client, encoder: SentenceTransformer):
     if buscar_click:
         with st.spinner("Buscando..."):
             if consulta_texto.strip():
-                resultados = buscar_semantica(supabase, encoder, consulta_texto)
+                resultados = buscar_semantica(
+                    supabase,
+                    encoder,
+                    consulta_texto,
+                )
             else:
                 resultados = listar_todas(supabase)
 
             # Las marcadas como "Visto" nunca aparecen en la vista principal.
-            resultados = [r for r in resultados if not r.get("visto")]
+            resultados = [
+                r for r in resultados
+                if not r.get("visto")
+            ]
 
             if filtro_fuente:
-                resultados = [r for r in resultados if r.get("fuente_origen") in filtro_fuente]
+                resultados = [
+                    r for r in resultados
+                    if r.get("fuente_origen") in filtro_fuente
+                ]
+
             if filtro_lugar:
                 resultados_filtrados = []
+
                 for r in resultados:
                     paises_licitacion = set()
+
                     if r.get("pais"):
                         paises_licitacion.add(r.get("pais").strip())
+
                     lista_paises = r.get("paises")
+
                     if isinstance(lista_paises, list):
                         for p in lista_paises:
                             if p and isinstance(p, str):
                                 paises_licitacion.add(p.strip())
-                    if any(f in paises_licitacion for f in filtro_lugar):
+
+                    if any(
+                        f in paises_licitacion
+                        for f in filtro_lugar
+                    ):
                         resultados_filtrados.append(r)
+
                 resultados = resultados_filtrados
 
             fecha_minima = filtro_fecha_cierre.isoformat()
+
             resultados = [
                 r for r in resultados
-                if not r.get("fecha_limite") or r["fecha_limite"] >= fecha_minima
+                if not r.get("fecha_limite")
+                or r["fecha_limite"] >= fecha_minima
             ]
 
             st.session_state.tab1_resultados = resultados
 
     resultados = st.session_state.tab1_resultados
+
     if resultados is None:
-        st.info("Define tu búsqueda y filtros, y pulsa **Buscar licitaciones**.")
-        return
+        st.info(
+            "Define tu búsqueda y filtros, y pulsa **Buscar licitaciones**."
+        )
+        return False
+
     if not resultados:
-        st.warning("No se han encontrado licitaciones que coincidan con la búsqueda y los filtros indicados.")
-        return
+        st.warning(
+            "No se han encontrado licitaciones que coincidan "
+            "con la búsqueda y los filtros indicados."
+        )
 
-    visibles = [r for r in resultados if not r.get("visto")]
+        # Aunque no haya resultados, mantenemos la lógica de la
+        # última revisión independiente de la tabla de licitaciones.
+        mostrar_revision = (
+            not consulta_texto.strip()
+            and filtro_fuente == [FUENTE_REVISION_BID]
+        )
+
+        return mostrar_revision
+
+    visibles = [
+        r for r in resultados
+        if not r.get("visto")
+    ]
+
     if not visibles:
-        st.warning("No se han encontrado licitaciones que coincidan con la búsqueda y los filtros indicados.")
-        return
+        st.warning(
+            "No se han encontrado licitaciones que coincidan "
+            "con la búsqueda y los filtros indicados."
+        )
 
-    st.success(f"Se han encontrado {len(visibles)} licitaciones.")
-    # Se filtra por `visto` en cada render (no solo al pulsar "Buscar") para
-    # que marcar "Visto" la haga desaparecer al instante, sin esperar a una
-    # nueva búsqueda.
-    _tabla_licitaciones(supabase, visibles, contexto="buscar")
+        mostrar_revision = (
+            not consulta_texto.strip()
+            and filtro_fuente == [FUENTE_REVISION_BID]
+        )
+
+        return mostrar_revision
+
+    st.success(
+        f"Se han encontrado {len(visibles)} licitaciones."
+    )
+
+    _tabla_licitaciones(
+        supabase,
+        visibles,
+        contexto="buscar",
+    )
+
+    # La última revisión solo aparece:
+    # 1. Sin búsqueda de texto.
+    # 2. Sin fuente seleccionada, o seleccionando exclusivamente BID.
+    mostrar_revision = (
+        not consulta_texto.strip()
+        and (
+            not filtro_fuente
+            or filtro_fuente == [FUENTE_REVISION_BID]
+        )
+    )
+
+    return mostrar_revision
+
 
 
 def _vista_vistos(supabase: Client):
@@ -414,8 +499,9 @@ def render_tab1(supabase: Client, encoder: SentenceTransformer):
     elif vista == "Favoritos":
         _vista_guardados(supabase)
     else:
-        _vista_buscar(supabase, encoder)
-        #_seccion_ultima_revision_bid(supabase)
-        col_revision, col_vacio = st.columns([35, 65])
-        with col_revision:
-          _seccion_ultima_revision_bid(supabase)
+        mostrar_revision = _vista_buscar(supabase, encoder)
+        if mostrar_revision:
+          col_revision, col_vacio = st.columns([35, 65])
+          with col_revision:
+            _seccion_ultima_revision_bid(supabase)
+
