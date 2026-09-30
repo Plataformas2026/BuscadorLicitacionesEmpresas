@@ -472,14 +472,21 @@ def extraer_licitaciones_playwright() -> list:
 
     return list(registros_por_url.values())
 
-
 def construir_registro(item: dict) -> dict:
-    # Prioridad: datos de la FICHA (más fiables, ver obtener_datos_ficha)
-    # sobre los de la tabla del listado.
-    fecha_publicacion = item.get("fecha_publicacion_detalle") or parsear_fecha_bcie(item.get("fecha_pub_raw"))
-    fecha_limite = item.get("fecha_limite_detalle") or parsear_fecha_bcie(item.get("fecha_lim_raw"))
+    # Prioridad: 
+    # 1. Fecha extraída de la ficha detallada
+    # 2. Fecha leída directamente de la celda 3 de la tabla (fecha_pub_raw)
+    fecha_publicacion = (
+        item.get("fecha_publicacion_detalle") 
+        or parsear_fecha_bcie(item.get("fecha_pub_raw"))
+    )
+    
+    fecha_limite = (
+        item.get("fecha_limite_detalle") 
+        or parsear_fecha_bcie(item.get("fecha_lim_raw"))
+    )
+    
     descripcion = item.get("descripcion_detalle")
-
     # Red de seguridad: si la fecha limite no se pudo parsear pero si hay
     # un numero reconocible de "dias restantes", se calcula a partir de
     # hoy -- ver aviso de fiabilidad en el docstring.
