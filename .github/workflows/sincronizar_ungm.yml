@@ -2,7 +2,7 @@ name: Sincronizar Licitaciones (UNGM)
 
 on:
   schedule:
-    - cron: '30 7 * * *'   # todos los dias a las 07:30 UTC
+    - cron: '30 3 * * *'   # todos los dias a las 07:30 UTC
   workflow_dispatch:
 
 jobs:
