@@ -2,7 +2,7 @@ name: Sincronizar Licitaciones (BID)
 
 on:
   schedule:
-    - cron: '30 6 * * *'   # todos los dias a las 06:30 UTC (30 min despues del AfDB)
+    - cron: '45 6 * * *'   # todos los dias a las 06:30 UTC (30 min despues del AfDB)
   workflow_dispatch:
 
 jobs:
