@@ -68,6 +68,7 @@ Novedades de la v2 (categoría de la licitación + nuevos datos del Excel):
     "España (Tenerife, La Gomera)"): se buscan por palabra completa y se
     ignoran fragmentos demasiado cortos para dar falsas coincidencias.
 """
+
 import re
 import unicodedata
 
@@ -78,13 +79,7 @@ from sentence_transformers import SentenceTransformer
 from supabase import Client
 
 from search import buscar_semantica
-from ia_explicacion import (
-    generar_justificacion_ia,
-    groq_configurado,
-    justificacion_en_cache,
-    CACHE_JUSTIFICACIONES,
-    _clave_cache,
-)
+from ia_explicacion import generar_justificacion_ia, groq_configurado, justificacion_en_cache
 
 PATRON_URL = re.compile(r"^https?://", re.IGNORECASE)
 
