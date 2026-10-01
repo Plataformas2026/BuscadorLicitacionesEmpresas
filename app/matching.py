@@ -78,7 +78,13 @@ from sentence_transformers import SentenceTransformer
 from supabase import Client
 
 from search import buscar_semantica
-from ia_explicacion import generar_justificacion_ia, groq_configurado, justificacion_en_cache
+from ia_explicacion import (
+    generar_justificacion_ia,
+    groq_configurado,
+    justificacion_en_cache,
+    CACHE_JUSTIFICACIONES,
+    _clave_cache,
+)
 
 PATRON_URL = re.compile(r"^https?://", re.IGNORECASE)
 
@@ -1061,17 +1067,7 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
         on_change=_resetear_seleccion,
     )
 
-    col_buscar, col_reintentar = st.columns([3, 1])
-    with col_buscar:
-        buscar_clicked = st.button("Buscar licitación", key="tab2_buscar_licitacion", use_container_width=True)
-    with col_reintentar:
-        reintentar_clicked = st.button("🔄 Reintentar", key="tab2_reintentar", use_container_width=True)
-
-    if reintentar_clicked:
-        _resetear_seleccion()
-        st.rerun()
-
-    if buscar_clicked:
+    if st.button("Buscar licitación", key="tab2_buscar_licitacion", use_container_width=True):
         with st.spinner("Buscando la licitación..."):
             st.session_state.tab2_candidatos = localizar_licitacion(supabase, encoder, entrada)
             st.session_state.tab2_licitacion_elegida = None
@@ -1174,21 +1170,30 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
                         for motivo in motivos:
                             st.markdown(f"- {motivo}")
 
-                        # Justificación en lenguaje natural (capa tipo RAG sobre los
-                        # motivos deterministas de arriba, ver ia_explicacion.py) --
-                        # solo si hay GROQ_API_KEY configurada, y siempre bajo demanda
-                        # (nunca automática para las ~30 coincidencias a la vez: hay
-                        # que respetar el límite de la capa gratuita de Groq).
+                        # Justificación en lenguaje natural
                         if groq_configurado():
                             ya_en_cache, texto_en_cache = justificacion_en_cache(licitacion, empresa)
                             if ya_en_cache:
                                 if texto_en_cache:
                                     st.info(f"**Justificación con IA:** {texto_en_cache}")
                                 else:
-                                    st.caption(
-                                        "No se ha podido generar la justificación con IA "
-                                        "(límite de peticiones gratuitas o problema temporal del servicio)."
-                                    )
+                                    col_msg, col_reintentar = st.columns([3, 1])
+                                    with col_msg:
+                                        st.caption(
+                                            "No se ha podido generar la justificación con IA "
+                                            "(límite de peticiones gratuitas o problema temporal del servicio)."
+                                        )
+                                    with col_reintentar:
+                                        if st.button(
+                                            "🔄 Reintentar respuesta IA",
+                                            key=f"tab2_btn_reintentar_ia_{empresa['numero_interno']}",
+                                            use_container_width=True,
+                                        ):
+                                            clave = _clave_cache(licitacion, empresa)
+                                            CACHE_JUSTIFICACIONES.pop(clave, None)
+                                            with st.spinner("Reintentando petición a GROQ..."):
+                                                generar_justificacion_ia(licitacion_ia, empresa, motivos)
+                                            st.rerun()
                             elif st.button(
                                 "Generar justificación con IA",
                                 key=f"tab2_btn_ia_{empresa['numero_interno']}",
