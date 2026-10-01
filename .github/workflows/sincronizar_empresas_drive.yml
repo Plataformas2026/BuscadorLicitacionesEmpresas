@@ -2,21 +2,33 @@ name: Sincronizar Empresas (Google Drive)
 
 on:
   schedule:
-    # Cada 30 minutos. GitHub Actions no ofrece triggers por webhook de
-    # Drive en el plan gratuito (habría que exponer un endpoint HTTPS
-    # propio para recibir notificaciones push de Google), así que la
-    # forma gratuita de "detectar un cambio" es comprobarlo
-    # periódicamente: el script solo hace trabajo real (descargar,
-    # regenerar embeddings, subir a Supabase) cuando el modifiedTime del
-    # fichero en Drive ha cambiado -- si no, la ejecución es casi
-    # instantánea. Ajusta la frecuencia si quieres detectarlo antes/con
-    # menos consumo de minutos.
-    - cron:  '0 0 * * *'
-  workflow_dispatch:   # para forzar una sincronización inmediata a mano
+    # Una vez al día (00:00 UTC). El script solo hace trabajo real (descargar,
+    # regenerar embeddings, subir a Supabase) cuando cambia el modifiedTime del
+    # Excel en Drive o cuando cambia la lógica de ingesta (VERSION_INGESTA en
+    # ingest/sync_empresas_drive.py); si no, la ejecución es casi instantánea.
+    # GitHub Actions no ofrece triggers por webhook de Drive en el plan
+    # gratuito, así que "detectar un cambio" = comprobarlo periódicamente.
+    # Ajusta el cron si quieres detectarlo antes (p. ej. '*/30 * * * *').
+    - cron: '0 0 * * *'
+  workflow_dispatch:   # sincronización inmediata a mano
+    inputs:
+      forzar:
+        description: 'Forzar resincronización completa aunque el Excel no haya cambiado'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Nunca dos sincronizaciones a la vez: ambas borran y recargan las mismas tablas.
+concurrency:
+  group: sincronizar-empresas
+  cancel-in-progress: false
 
 jobs:
   sincronizar:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout del repositorio
@@ -33,11 +45,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # El modelo de embeddings (intfloat/multilingual-e5-small, el mismo que
+      # usa la app) se descarga de Hugging Face la primera vez; con esta caché
+      # no se vuelve a bajar en cada ejecución.
+      - name: Caché del modelo de embeddings
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-multilingual-e5-small-v1
+
       - name: Ejecutar sincronización de empresas
         working-directory: ingest
         env:
+          PYTHONUNBUFFERED: "1"
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_DRIVE_FILE_ID: ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
+          # Vacío en las ejecuciones programadas; "true"/"false" al lanzarlo a mano.
+          FORZAR_SINCRONIZACION: ${{ github.event.inputs.forzar }}
         run: python sync_empresas_drive.py
