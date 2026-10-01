@@ -79,7 +79,12 @@ from sentence_transformers import SentenceTransformer
 from supabase import Client
 
 from search import buscar_semantica
-from ia_explicacion import generar_justificacion_ia, groq_configurado, justificacion_en_cache
+from ia_explicacion import (
+    generar_justificacion_ia,
+    groq_configurado,
+    justificacion_en_cache,
+    _clave_cache,  # Esta función privada ya existe al final de tu ia_explicacion.py
+)
 
 PATRON_URL = re.compile(r"^https?://", re.IGNORECASE)
 
@@ -1172,23 +1177,28 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
                                 if texto_en_cache:
                                     st.info(f"**Justificación con IA:** {texto_en_cache}")
                                 else:
-                                    col_msg, col_reintentar = st.columns([3, 1])
-                                    with col_msg:
-                                        st.caption(
-                                            "No se ha podido generar la justificación con IA "
-                                            "(límite de peticiones gratuitas o problema temporal del servicio)."
-                                        )
-                                    with col_reintentar:
-                                        if st.button(
-                                            "🔄 Reintentar respuesta IA",
-                                            key=f"tab2_btn_reintentar_ia_{empresa['numero_interno']}",
-                                            use_container_width=True,
-                                        ):
-                                            clave = _clave_cache(licitacion, empresa)
-                                            CACHE_JUSTIFICACIONES.pop(clave, None)
-                                            with st.spinner("Reintentando petición a GROQ..."):
-                                                generar_justificacion_ia(licitacion_ia, empresa, motivos)
-                                            st.rerun()
+                                    st.caption(
+                                        "No se ha podido generar la justificación con IA "
+                                        "(límite de peticiones gratuitas o problema temporal del servicio)."
+                                    )
+                                
+                                # Botón para reintentar / regenerar
+                                if st.button(
+                                    "🔄 Reintentar / Regenerar respuesta IA",
+                                    key=f"tab2_btn_reintentar_ia_{empresa['numero_interno']}",
+                                    use_container_width=True,
+                                ):
+                                    # Modificamos temporalmente el valor en la sesión
+                                    # para que generar_justificacion_ia() no devuelva el valor guardado
+                                    clave = _clave_cache(licitacion, empresa)
+                                    if "cache_justificacion_ia" in st.session_state and clave in st.session_state.cache_justificacion_ia:
+                                        # Asignamos None momentáneamente
+                                        st.session_state.cache_justificacion_ia[clave] = None
+
+                                    with st.spinner("Enviando petición a GROQ..."):
+                                        generar_justificacion_ia(licitacion_ia, empresa, motivos)
+                                    st.rerun()
+
                             elif st.button(
                                 "Generar justificación con IA",
                                 key=f"tab2_btn_ia_{empresa['numero_interno']}",
