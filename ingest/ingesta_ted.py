@@ -99,12 +99,7 @@ def _valor_multiidioma(valor):
 def _limpiar_prefijo_titulo(titulo: str) -> str:
     if not titulo:
         return None
-
-    partes = re.split(r"\s+[–-]\s*|\s*–\s*", titulo)
-    texto = partes[-1].strip() if partes else titulo.strip()
-    texto = re.sub(r"^\d{7,8}[-–]\s*", "", texto)
-
-    return texto.strip() or None
+    return titulo.strip() or None
 
 
 def parsear_fecha_ted(valor):
