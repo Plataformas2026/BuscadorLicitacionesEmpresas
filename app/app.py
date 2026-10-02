@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 from pathlib import Path
 
@@ -419,4 +418,3 @@ with tab3:
         supabase,
         encoder,
     )
-```
