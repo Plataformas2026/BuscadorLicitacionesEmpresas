@@ -19,196 +19,44 @@ st.set_page_config(
 # LOGIN SENCILLO
 # ============================================================
 
-def login():
-    if st.session_state.get("logueado"):
-        return True
+# ============================================================
+# CERRAR SESIÓN — ESQUINA SUPERIOR DERECHA
+# ============================================================
 
-    # ========================================================
-    # ESTILOS SOLO PARA LA PANTALLA DE LOGIN
-    # ========================================================
+st.markdown(
+    """
+    <style>
+    .logout-container {
+        position: fixed;
+        top: 15px;
+        right: 20px;
+        z-index: 999999;
+    }
 
-    st.markdown(
-        """
-        <style>
+    .logout-container button {
+        border-radius: 8px;
+        border: 1px solid #d0d5dd;
+        background: white;
+        color: #344054;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 8px 16px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-        /* Fondo del login */
-        .stApp {
-            background: linear-gradient(
-                135deg,
-                #f8fafc 0%,
-                #eef2ff 100%
-            );
-        }
+st.markdown(
+    '<div class="logout-container">',
+    unsafe_allow_html=True,
+)
 
-        /* Ocultar elementos de Streamlit */
-        #MainMenu {
-            visibility: hidden;
-        }
+if st.button("Cerrar sesión"):
+    st.session_state["logueado"] = False
+    st.rerun()
 
-        footer {
-            visibility: hidden;
-        }
-
-        header {
-            visibility: hidden;
-        }
-
-        /* Contenedor principal */
-        .login-wrapper {
-            max-width: 420px;
-            margin: 100px auto 0 auto;
-        }
-
-        /* Logo */
-        .login-logo {
-            text-align: center;
-            font-size: 52px;
-            margin-bottom: 10px;
-        }
-
-        /* Título */
-        .login-title {
-            text-align: center;
-            font-size: 30px;
-            font-weight: 700;
-            color: #172033;
-            margin-bottom: 8px;
-        }
-
-        /* Subtítulo */
-        .login-subtitle {
-            text-align: center;
-            color: #667085;
-            font-size: 15px;
-            margin-bottom: 28px;
-        }
-
-        /* Tarjeta */
-        .login-card {
-            background: white;
-            padding: 32px;
-            border-radius: 16px;
-            border: 1px solid #e4e7ec;
-            box-shadow: 0 12px 35px rgba(16, 24, 40, 0.08);
-        }
-
-        /* Etiquetas */
-        .login-card label {
-            font-weight: 600;
-            color: #344054;
-        }
-
-        /* Inputs */
-        .login-card input {
-            border-radius: 8px !important;
-        }
-
-        /* Botón */
-        .login-button button {
-            width: 100%;
-            border-radius: 8px;
-            background: #315efb;
-            color: white;
-            border: none;
-            font-weight: 600;
-            min-height: 44px;
-            margin-top: 10px;
-        }
-
-        .login-button button:hover {
-            background: #2449d8;
-            color: white;
-        }
-
-        /* Texto inferior */
-        .login-footer {
-            text-align: center;
-            color: #98a2b3;
-            font-size: 12px;
-            margin-top: 20px;
-        }
-
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # ========================================================
-    # LOGIN
-    # ========================================================
-
-    st.markdown(
-        """
-        <div class="login-wrapper">
-
-            <div class="login-logo">
-                📊
-            </div>
-
-            <div class="login-title">
-                Licitaciones & Empresas
-            </div>
-
-            <div class="login-subtitle">
-                Accede a tu plataforma
-            </div>
-
-            <div class="login-card">
-        """,
-        unsafe_allow_html=True,
-    )
-
-    usuario = st.text_input(
-        "Usuario",
-        placeholder="Introduce tu usuario",
-    )
-
-    password = st.text_input(
-        "Contraseña",
-        type="password",
-        placeholder="Introduce tu contraseña",
-    )
-
-    st.markdown(
-        '<div class="login-button">',
-        unsafe_allow_html=True,
-    )
-
-    entrar = st.button(
-        "Iniciar sesión",
-        use_container_width=True,
-    )
-
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-    if entrar:
-        if (
-            usuario == st.secrets["LOGIN_USER"]
-            and password == st.secrets["LOGIN_PASSWORD"]
-        ):
-            st.session_state["logueado"] = True
-            st.rerun()
-        else:
-            st.error("Usuario o contraseña incorrectos.")
-
-    st.markdown(
-        """
-            </div>
-
-            <div class="login-footer">
-                Acceso privado
-            </div>
-
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    return False
-
+st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================
 # COMPROBAR LOGIN
