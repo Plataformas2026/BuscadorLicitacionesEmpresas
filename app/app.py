@@ -64,18 +64,19 @@ def login():
     # ========================================================
     # LOGO
     # ========================================================
+    import base64
+
+    with open(logo_path, "rb") as image_file:
+        encoded_logo = base64.b64encode(image_file.read()).decode()
 
     col1, col2, col3 = st.columns([1, 2, 1])
 
     with col2:
-        # Creamos sub-columnas dentro de col2 para empujar la imagen al centro exacto
-        sub_col1, sub_col2, sub_col3 = st.columns([1, 2, 1])
-        with sub_col2:
-            st.image(
-                str(logo_path),
-                width=250,
-            )
-
+        st.markdown(
+            f"""
+        """,
+        unsafe_allow_html=True,
+    )
     # ========================================================
     # RECUADRO DEL LOGIN
     # ========================================================
