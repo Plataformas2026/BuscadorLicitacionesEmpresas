@@ -44,11 +44,31 @@ def login():
     st.markdown(
         """
         <style>
-
+    
+        /* ==================================================
+           FRANJA MORADA SUPERIOR
+           ================================================== */
+    
+        header[data-testid="stHeader"] {
+            background-color: #6C2BD9 !important;
+            height: 60px !important;
+        }
+    
+        header[data-testid="stHeader"]::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 60px;
+            background-color: #6C2BD9;
+        }
+    
+    
         /* ==================================================
            LOGO FIJO ABAJO A LA IZQUIERDA
            ================================================== */
-
+    
         div[data-testid="stImage"] {
             position: fixed !important;
             left: 25px !important;
@@ -56,22 +76,22 @@ def login():
             z-index: 9999 !important;
             width: auto !important;
         }
-
-
+    
+    
         /* ==================================================
            BORDE DEL RECUADRO DEL LOGIN
            ================================================== */
-
+    
         div[data-testid="stVerticalBlockBorderWrapper"] {
             border: 1.5px solid #315EFB !important;
             border-radius: 12px !important;
         }
-
-
+    
+    
         /* ==================================================
            BOTÓN INICIAR SESIÓN
            ================================================== */
-
+    
         .login-button button {
             background-color: #315EFB;
             color: white;
@@ -80,12 +100,12 @@ def login():
             font-weight: 600;
             min-height: 45px;
         }
-
+    
         .login-button button:hover {
             background-color: #2449D8;
             color: white;
         }
-
+    
         </style>
         """,
         unsafe_allow_html=True,
