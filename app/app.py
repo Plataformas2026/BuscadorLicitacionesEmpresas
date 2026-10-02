@@ -99,7 +99,7 @@ def login():
     # LOGO
     # ========================================================
 
-    col1, col2, col3 = st.columns([1.6, 2, 0.4])
+    col1, col2, col3 = st.columns([1, 2, 1])
 
     with col2:
         st.image(
@@ -114,6 +114,11 @@ def login():
     col1, col2, col3 = st.columns([1, 2, 1])
 
     with col2:
+         with col2:
+            st.image(
+                str(logo_path),
+                width=250,
+            )
 
         with st.container(border=True):
 
