@@ -15,7 +15,7 @@ HOJAS DEL EXCEL Y TABLAS DESTINO
 - "DOSSIER COMPLETO"          -> tabla `empresas`. Solo se extraen las
                                 columnas indicadas por LETRA en
                                 COLUMNAS_DOSSIER (A, C, D, G, H, I, J, K,
-                                L, M, N, O, P, R, T, U, W, Y, AA..AH).
+                                L, M, N, O, P, R, T, U, W, Y, AA..AI).
 - "REFERENCIAS P BÚSQUEDAS"   -> tabla `empresas_referencias` (histórico
   y "HMS"                       de licitaciones de cada empresa; es lo
                                 que lee la ficha del Directorio). La fila
@@ -95,7 +95,7 @@ CLAVE_VERSION_INGESTA = "empresas_ingesta_version"
 # Súbela cada vez que cambie la LÓGICA de ingesta (columnas extraídas, texto de
 # los embeddings, tablas destino): fuerza una resincronización completa aunque
 # el Excel de Drive no haya cambiado.
-VERSION_INGESTA = "2026-10-01.v2"
+VERSION_INGESTA = "2026-10-02.v3"
 TAMANO_LOTE_SUPABASE = 20
 TAMANO_LOTE_INSERCION = 200
 
@@ -153,6 +153,12 @@ COLUMNAS_DOSSIER = {
     "AF": "palabras_clave_fr",         # PALABRAS CLAVE EN FRANCÉS
     "AG": "palabras_clave_pt",         # PALABRAS CLAVE EN PORTUGUÉS
     "AH": None,                        # (sin cabecera; vacía en el Excel actual)
+    # Nueva en BBDD_Empresas_260928: avisos que deben verse al valorar una empresa
+    # ("ESTÁ INACTIVA", exclusiones sectoriales...). Se guarda en `empresas` y se
+    # muestra en el matching, pero NO entra en el texto de los embeddings (ver
+    # construir_texto_por_idioma): una exclusión como "no elegible: Agua y
+    # Saneamiento" atraería hacia la empresa justo las licitaciones que descarta.
+    "AI": "observaciones_importantes", # OBSERVACIONES IMPORTANTES
 }
 
 # Columnas de `empresas` que dejan de rellenarse (vienen de columnas ocultas
@@ -170,6 +176,7 @@ ANCLAS_CABECERA = {
     "G": "empresa",
     "L": "palabras clave",
     "AE": "palabras clave en ingles",
+    "AI": "observaciones importantes",
 }
 
 MAPEO_REFERENCIAS = {
@@ -514,8 +521,14 @@ def leer_empresas(buffer_excel: io.BytesIO) -> list:
             elif clave:
                 empresa[clave] = _valor_texto(fila, columna)
 
+            valor_json = _valor_json_seguro(fila.get(columna))
+            if clave is None and valor_json is None and str(columna).startswith("Unnamed:"):
+                # Columna sin cabecera y vacía (p. ej. la AH, que queda entre medias desde
+                # que la AI tiene cabecera): pandas la bautiza "Unnamed: N" y no aporta nada
+                # a la ficha. Si algún día trae datos, SÍ se guarda (con ese nombre).
+                continue
             clave_json = columna if columna not in datos_excel else f"{columna} ({letra})"
-            datos_excel[clave_json] = _valor_json_seguro(fila.get(columna))
+            datos_excel[clave_json] = valor_json
 
         empresa["numero_interno"] = numero_interno
         for campo in CAMPOS_EMPRESA_SIN_ORIGEN:
@@ -720,9 +733,19 @@ def _leer_filas_hoja(hoja_wb) -> list:
 
 
 def _detectar_fila_cabecera(filas: list):
+    """
+    Primera fila (entre las primeras LIMITE_FILAS_BUSQUEDA_CABECERA) cuyas celdas
+    con contenido son todas texto y que o bien tiene >= MINIMO_CELDAS_CABECERA,
+    o bien incluye una columna llamada "EMPRESA" (así se detectan también las
+    hojas derivadas de solo 2 columnas -- EMPRESA + TITULO --, como
+    'REFERENCIAS P BÚSQUEDAS (2)', que están justo en el límite de 3 columnas).
+    """
     for numero, valores in filas[:LIMITE_FILAS_BUSQUEDA_CABECERA]:
         celdas = [v for v in valores if v is not None]
-        if len(celdas) >= MINIMO_CELDAS_CABECERA and all(isinstance(v, str) for v in celdas):
+        if not celdas or not all(isinstance(v, str) for v in celdas):
+            continue
+        tiene_columna_empresa = any(_normalizar_cabecera(v) == "empresa" for v in celdas)
+        if len(celdas) >= MINIMO_CELDAS_CABECERA or (len(celdas) >= 2 and tiene_columna_empresa):
             return numero
     return None
 
@@ -896,7 +919,10 @@ def construir_texto_por_idioma(empresa: dict, idioma: str) -> str:
     Se incorporan (respecto a la versión anterior): sector/subsector,
     experiencia y zona/países de interés, ámbito geográfico, clientes
     principales y certificaciones. No entran datos que solo meterían ruido en
-    la similitud (CIF, CNAE, web, contacto, tamaño, importes).
+    la similitud (CIF, CNAE, web, contacto, tamaño, importes) ni las
+    OBSERVACIONES IMPORTANTES (col. AI): suelen ser exclusiones o avisos
+    ("no elegible: Agua y Saneamiento", "está inactiva") que, metidos en el
+    embedding, acercarían la empresa justo a lo que descartan.
     """
     columna_palabras = "palabras_clave" if idioma == "es" else f"palabras_clave_{idioma}"
 
