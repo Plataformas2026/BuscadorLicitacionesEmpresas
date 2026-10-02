@@ -1,29 +1,24 @@
-import time
 import streamlit as st
 from pathlib import Path
+import time
 
-from supabase_client import obtener_cliente
-from embeddings import obtener_encoder
-from estilos import aplicar_estilos
+from db import obtener_cliente, obtener_encoder
+from styles import aplicar_estilos
 
 import directorio
 import matching
 import search
 
 
-# ============================================================
-# CONFIGURACIÓN
-# ============================================================
-
 st.set_page_config(
     page_title="Licitaciones & Empresas",
     page_icon="",
-    layout="wide"
+    layout="wide",
 )
 
 
 # ============================================================
-# ESTADOS DE SESIÓN
+# ESTADO INICIAL
 # ============================================================
 
 if "logueado" not in st.session_state:
@@ -34,291 +29,230 @@ if "cargando_app" not in st.session_state:
 
 
 # ============================================================
-# RUTAS
-# ============================================================
-
-logo_path = Path("assets/logo.png")
-
-
-# ============================================================
-# CARGA DEL MODELO
-# ============================================================
-
-@st.cache_resource
-def cargar_encoder():
-    return obtener_encoder()
-
-
-# ============================================================
 # LOGIN
 # ============================================================
 
 def login():
 
+    if st.session_state.get("logueado", False):
+        return True
+
+    # ========================================================
+    # RUTA DEL LOGO
+    # ========================================================
+
+    logo_path = Path(__file__).resolve().parent.parent / "assets" / "logo.png"
+
+    # ========================================================
+    # ESTILOS SOLO PARA EL LOGIN
+    # ========================================================
+
     st.markdown(
         """
         <style>
 
-        .login-wrapper {
-            min-height: 75vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
+        div[data-testid="stImage"] {
+            position: fixed !important;
+            left: 25px !important;
+            bottom: 20px !important;
+            z-index: 9999 !important;
+            width: auto !important;
         }
 
-        .login-card {
-            width: 420px;
-            padding: 40px;
-            border-radius: 18px;
-            border: 1px solid #E5E7EB;
-            background: white;
-            box-shadow: 0 10px 35px rgba(0,0,0,0.08);
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border: 1.5px solid #315EFB !important;
+            border-radius: 12px !important;
         }
 
-        .login-title {
-            text-align: center;
-            font-size: 28px;
-            font-weight: 700;
-            color: #111827;
-            margin-bottom: 8px;
+        .login-button button {
+            background-color: #315EFB;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            min-height: 45px;
         }
 
-        .login-subtitle {
-            text-align: center;
-            color: #6B7280;
-            margin-bottom: 30px;
+        .login-button button:hover {
+            background-color: #2449D8;
+            color: white;
         }
 
         </style>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
-    st.markdown(
-        """
-        <div class="login-wrapper">
-            <div class="login-card">
-                <div class="login-title">
-                    Licitaciones & Empresas
-                </div>
+    # ========================================================
+    # ESPACIO SUPERIOR
+    # ========================================================
 
-                <div class="login-subtitle">
-                    Accede a tu plataforma
-                </div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+    st.write("")
+    st.write("")
 
-    # Usamos columnas para colocar el formulario centrado
+    # ========================================================
+    # RECUADRO DEL LOGIN
+    # ========================================================
+
     col1, col2, col3 = st.columns([1, 2, 1])
 
     with col2:
 
-        usuario = st.text_input(
-            "Usuario",
-            key="login_usuario"
-        )
+        with st.container(border=True):
 
-        password = st.text_input(
-            "Contraseña",
-            type="password",
-            key="login_password"
-        )
+            st.markdown(
+                """
+                <h1 style="
+                    text-align: center;
+                    font-size: 30px;
+                    color: #172033;
+                    margin-top: 5px;
+                    margin-bottom: 5px;
+                ">
+                    Licitaciones & Empresas
+                </h1>
 
-        if st.button(
-            "Iniciar sesión",
-            type="primary",
-            use_container_width=True
-        ):
+                <p style="
+                    text-align: center;
+                    color: #667085;
+                    margin-bottom: 25px;
+                ">
+                    Accede a tu plataforma
+                </p>
+                """,
+                unsafe_allow_html=True,
+            )
 
-            if (
-                usuario == st.secrets["LOGIN_USER"]
-                and password == st.secrets["LOGIN_PASSWORD"]
-            ):
+            usuario = st.text_input(
+                "Usuario",
+                placeholder="Introduce tu usuario",
+            )
 
-                st.session_state["logueado"] = True
+            password = st.text_input(
+                "Contraseña",
+                type="password",
+                placeholder="Introduce tu contraseña",
+            )
 
-                # Activamos la pantalla de carga
-                st.session_state["cargando_app"] = True
+            st.markdown(
+                '<div class="login-button">',
+                unsafe_allow_html=True,
+            )
 
-                # Ejecutamos inmediatamente el siguiente estado
-                st.rerun()
+            entrar = st.button(
+                "Iniciar sesión",
+                use_container_width=True,
+            )
 
-            else:
-                st.error("Usuario o contraseña incorrectos.")
+            st.markdown(
+                "</div>",
+                unsafe_allow_html=True,
+            )
 
+            # =================================================
+            # COMPROBAR CREDENCIALES
+            # =================================================
 
-# ============================================================
-# PANTALLA DE CARGA
-# ============================================================
+            if entrar:
 
-def mostrar_pantalla_carga():
+                if (
+                    usuario == st.secrets["LOGIN_USER"]
+                    and password == st.secrets["LOGIN_PASSWORD"]
+                ):
+                    st.session_state["logueado"] = True
 
-    st.markdown(
-        """
-        <style>
+                    # Activamos la pantalla de carga
+                    st.session_state["cargando_app"] = True
 
-        .loading-container {
-            min-height: 75vh;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            text-align: center;
-        }
+                    st.rerun()
 
-        .loading-title {
-            font-size: 26px;
-            font-weight: 700;
-            color: #111827;
-            margin-top: 20px;
-        }
+                else:
+                    st.error("Usuario o contraseña incorrectos.")
 
-        .loading-subtitle {
-            font-size: 15px;
-            color: #6B7280;
-            margin-top: 8px;
-        }
+    # ========================================================
+    # LOGO
+    # ========================================================
 
-        .loading-logo {
-            max-width: 180px;
-            max-height: 100px;
-            object-fit: contain;
-        }
-
-        </style>
-        """,
-        unsafe_allow_html=True
+    st.image(
+        str(logo_path),
+        width=180,
     )
 
-    logo_html = ""
-
-    if logo_path.exists():
-
-        import base64
-
-        with open(logo_path, "rb") as f:
-            logo_base64 = base64.b64encode(f.read()).decode()
-
-        logo_html = f"""
-            <img
-                class="loading-logo"
-                src="data:image/png;base64,{logo_base64}"
-            >
-        """
-
-    st.markdown(
-        f"""
-        <div class="loading-container">
-
-            {logo_html}
-
-            <div class="loading-title">
-                Accediendo...
-            </div>
-
-            <div class="loading-subtitle">
-                Preparando tu plataforma
-            </div>
-
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+    return False
 
 
 # ============================================================
-# FLUJO DE LOGIN
+# COMPROBAR LOGIN
 # ============================================================
 
-if not st.session_state.get("logueado", False):
-
-    login()
-
+if not login():
     st.stop()
 
 
 # ============================================================
-# CARGA DE LA APLICACIÓN
+# CARGA DESPUÉS DEL LOGIN
 # ============================================================
 
 if st.session_state.get("cargando_app", False):
 
-    mostrar_pantalla_carga()
+    # Pantalla limpia: no mostramos todavía la aplicación
+    st.empty()
 
-    # IMPORTANTE:
-    # El spinner nativo de Streamlit sí puede mantenerse visible
-    # mientras se ejecuta este bloque.
+    inicio = time.time()
 
     with st.spinner("Preparando tu plataforma..."):
 
-        inicio = time.time()
-
-        # Cargar modelo
-        encoder = cargar_encoder()
-
-        # Conectar con Supabase
+        # Cargamos los recursos reales de tu aplicación
         supabase = obtener_cliente()
+        encoder = obtener_encoder()
 
-        # Queremos que la pantalla permanezca visible
-        # al menos 5 segundos en total.
+        # Queremos que la pantalla dure como mínimo 5 segundos
         tiempo_transcurrido = time.time() - inicio
-
         tiempo_restante = 5 - tiempo_transcurrido
 
         if tiempo_restante > 0:
             time.sleep(tiempo_restante)
 
-    # Ya terminó la carga
+    # La carga ha terminado
     st.session_state["cargando_app"] = False
 
-    # Entramos a la aplicación
+    # Volvemos a ejecutar la aplicación ya cargada
     st.rerun()
 
 
 # ============================================================
-# APLICACIÓN PRINCIPAL
+# APLICACIÓN
 # ============================================================
 
 aplicar_estilos()
 
-
-# ============================================================
-# CONEXIONES / RECURSOS
-# ============================================================
-
 supabase = obtener_cliente()
-
-encoder = cargar_encoder()
+encoder = obtener_encoder()
 
 
 # ============================================================
-# CABECERA
+# CABECERA DE LA APLICACIÓN
 # ============================================================
 
-col1, col2 = st.columns([8, 1])
+col_titulo, col_logout = st.columns([8, 1])
 
-with col1:
+with col_titulo:
 
-    st.markdown(
-        """
-        <h1 style="
-            margin-bottom: 0;
-            color: #111827;
-        ">
-            Licitaciones & Empresas
-        </h1>
-        """,
-        unsafe_allow_html=True
+    st.title("Licitaciones & Empresas")
+
+    st.caption(
+        "Buscador de licitaciones internacionales, "
+        "coincidencia inteligente y directorio de empresas."
     )
 
-with col2:
+
+with col_logout:
+
+    st.write("")
 
     if st.button(
         "Cerrar sesión",
-        use_container_width=True
+        use_container_width=True,
     ):
 
         st.session_state["logueado"] = False
@@ -331,45 +265,20 @@ with col2:
 # TABS
 # ============================================================
 
-tab1, tab2, tab3 = st.tabs(
-    [
-        "Buscador de Licitaciones",
-        "Coincidencia Inteligente",
-        "Directorio de Empresas"
-    ]
-)
+tab1, tab2, tab3 = st.tabs([
+    "Buscador de Licitaciones",
+    "Coincidencia Inteligente",
+    "Directorio de Empresas",
+])
 
-
-# ============================================================
-# TAB 1
-# ============================================================
 
 with tab1:
+    search.render_tab1(supabase, encoder)
 
-    search.render(
-        supabase=supabase,
-        encoder=encoder
-    )
-
-
-# ============================================================
-# TAB 2
-# ============================================================
 
 with tab2:
+    matching.render_tab2(supabase, encoder)
 
-    matching.render(
-        supabase=supabase,
-        encoder=encoder
-    )
-
-
-# ============================================================
-# TAB 3
-# ============================================================
 
 with tab3:
-
-    directorio.render(
-        supabase=supabase
-    )
+    directorio.render_tab3(supabase, encoder)
