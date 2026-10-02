@@ -56,15 +56,15 @@ def login():
     col1, col2, col3 = st.columns([1, 2, 1])
 
     with col2:
-    with st.container(border=True):
-
-        col_logo1, col_logo2, col_logo3 = st.columns([1, 1, 1])
-
-        with col_logo2:
-            st.image(
-                str(logo_path),
-                width=180,
-            )
+        with st.container(border=True):
+    
+            col_logo1, col_logo2, col_logo3 = st.columns([1, 1, 1])
+    
+            with col_logo2:
+                st.image(
+                    str(logo_path),
+                    width=180,
+                )
 
             st.markdown(
                 """
