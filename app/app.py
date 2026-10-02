@@ -38,19 +38,7 @@ def login():
 
     st.markdown(
         """
-        <style>
-    
-        div[data-testid="stImage"] {
-            width: 100%;
-        }
-    
-        div[data-testid="stImage"] img {
-            display: block;
-            margin-left: auto !important;
-            margin-right: auto !important;
-        }
-    
-        </style>
+        
         """,
         unsafe_allow_html=True,
     )
@@ -64,19 +52,13 @@ def login():
     # ========================================================
     # LOGO
     # ========================================================
-    import base64
-
-    with open(logo_path, "rb") as image_file:
-        encoded_logo = base64.b64encode(image_file.read()).decode()
-
     col1, col2, col3 = st.columns([1, 2, 1])
 
     with col2:
-        st.markdown(
-            f"""
-        """,
-        unsafe_allow_html=True,
-    )
+        st.image(
+            str(logo_path),
+            width=250,
+        )
     # ========================================================
     # RECUADRO DEL LOGIN
     # ========================================================
