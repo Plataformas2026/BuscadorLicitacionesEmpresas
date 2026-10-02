@@ -29,112 +29,6 @@ if "cargando_app" not in st.session_state:
 
 
 # ============================================================
-# PANTALLA DE CARGA
-# ============================================================
-
-def mostrar_pantalla_carga():
-
-    st.markdown(
-        """
-        <style>
-
-        header {
-            visibility: hidden;
-        }
-
-        [data-testid="stSidebar"] {
-            display: none;
-        }
-
-        .pantalla-carga {
-            position: fixed;
-            top: 0;
-            left: 0;
-
-            width: 100vw;
-            height: 100vh;
-
-            background: white;
-
-            display: flex;
-            flex-direction: column;
-
-            align-items: center;
-            justify-content: center;
-
-            z-index: 999999;
-        }
-
-        .spinner-grande {
-            width: 70px;
-            height: 70px;
-
-            border: 7px solid #E8EDFF;
-            border-top: 7px solid #315EFB;
-
-            border-radius: 50%;
-
-            animation: girar 0.9s linear infinite;
-
-            margin-bottom: 30px;
-        }
-
-        .texto-carga {
-            font-family: Arial, sans-serif;
-
-            font-size: 22px;
-
-            font-weight: 600;
-
-            color: #172033;
-
-            text-align: center;
-        }
-
-        .subtexto-carga {
-            font-family: Arial, sans-serif;
-
-            font-size: 15px;
-
-            color: #667085;
-
-            margin-top: 8px;
-
-            text-align: center;
-        }
-
-        @keyframes girar {
-
-            from {
-                transform: rotate(0deg);
-            }
-
-            to {
-                transform: rotate(360deg);
-            }
-
-        }
-
-        </style>
-
-        <div class="pantalla-carga">
-
-            <div class="spinner-grande"></div>
-
-            <div class="texto-carga">
-                Preparando tu plataforma...
-            </div>
-
-            <div class="subtexto-carga">
-                Cargando modelo de inteligencia artificial
-            </div>
-
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-# ============================================================
 # LOGIN
 # ============================================================
 
@@ -149,7 +43,11 @@ def login():
     # logo.png está dentro de /assets
     # ========================================================
 
-    logo_path = Path(__file__).resolve().parent.parent / "assets" / "logo.png"
+    logo_path = (
+        Path(__file__).resolve().parent.parent
+        / "assets"
+        / "logo.png"
+    )
 
     # ========================================================
     # ESTILOS SOLO PARA EL LOGIN
@@ -205,14 +103,12 @@ def login():
         unsafe_allow_html=True,
     )
 
-
     # ========================================================
     # ESPACIO SUPERIOR
     # ========================================================
 
     st.write("")
     st.write("")
-
 
     # ========================================================
     # RECUADRO DEL LOGIN
@@ -247,7 +143,6 @@ def login():
                 unsafe_allow_html=True,
             )
 
-
             # =================================================
             # USUARIO
             # =================================================
@@ -256,7 +151,6 @@ def login():
                 "Usuario",
                 placeholder="Introduce tu usuario",
             )
-
 
             # =================================================
             # CONTRASEÑA
@@ -267,7 +161,6 @@ def login():
                 type="password",
                 placeholder="Introduce tu contraseña",
             )
-
 
             # =================================================
             # BOTÓN
@@ -287,7 +180,6 @@ def login():
                 "</div>",
                 unsafe_allow_html=True,
             )
-
 
             # =================================================
             # COMPROBAR CREDENCIALES
@@ -314,7 +206,6 @@ def login():
                     st.error(
                         "Usuario o contraseña incorrectos."
                     )
-
 
     # ========================================================
     # LOGO FUERA DEL RECUADRO
@@ -343,44 +234,112 @@ if not login():
 
 if st.session_state.get("cargando_app", False):
 
-    # Mostrar pantalla completa de carga
-    mostrar_pantalla_carga()
+    # ========================================================
+    # ESTILOS DEL SPINNER
+    # ========================================================
 
-    # --------------------------------------------------------
-    # Empezamos a contar los 5 segundos
-    # --------------------------------------------------------
+    st.markdown(
+        """
+        <style>
+
+        /* Ocultar cabecera */
+        header {
+            visibility: hidden !important;
+        }
+
+        /* Ocultar sidebar */
+        [data-testid="stSidebar"] {
+            display: none !important;
+        }
+
+        /* Centrar spinner */
+        [data-testid="stSpinner"] {
+            position: fixed !important;
+
+            top: 50% !important;
+            left: 50% !important;
+
+            transform: translate(-50%, -50%) !important;
+
+            z-index: 999999 !important;
+
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+
+        /* Hacer grande el spinner */
+        [data-testid="stSpinner"] svg {
+            width: 70px !important;
+            height: 70px !important;
+        }
+
+        /* Ocultar texto */
+        [data-testid="stSpinner"] > div:last-child {
+            font-size: 0 !important;
+        }
+
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ========================================================
+    # LOGO CENTRADO
+    # ========================================================
+
+    logo_path = (
+        Path(__file__).resolve().parent.parent
+        / "assets"
+        / "logo.png"
+    )
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+
+    with col2:
+
+        st.image(
+            str(logo_path),
+            width=180,
+        )
+
+    # ========================================================
+    # CARGAR APLICACIÓN
+    # ========================================================
 
     inicio = time.time()
 
+    with st.spinner(""):
 
-    # --------------------------------------------------------
-    # CARGAR RECURSOS
-    # --------------------------------------------------------
+        # ----------------------------------------------------
+        # Cargar conexión
+        # ----------------------------------------------------
 
-    supabase = obtener_cliente()
+        supabase = obtener_cliente()
 
-    encoder = obtener_encoder()
+        # ----------------------------------------------------
+        # Cargar modelo de IA
+        # ----------------------------------------------------
 
+        encoder = obtener_encoder()
 
-    # --------------------------------------------------------
-    # Garantizar mínimo 5 segundos de pantalla de carga
-    # --------------------------------------------------------
+        # ----------------------------------------------------
+        # Garantizar 5 segundos de carga
+        # ----------------------------------------------------
 
-    tiempo_transcurrido = time.time() - inicio
+        tiempo_transcurrido = time.time() - inicio
 
-    tiempo_restante = 5 - tiempo_transcurrido
+        tiempo_restante = 5 - tiempo_transcurrido
 
-    if tiempo_restante > 0:
-        time.sleep(tiempo_restante)
+        if tiempo_restante > 0:
+            time.sleep(tiempo_restante)
 
-
-    # --------------------------------------------------------
-    # Finalizar carga
-    # --------------------------------------------------------
+    # ========================================================
+    # FINALIZAR CARGA
+    # ========================================================
 
     st.session_state["cargando_app"] = False
 
-    # Volver a ejecutar para mostrar la aplicación
     st.rerun()
 
 
@@ -405,7 +364,6 @@ encoder = obtener_encoder()
 # ============================================================
 
 col_titulo, col_logout = st.columns([8, 1])
-
 
 with col_titulo:
 
