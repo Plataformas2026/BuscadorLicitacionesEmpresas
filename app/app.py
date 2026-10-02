@@ -1,21 +1,8 @@
-"""
-app.py
-------
-Licitaciones & Empresas — punto de entrada de Streamlit.
-
-Ejecutar en local:
-    cd app
-    streamlit run app.py
-
-Requiere SUPABASE_URL y SUPABASE_ANON_KEY.
-"""
-
 import streamlit as st
 
 from db import obtener_cliente, obtener_encoder
 from styles import aplicar_estilos
 
-import auth
 import directorio
 import matching
 import search
@@ -27,50 +14,52 @@ st.set_page_config(
     layout="wide",
 )
 
-aplicar_estilos()
 
-# ---------------------------------------------------------
-# SUPABASE
-# ---------------------------------------------------------
+# ============================================================
+# LOGIN SENCILLO
+# ============================================================
+
+def login():
+    if st.session_state.get("logueado"):
+        return True
+
+    st.title("🔐 Licitaciones & Empresas")
+    st.write("Introduce tus credenciales para acceder.")
+
+    usuario = st.text_input("Usuario")
+    password = st.text_input("Contraseña", type="password")
+
+    if st.button("Entrar", use_container_width=True):
+        if (
+            usuario == st.secrets["LOGIN_USER"]
+            and password == st.secrets["LOGIN_PASSWORD"]
+        ):
+            st.session_state["logueado"] = True
+            st.rerun()
+        else:
+            st.error("Usuario o contraseña incorrectos.")
+
+    return False
+
+
+# ============================================================
+# COMPROBAR LOGIN
+# ============================================================
+
+if not login():
+    st.stop()
+
+
+# ============================================================
+# APLICACIÓN
+# ============================================================
+
+aplicar_estilos()
 
 supabase = obtener_cliente()
 
-# ---------------------------------------------------------
-# LOGIN
-# ---------------------------------------------------------
-
-if not auth.mostrar_login(supabase):
-    st.stop()
-
-# ---------------------------------------------------------
-# USUARIO AUTENTICADO
-# ---------------------------------------------------------
-
-usuario = st.session_state.get("usuario")
-
-# Barra superior
-col1, col2 = st.columns([8, 2])
-
-with col1:
-    if usuario:
-        email_usuario = getattr(usuario, "email", None)
-        if email_usuario:
-            st.caption(f"Sesión iniciada como: {email_usuario}")
-
-with col2:
-    if st.button("Cerrar sesión", use_container_width=True):
-        auth.cerrar_sesion(supabase)
-
-# ---------------------------------------------------------
-# MODELO DE IA
-# ---------------------------------------------------------
-
 with st.spinner("Cargando modelo de IA..."):
     encoder = obtener_encoder()
-
-# ---------------------------------------------------------
-# APLICACIÓN
-# ---------------------------------------------------------
 
 st.title("Licitaciones & Empresas")
 
@@ -79,13 +68,19 @@ st.caption(
     "coincidencia inteligente y directorio de empresas."
 )
 
-tab1, tab2, tab3 = st.tabs(
-    [
-        "Buscador de Licitaciones",
-        "Coincidencia Inteligente",
-        "Directorio de Empresas",
-    ]
-)
+
+# Botón de cerrar sesión
+if st.button("Cerrar sesión"):
+    st.session_state["logueado"] = False
+    st.rerun()
+
+
+tab1, tab2, tab3 = st.tabs([
+    "Buscador de Licitaciones",
+    "Coincidencia Inteligente",
+    "Directorio de Empresas",
+])
+
 
 with tab1:
     search.render_tab1(supabase, encoder)
