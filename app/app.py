@@ -38,59 +38,17 @@ def login():
 
     st.markdown(
         """
-        <style>
-
-        /* ==================================================
-           LOGO EN ESQUINA INFERIOR IZQUIERDA
-           ================================================== */
-
-        div[data-testid="stImage"] {
-            position: fixed !important;
-            left: 25px !important;
-            bottom: 20px !important;
-            z-index: 9999 !important;
-            width: auto !important;
-        }
-
-        /* ==================================================
-           BORDE DEL RECUADRO
-           ================================================== */
-
-        div[data-testid="stVerticalBlockBorderWrapper"] {
-            border: 1.5px solid #315EFB !important;
-            border-radius: 12px !important;
-        }
-
-        /* ==================================================
-           BOTÓN INICIAR SESIÓN
-           ================================================== */
-
-        .login-button button {
-            background-color: #315EFB;
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-weight: 600;
-            min-height: 45px;
-        }
-
-        .login-button button:hover {
-            background-color: #2449D8;
-            color: white;
-        }
-
-        </style>
+        
         """,
         unsafe_allow_html=True,
     )
-
     # ========================================================
     # ESPACIO SUPERIOR
     # ========================================================
 
     st.write("")
     st.write("")
-
+   
     # ========================================================
     # RECUADRO DEL LOGIN
     # ========================================================
@@ -99,6 +57,14 @@ def login():
 
     with col2:
         with st.container(border=True):
+    
+            col_logo1, col_logo2, col_logo3 = st.columns([1, 1, 1])
+    
+            with col_logo2:
+                st.image(
+                    str(logo_path),
+                    width=180,
+                )
 
             st.markdown(
                 """
@@ -165,18 +131,7 @@ def login():
                 else:
                     st.error("Usuario o contraseña incorrectos.")
 
-    # ========================================================
-    # LOGO FUERA DEL RECUADRO
-    # ESQUINA INFERIOR IZQUIERDA
-    # ========================================================
-
-    st.image(
-        str(logo_path),
-        width=180,
-    )
-
     return False
-
 
 # ============================================================
 # COMPROBAR LOGIN
