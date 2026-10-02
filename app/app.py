@@ -1,9 +1,10 @@
+import time
 import streamlit as st
 from pathlib import Path
-import time
 
-from db import obtener_cliente, obtener_encoder
-from styles import aplicar_estilos
+from supabase_client import obtener_cliente
+from embeddings import obtener_encoder
+from estilos import aplicar_estilos
 
 import directorio
 import matching
@@ -17,12 +18,12 @@ import search
 st.set_page_config(
     page_title="Licitaciones & Empresas",
     page_icon="",
-    layout="wide",
+    layout="wide"
 )
 
 
 # ============================================================
-# ESTADOS INICIALES
+# ESTADOS DE SESIÓN
 # ============================================================
 
 if "logueado" not in st.session_state:
@@ -33,28 +34,120 @@ if "cargando_app" not in st.session_state:
 
 
 # ============================================================
-# RUTA DEL LOGO
-# app.py está dentro de /app
-# logo.png está dentro de /assets
+# RUTAS
 # ============================================================
 
-logo_path = (
-    Path(__file__).resolve().parent.parent
-    / "assets"
-    / "logo.png"
-)
+logo_path = Path("assets/logo.png")
 
 
 # ============================================================
-# CARGAR ENCODER
-#
-# st.cache_resource hace que el modelo se cargue una sola vez
-# y no vuelva a inicializarse en cada st.rerun().
+# CARGA DEL MODELO
 # ============================================================
 
 @st.cache_resource
 def cargar_encoder():
     return obtener_encoder()
+
+
+# ============================================================
+# LOGIN
+# ============================================================
+
+def login():
+
+    st.markdown(
+        """
+        <style>
+
+        .login-wrapper {
+            min-height: 75vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .login-card {
+            width: 420px;
+            padding: 40px;
+            border-radius: 18px;
+            border: 1px solid #E5E7EB;
+            background: white;
+            box-shadow: 0 10px 35px rgba(0,0,0,0.08);
+        }
+
+        .login-title {
+            text-align: center;
+            font-size: 28px;
+            font-weight: 700;
+            color: #111827;
+            margin-bottom: 8px;
+        }
+
+        .login-subtitle {
+            text-align: center;
+            color: #6B7280;
+            margin-bottom: 30px;
+        }
+
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        """
+        <div class="login-wrapper">
+            <div class="login-card">
+                <div class="login-title">
+                    Licitaciones & Empresas
+                </div>
+
+                <div class="login-subtitle">
+                    Accede a tu plataforma
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # Usamos columnas para colocar el formulario centrado
+    col1, col2, col3 = st.columns([1, 2, 1])
+
+    with col2:
+
+        usuario = st.text_input(
+            "Usuario",
+            key="login_usuario"
+        )
+
+        password = st.text_input(
+            "Contraseña",
+            type="password",
+            key="login_password"
+        )
+
+        if st.button(
+            "Iniciar sesión",
+            type="primary",
+            use_container_width=True
+        ):
+
+            if (
+                usuario == st.secrets["LOGIN_USER"]
+                and password == st.secrets["LOGIN_PASSWORD"]
+            ):
+
+                st.session_state["logueado"] = True
+
+                # Activamos la pantalla de carga
+                st.session_state["cargando_app"] = True
+
+                # Ejecutamos inmediatamente el siguiente estado
+                st.rerun()
+
+            else:
+                st.error("Usuario o contraseña incorrectos.")
 
 
 # ============================================================
@@ -67,351 +160,77 @@ def mostrar_pantalla_carga():
         """
         <style>
 
-        /* ==================================================
-           OCULTAR ELEMENTOS DE STREAMLIT
-           ================================================== */
-
-        header {
-            visibility: hidden;
-        }
-
-        footer {
-            visibility: hidden;
-        }
-
-        /* ==================================================
-           PANTALLA COMPLETA
-           ================================================== */
-
-        .loading-screen {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
-
-            background: #ffffff;
-
-            z-index: 999999;
-
+        .loading-container {
+            min-height: 75vh;
             display: flex;
             flex-direction: column;
-            align-items: center;
             justify-content: center;
-
+            align-items: center;
             text-align: center;
         }
 
-        /* ==================================================
-           LOGO
-           ================================================== */
-
-        .loading-logo {
-            width: 180px;
-            max-width: 45vw;
-            margin-bottom: 35px;
-        }
-
-        /* ==================================================
-           TEXTO PRINCIPAL
-           ================================================== */
-
         .loading-title {
             font-size: 26px;
-            font-weight: 600;
-            color: #172033;
-
-            margin-bottom: 8px;
+            font-weight: 700;
+            color: #111827;
+            margin-top: 20px;
         }
-
-        /* ==================================================
-           TEXTO SECUNDARIO
-           ================================================== */
 
         .loading-subtitle {
             font-size: 15px;
-            color: #667085;
-
-            margin-bottom: 28px;
+            color: #6B7280;
+            margin-top: 8px;
         }
 
-        /* ==================================================
-           SPINNER
-           ================================================== */
-
-        .loading-spinner {
-            width: 32px;
-            height: 32px;
-
-            border: 3px solid #E5E7EB;
-            border-top: 3px solid #315EFB;
-
-            border-radius: 50%;
-
-            animation: loading-spin 0.8s linear infinite;
-        }
-
-        @keyframes loading-spin {
-            0% {
-                transform: rotate(0deg);
-            }
-
-            100% {
-                transform: rotate(360deg);
-            }
-        }
-
-        /* ==================================================
-           PEQUEÑA ANIMACIÓN DE ENTRADA
-           ================================================== */
-
-        .loading-content {
-            animation: loading-fade-in 0.25s ease-out;
-        }
-
-        @keyframes loading-fade-in {
-            from {
-                opacity: 0;
-                transform: translateY(5px);
-            }
-
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+        .loading-logo {
+            max-width: 180px;
+            max-height: 100px;
+            object-fit: contain;
         }
 
         </style>
         """,
-        unsafe_allow_html=True,
+        unsafe_allow_html=True
     )
 
-    # Convertimos la ruta del logo a URI para poder mostrarla
-    # directamente dentro del HTML.
-    import base64
+    logo_html = ""
 
-    try:
+    if logo_path.exists():
+
+        import base64
+
         with open(logo_path, "rb") as f:
             logo_base64 = base64.b64encode(f.read()).decode()
 
-        logo_src = f"data:image/png;base64,{logo_base64}"
-
-    except Exception:
-        logo_src = ""
+        logo_html = f"""
+            <img
+                class="loading-logo"
+                src="data:image/png;base64,{logo_base64}"
+            >
+        """
 
     st.markdown(
         f"""
-        <div class="loading-screen">
+        <div class="loading-container">
 
-            <div class="loading-content">
+            {logo_html}
 
-                {
-                    f'<img class="loading-logo" src="{logo_src}">'
-                    if logo_src
-                    else ""
-                }
+            <div class="loading-title">
+                Accediendo...
+            </div>
 
-                <div class="loading-title">
-                    Accediendo...
-                </div>
-
-                <div class="loading-subtitle">
-                    Preparando tu plataforma
-                </div>
-
-                <div class="loading-spinner"></div>
-
+            <div class="loading-subtitle">
+                Preparando tu plataforma
             </div>
 
         </div>
         """,
-        unsafe_allow_html=True,
+        unsafe_allow_html=True
     )
 
 
 # ============================================================
-# LOGIN
-# ============================================================
-
-def login():
-
-    # Si ya está logueado no mostramos absolutamente nada
-    # relacionado con el login.
-    if st.session_state.get("logueado", False):
-        return True
-
-    # ========================================================
-    # ESTILOS DEL LOGIN
-    # ========================================================
-
-    st.markdown(
-        """
-        <style>
-
-        /* ==================================================
-           LOGO EN ESQUINA INFERIOR IZQUIERDA
-           ================================================== */
-
-        div[data-testid="stImage"] {
-            position: fixed !important;
-            left: 25px !important;
-            bottom: 20px !important;
-            z-index: 9999 !important;
-            width: auto !important;
-        }
-
-        /* ==================================================
-           BORDE DEL RECUADRO
-           ================================================== */
-
-        div[data-testid="stVerticalBlockBorderWrapper"] {
-            border: 1.5px solid #315EFB !important;
-            border-radius: 12px !important;
-        }
-
-        /* ==================================================
-           BOTÓN INICIAR SESIÓN
-           ================================================== */
-
-        .login-button button {
-            background-color: #315EFB;
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-weight: 600;
-            min-height: 45px;
-        }
-
-        .login-button button:hover {
-            background-color: #2449D8;
-            color: white;
-        }
-
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # ========================================================
-    # ESPACIO SUPERIOR
-    # ========================================================
-
-    st.write("")
-    st.write("")
-
-    # ========================================================
-    # RECUADRO DEL LOGIN
-    # ========================================================
-
-    col1, col2, col3 = st.columns([1, 2, 1])
-
-    with col2:
-
-        with st.container(border=True):
-
-            st.markdown(
-                """
-                <h1 style="
-                    text-align: center;
-                    font-size: 30px;
-                    color: #172033;
-                    margin-top: 5px;
-                    margin-bottom: 5px;
-                ">
-                    Licitaciones & Empresas
-                </h1>
-
-                <p style="
-                    text-align: center;
-                    color: #667085;
-                    margin-bottom: 25px;
-                ">
-                    Accede a tu plataforma
-                </p>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            usuario = st.text_input(
-                "Usuario",
-                placeholder="Introduce tu usuario",
-            )
-
-            password = st.text_input(
-                "Contraseña",
-                type="password",
-                placeholder="Introduce tu contraseña",
-            )
-
-            st.markdown(
-                '<div class="login-button">',
-                unsafe_allow_html=True,
-            )
-
-            entrar = st.button(
-                "Iniciar sesión",
-                use_container_width=True,
-            )
-
-            st.markdown(
-                "</div>",
-                unsafe_allow_html=True,
-            )
-
-            # =================================================
-            # COMPROBAR CREDENCIALES
-            # =================================================
-
-            if entrar:
-
-                if (
-                    usuario == st.secrets["LOGIN_USER"]
-                    and password == st.secrets["LOGIN_PASSWORD"]
-                ):
-
-                    # -----------------------------------------
-                    # GUARDAR LOGIN
-                    # -----------------------------------------
-
-                    st.session_state["logueado"] = True
-
-                    # -----------------------------------------
-                    # ACTIVAR PANTALLA DE CARGA
-                    # -----------------------------------------
-
-                    st.session_state["cargando_app"] = True
-
-                    # -----------------------------------------
-                    # VOLVER A EJECUTAR LA APP
-                    # -----------------------------------------
-
-                    st.rerun()
-
-                else:
-
-                    st.error(
-                        "Usuario o contraseña incorrectos."
-                    )
-
-    # ========================================================
-    # LOGO DEL LOGIN
-    # ========================================================
-
-    st.image(
-        str(logo_path),
-        width=180,
-    )
-
-    return False
-
-
-# ============================================================
-# FLUJO PRINCIPAL
-# ============================================================
-
-
-# ============================================================
-# 1. SI NO ESTÁ LOGUEADO → LOGIN
+# FLUJO DE LOGIN
 # ============================================================
 
 if not st.session_state.get("logueado", False):
@@ -422,87 +241,87 @@ if not st.session_state.get("logueado", False):
 
 
 # ============================================================
-# 2. SI ESTÁ LOGUEADO PERO ESTÁ CARGANDO → PANTALLA DE CARGA
+# CARGA DE LA APLICACIÓN
 # ============================================================
+
 if st.session_state.get("cargando_app", False):
 
     mostrar_pantalla_carga()
 
-    # Cargar recursos
-    encoder = cargar_encoder()
-    supabase = obtener_cliente()
+    # IMPORTANTE:
+    # El spinner nativo de Streamlit sí puede mantenerse visible
+    # mientras se ejecuta este bloque.
 
-    # Mantener la pantalla de carga visible durante 5 segundos
-    time.sleep(5)
+    with st.spinner("Preparando tu plataforma..."):
 
-    # Terminamos la carga
+        inicio = time.time()
+
+        # Cargar modelo
+        encoder = cargar_encoder()
+
+        # Conectar con Supabase
+        supabase = obtener_cliente()
+
+        # Queremos que la pantalla permanezca visible
+        # al menos 5 segundos en total.
+        tiempo_transcurrido = time.time() - inicio
+
+        tiempo_restante = 5 - tiempo_transcurrido
+
+        if tiempo_restante > 0:
+            time.sleep(tiempo_restante)
+
+    # Ya terminó la carga
     st.session_state["cargando_app"] = False
 
+    # Entramos a la aplicación
     st.rerun()
 
 
 # ============================================================
-# 3. APLICACIÓN PRINCIPAL
+# APLICACIÓN PRINCIPAL
 # ============================================================
 
 aplicar_estilos()
 
 
 # ============================================================
-# CONEXIÓN A SUPABASE
+# CONEXIONES / RECURSOS
 # ============================================================
 
 supabase = obtener_cliente()
-
-
-# ============================================================
-# ENCODER
-#
-# Si ya fue cargado durante la pantalla de transición,
-# st.cache_resource lo devuelve inmediatamente.
-# ============================================================
 
 encoder = cargar_encoder()
 
 
 # ============================================================
-# CABECERA DE LA APLICACIÓN
+# CABECERA
 # ============================================================
 
-col_titulo, col_logout = st.columns([8, 1])
+col1, col2 = st.columns([8, 1])
 
+with col1:
 
-with col_titulo:
-
-    st.title("Licitaciones & Empresas")
-
-    st.caption(
-        "Buscador de licitaciones internacionales, "
-        "coincidencia inteligente y directorio de empresas."
+    st.markdown(
+        """
+        <h1 style="
+            margin-bottom: 0;
+            color: #111827;
+        ">
+            Licitaciones & Empresas
+        </h1>
+        """,
+        unsafe_allow_html=True
     )
 
-
-with col_logout:
-
-    # Pequeño espacio para alinear el botón con el título
-    st.write("")
+with col2:
 
     if st.button(
         "Cerrar sesión",
-        use_container_width=True,
+        use_container_width=True
     ):
 
-        # -----------------------------------------
-        # Cerrar sesión
-        # -----------------------------------------
-
         st.session_state["logueado"] = False
-
-        # -----------------------------------------
-        # Aseguramos que la próxima entrada vuelva
-        # a pasar por la pantalla de carga.
-        # -----------------------------------------
-
         st.session_state["cargando_app"] = False
 
         st.rerun()
@@ -512,11 +331,13 @@ with col_logout:
 # TABS
 # ============================================================
 
-tab1, tab2, tab3 = st.tabs([
-    "Buscador de Licitaciones",
-    "Coincidencia Inteligente",
-    "Directorio de Empresas",
-])
+tab1, tab2, tab3 = st.tabs(
+    [
+        "Buscador de Licitaciones",
+        "Coincidencia Inteligente",
+        "Directorio de Empresas"
+    ]
+)
 
 
 # ============================================================
@@ -525,9 +346,9 @@ tab1, tab2, tab3 = st.tabs([
 
 with tab1:
 
-    search.render_tab1(
-        supabase,
-        encoder,
+    search.render(
+        supabase=supabase,
+        encoder=encoder
     )
 
 
@@ -537,9 +358,9 @@ with tab1:
 
 with tab2:
 
-    matching.render_tab2(
-        supabase,
-        encoder,
+    matching.render(
+        supabase=supabase,
+        encoder=encoder
     )
 
 
@@ -549,7 +370,6 @@ with tab2:
 
 with tab3:
 
-    directorio.render_tab3(
-        supabase,
-        encoder,
+    directorio.render(
+        supabase=supabase
     )
