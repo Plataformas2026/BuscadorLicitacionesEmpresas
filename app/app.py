@@ -68,10 +68,13 @@ def login():
     col1, col2, col3 = st.columns([1, 2, 1])
 
     with col2:
-        st.image(
-            str(logo_path),
-            width=250,
-        )
+        # Creamos sub-columnas dentro de col2 para empujar la imagen al centro exacto
+        sub_col1, sub_col2, sub_col3 = st.columns([1, 2, 1])
+        with sub_col2:
+            st.image(
+                str(logo_path),
+                width=250,
+            )
 
     # ========================================================
     # RECUADRO DEL LOGIN
