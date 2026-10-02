@@ -21,8 +21,34 @@ st.set_page_config(
 
 
 # ============================================================
-# CARGA DEL ENCODER
-# Se guarda en memoria para no volver a cargarlo en cada rerun
+# ESTADOS INICIALES
+# ============================================================
+
+if "logueado" not in st.session_state:
+    st.session_state["logueado"] = False
+
+if "cargando_app" not in st.session_state:
+    st.session_state["cargando_app"] = False
+
+
+# ============================================================
+# RUTA DEL LOGO
+# app.py está dentro de /app
+# logo.png está dentro de /assets
+# ============================================================
+
+logo_path = (
+    Path(__file__).resolve().parent.parent
+    / "assets"
+    / "logo.png"
+)
+
+
+# ============================================================
+# CARGAR ENCODER
+#
+# st.cache_resource hace que el modelo se cargue una sola vez
+# y no vuelva a inicializarse en cada st.rerun().
 # ============================================================
 
 @st.cache_resource
@@ -31,52 +57,195 @@ def cargar_encoder():
 
 
 # ============================================================
-# LOGIN
+# PANTALLA DE CARGA
 # ============================================================
 
-def login():
-
-    # Si ya está logueado, no renderizamos absolutamente nada
-    # del login.
-    if st.session_state.get("logueado", False):
-        return True
-
-    # ========================================================
-    # RUTA DEL LOGO
-    # app.py está dentro de /app
-    # logo.png está dentro de /assets
-    # ========================================================
-
-    logo_path = (
-        Path(__file__).resolve().parent.parent
-        / "assets"
-        / "logo.png"
-    )
-
-    # ========================================================
-    # ESTILOS SOLO PARA EL LOGIN
-    # ========================================================
+def mostrar_pantalla_carga():
 
     st.markdown(
         """
         <style>
 
         /* ==================================================
-           EVITAR PARPADEO DURANTE LA TRANSICIÓN
+           OCULTAR ELEMENTOS DE STREAMLIT
            ================================================== */
 
-        .login-page {
-            animation: loginFadeIn 0.15s ease-in;
+        header {
+            visibility: hidden;
         }
 
-        @keyframes loginFadeIn {
-            from {
-                opacity: 0;
+        footer {
+            visibility: hidden;
+        }
+
+        /* ==================================================
+           PANTALLA COMPLETA
+           ================================================== */
+
+        .loading-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+
+            background: #ffffff;
+
+            z-index: 999999;
+
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+
+            text-align: center;
+        }
+
+        /* ==================================================
+           LOGO
+           ================================================== */
+
+        .loading-logo {
+            width: 180px;
+            max-width: 45vw;
+            margin-bottom: 35px;
+        }
+
+        /* ==================================================
+           TEXTO PRINCIPAL
+           ================================================== */
+
+        .loading-title {
+            font-size: 26px;
+            font-weight: 600;
+            color: #172033;
+
+            margin-bottom: 8px;
+        }
+
+        /* ==================================================
+           TEXTO SECUNDARIO
+           ================================================== */
+
+        .loading-subtitle {
+            font-size: 15px;
+            color: #667085;
+
+            margin-bottom: 28px;
+        }
+
+        /* ==================================================
+           SPINNER
+           ================================================== */
+
+        .loading-spinner {
+            width: 32px;
+            height: 32px;
+
+            border: 3px solid #E5E7EB;
+            border-top: 3px solid #315EFB;
+
+            border-radius: 50%;
+
+            animation: loading-spin 0.8s linear infinite;
+        }
+
+        @keyframes loading-spin {
+            0% {
+                transform: rotate(0deg);
             }
-            to {
-                opacity: 1;
+
+            100% {
+                transform: rotate(360deg);
             }
         }
+
+        /* ==================================================
+           PEQUEÑA ANIMACIÓN DE ENTRADA
+           ================================================== */
+
+        .loading-content {
+            animation: loading-fade-in 0.25s ease-out;
+        }
+
+        @keyframes loading-fade-in {
+            from {
+                opacity: 0;
+                transform: translateY(5px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Convertimos la ruta del logo a URI para poder mostrarla
+    # directamente dentro del HTML.
+    import base64
+
+    try:
+        with open(logo_path, "rb") as f:
+            logo_base64 = base64.b64encode(f.read()).decode()
+
+        logo_src = f"data:image/png;base64,{logo_base64}"
+
+    except Exception:
+        logo_src = ""
+
+    st.markdown(
+        f"""
+        <div class="loading-screen">
+
+            <div class="loading-content">
+
+                {
+                    f'<img class="loading-logo" src="{logo_src}">'
+                    if logo_src
+                    else ""
+                }
+
+                <div class="loading-title">
+                    Accediendo...
+                </div>
+
+                <div class="loading-subtitle">
+                    Preparando tu plataforma
+                </div>
+
+                <div class="loading-spinner"></div>
+
+            </div>
+
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
+# LOGIN
+# ============================================================
+
+def login():
+
+    # Si ya está logueado no mostramos absolutamente nada
+    # relacionado con el login.
+    if st.session_state.get("logueado", False):
+        return True
+
+    # ========================================================
+    # ESTILOS DEL LOGIN
+    # ========================================================
+
+    st.markdown(
+        """
+        <style>
 
         /* ==================================================
            LOGO EN ESQUINA INFERIOR IZQUIERDA
@@ -117,60 +286,8 @@ def login():
             color: white;
         }
 
-        /* ==================================================
-           PANTALLA DE TRANSICIÓN
-           ================================================== */
-
-        .login-loading {
-            position: fixed;
-            inset: 0;
-            background: white;
-            z-index: 999999;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            flex-direction: column;
-        }
-
-        .login-loading-title {
-            font-size: 24px;
-            font-weight: 600;
-            color: #172033;
-            margin-bottom: 8px;
-        }
-
-        .login-loading-text {
-            font-size: 14px;
-            color: #667085;
-        }
-
-        .login-loading-spinner {
-            width: 28px;
-            height: 28px;
-            margin-bottom: 18px;
-            border: 3px solid #E5E7EB;
-            border-top: 3px solid #315EFB;
-            border-radius: 50%;
-            animation: loginSpinner 0.8s linear infinite;
-        }
-
-        @keyframes loginSpinner {
-            to {
-                transform: rotate(360deg);
-            }
-        }
-
         </style>
         """,
-        unsafe_allow_html=True,
-    )
-
-    # ========================================================
-    # CONTENEDOR COMPLETO DEL LOGIN
-    # ========================================================
-
-    st.markdown(
-        '<div class="login-page">',
         unsafe_allow_html=True,
     )
 
@@ -252,38 +369,19 @@ def login():
                 ):
 
                     # -----------------------------------------
-                    # 1. Guardamos inmediatamente el estado
+                    # GUARDAR LOGIN
                     # -----------------------------------------
 
                     st.session_state["logueado"] = True
 
                     # -----------------------------------------
-                    # 2. Mostramos una pantalla completa de
-                    #    transición para que NO se vea la app
-                    #    parcialmente renderizada.
+                    # ACTIVAR PANTALLA DE CARGA
                     # -----------------------------------------
 
-                    st.markdown(
-                        """
-                        <div class="login-loading">
-
-                            <div class="login-loading-spinner"></div>
-
-                            <div class="login-loading-title">
-                                Accediendo...
-                            </div>
-
-                            <div class="login-loading-text">
-                                Preparando tu plataforma
-                            </div>
-
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+                    st.session_state["cargando_app"] = True
 
                     # -----------------------------------------
-                    # 3. Forzamos un nuevo renderizado
+                    # VOLVER A EJECUTAR LA APP
                     # -----------------------------------------
 
                     st.rerun()
@@ -295,8 +393,7 @@ def login():
                     )
 
     # ========================================================
-    # LOGO FUERA DEL RECUADRO
-    # ESQUINA INFERIOR IZQUIERDA
+    # LOGO DEL LOGIN
     # ========================================================
 
     st.image(
@@ -304,24 +401,77 @@ def login():
         width=180,
     )
 
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
     return False
 
 
 # ============================================================
-# COMPROBAR LOGIN
+# FLUJO PRINCIPAL
 # ============================================================
 
-if not login():
+
+# ============================================================
+# 1. SI NO ESTÁ LOGUEADO → LOGIN
+# ============================================================
+
+if not st.session_state.get("logueado", False):
+
+    login()
+
     st.stop()
 
 
 # ============================================================
-# APLICACIÓN
+# 2. SI ESTÁ LOGUEADO PERO ESTÁ CARGANDO → PANTALLA DE CARGA
+# ============================================================
+
+if st.session_state.get("cargando_app", False):
+
+    # --------------------------------------------------------
+    # Mostrar inmediatamente la pantalla de carga.
+    #
+    # Esto evita que el usuario vea:
+    #
+    # LOGIN → pestañas → aplicación
+    #
+    # y en su lugar verá:
+    #
+    # LOGIN → CARGANDO → aplicación
+    # --------------------------------------------------------
+
+    mostrar_pantalla_carga()
+
+    # --------------------------------------------------------
+    # Cargar recursos pesados mientras la pantalla de carga
+    # permanece visible.
+    # --------------------------------------------------------
+
+    encoder = cargar_encoder()
+
+    # --------------------------------------------------------
+    # También inicializamos la conexión a Supabase aquí para
+    # aprovechar la pantalla de carga.
+    # --------------------------------------------------------
+
+    supabase = obtener_cliente()
+
+    # --------------------------------------------------------
+    # Marcamos que ya terminó la carga.
+    # --------------------------------------------------------
+
+    st.session_state["cargando_app"] = False
+
+    # --------------------------------------------------------
+    # Nuevo renderizado.
+    #
+    # Como cargando_app ahora es False, la siguiente ejecución
+    # entra directamente en la aplicación.
+    # --------------------------------------------------------
+
+    st.rerun()
+
+
+# ============================================================
+# 3. APLICACIÓN PRINCIPAL
 # ============================================================
 
 aplicar_estilos()
@@ -335,8 +485,10 @@ supabase = obtener_cliente()
 
 
 # ============================================================
-# CARGAR MODELO DE IA
-# Se ejecuta una sola vez gracias a @st.cache_resource
+# ENCODER
+#
+# Si ya fue cargado durante la pantalla de transición,
+# st.cache_resource lo devuelve inmediatamente.
 # ============================================================
 
 encoder = cargar_encoder()
@@ -369,10 +521,19 @@ with col_logout:
         use_container_width=True,
     ):
 
+        # -----------------------------------------
+        # Cerrar sesión
+        # -----------------------------------------
+
         st.session_state["logueado"] = False
 
-        # Limpiamos también posibles datos temporales
-        # relacionados con la aplicación.
+        # -----------------------------------------
+        # Aseguramos que la próxima entrada vuelva
+        # a pasar por la pantalla de carga.
+        # -----------------------------------------
+
+        st.session_state["cargando_app"] = False
+
         st.rerun()
 
 
@@ -392,6 +553,7 @@ tab1, tab2, tab3 = st.tabs([
 # ============================================================
 
 with tab1:
+
     search.render_tab1(
         supabase,
         encoder,
@@ -403,6 +565,7 @@ with tab1:
 # ============================================================
 
 with tab2:
+
     matching.render_tab2(
         supabase,
         encoder,
@@ -414,6 +577,7 @@ with tab2:
 # ============================================================
 
 with tab3:
+
     directorio.render_tab3(
         supabase,
         encoder,
