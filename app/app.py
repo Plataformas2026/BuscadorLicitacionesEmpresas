@@ -1,5 +1,6 @@
 import streamlit as st
 from pathlib import Path
+import time
 
 from db import obtener_cliente, obtener_encoder
 from styles import aplicar_estilos
