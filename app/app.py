@@ -25,7 +25,7 @@ def login():
         return True
 
     # --------------------------------------------------------
-    # ESTILOS DEL LOGIN
+    # ESTILOS SOLO PARA EL LOGIN
     # --------------------------------------------------------
 
     st.markdown(
@@ -41,12 +41,8 @@ def login():
             );
         }
 
-        /* Ocultar elementos de Streamlit durante el login */
+        /* Ocultar elementos de Streamlit */
         #MainMenu {
-            visibility: hidden;
-        }
-
-        footer {
             visibility: hidden;
         }
 
@@ -54,37 +50,29 @@ def login():
             visibility: hidden;
         }
 
-        /* Contenedor visual */
-        .login-box {
+        footer {
+            visibility: hidden;
+        }
+
+        /* Centrar el contenido del formulario */
+        .login-input {
             max-width: 420px;
-            margin: 100px auto 0 auto;
-            background: white;
-            padding: 40px;
-            border-radius: 16px;
-            border: 1px solid #e4e7ec;
-            box-shadow: 0 12px 35px rgba(16, 24, 40, 0.08);
+            margin: 0 auto;
         }
 
-        .login-title {
-            text-align: center;
-            color: #172033;
-            font-size: 30px;
-            font-weight: 700;
-            margin-bottom: 8px;
-        }
-
-        .login-subtitle {
-            text-align: center;
-            color: #667085;
-            font-size: 15px;
-            margin-bottom: 30px;
-        }
-
-        .login-label {
-            color: #344054;
-            font-size: 14px;
+        /* Botón de login */
+        .login-button button {
+            background-color: #006dcc;
+            color: white;
+            border: none;
+            border-radius: 8px;
             font-weight: 600;
-            margin-bottom: 6px;
+            min-height: 45px;
+        }
+
+        .login-button button:hover {
+            background-color: #005bb5;
+            color: white;
         }
 
         </style>
@@ -93,56 +81,80 @@ def login():
     )
 
     # --------------------------------------------------------
-    # CABECERA DEL LOGIN
+    # ESPACIO SUPERIOR
     # --------------------------------------------------------
 
-    st.markdown(
-        """
-        <div class="login-box">
+    st.write("")
+    st.write("")
+    st.write("")
 
-            <div class="login-title">
-                Licitaciones & Empresas
-            </div>
+    # --------------------------------------------------------
+    # CONTENEDOR CENTRADO
+    # --------------------------------------------------------
 
-            <div class="login-subtitle">
-                Accede a tu plataforma
-            </div>
+    col1, col2, col3 = st.columns([1, 2, 1])
 
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    with col2:
 
-    # Los campos se muestran debajo de la tarjeta visual
-    # para evitar problemas con el HTML de Streamlit.
+        # Tarjeta del login
+        with st.container(border=True):
 
-    usuario = st.text_input(
-        "Usuario",
-        placeholder="Introduce tu usuario",
-    )
+            st.markdown(
+                "<h1 style='text-align:center; "
+                "font-size:30px; "
+                "color:#172033; "
+                "margin-bottom:5px;'>"
+                "Licitaciones & Empresas"
+                "</h1>",
+                unsafe_allow_html=True,
+            )
 
-    password = st.text_input(
-        "Contraseña",
-        type="password",
-        placeholder="Introduce tu contraseña",
-    )
+            st.markdown(
+                "<p style='text-align:center; "
+                "color:#667085; "
+                "margin-bottom:25px;'>"
+                "Accede a tu plataforma"
+                "</p>",
+                unsafe_allow_html=True,
+            )
 
-    entrar = st.button(
-        "Iniciar sesión",
-        use_container_width=True,
-    )
+            usuario = st.text_input(
+                "Usuario",
+                placeholder="Introduce tu usuario",
+            )
 
-    if entrar:
+            password = st.text_input(
+                "Contraseña",
+                type="password",
+                placeholder="Introduce tu contraseña",
+            )
 
-        if (
-            usuario == st.secrets["LOGIN_USER"]
-            and password == st.secrets["LOGIN_PASSWORD"]
-        ):
-            st.session_state["logueado"] = True
-            st.rerun()
+            st.markdown(
+                '<div class="login-button">',
+                unsafe_allow_html=True,
+            )
 
-        else:
-            st.error("Usuario o contraseña incorrectos.")
+            entrar = st.button(
+                "Iniciar sesión",
+                use_container_width=True,
+            )
+
+            st.markdown(
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+            if entrar:
+
+                if (
+                    usuario == st.secrets["LOGIN_USER"]
+                    and password == st.secrets["LOGIN_PASSWORD"]
+                ):
+                    st.session_state["logueado"] = True
+                    st.rerun()
+
+                else:
+                    st.error("Usuario o contraseña incorrectos.")
 
     return False
 
@@ -167,39 +179,32 @@ with st.spinner("Cargando modelo de IA..."):
     encoder = obtener_encoder()
 
 
-st.title("Licitaciones & Empresas")
-
-st.caption(
-    "Buscador de licitaciones internacionales, "
-    "coincidencia inteligente y directorio de empresas."
-)
-
-
 # ============================================================
-# CERRAR SESIÓN — ESQUINA SUPERIOR DERECHA
+# CABECERA DE LA APLICACIÓN
 # ============================================================
 
-st.markdown(
-    """
-    <style>
+# Título a la izquierda + cerrar sesión a la derecha
+col_titulo, col_logout = st.columns([8, 1])
 
-    .logout-button {
-        position: fixed;
-        top: 15px;
-        right: 20px;
-        z-index: 999999;
-    }
+with col_titulo:
 
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+    st.title("Licitaciones & Empresas")
 
-# Usamos una columna para colocar el botón arriba a la derecha
-col_izq, col_der = st.columns([9, 1])
+    st.caption(
+        "Buscador de licitaciones internacionales, "
+        "coincidencia inteligente y directorio de empresas."
+    )
 
-with col_der:
-    if st.button("Cerrar sesión"):
+
+with col_logout:
+
+    # Pequeño espacio para alinear el botón con el título
+    st.write("")
+
+    if st.button(
+        "Cerrar sesión",
+        use_container_width=True,
+    ):
         st.session_state["logueado"] = False
         st.rerun()
 
