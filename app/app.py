@@ -235,25 +235,59 @@ if not login():
 if st.session_state.get("cargando_app", False):
 
     # ========================================================
-    # ESTILOS DEL SPINNER
+    # PANTALLA BLANCA COMPLETA
     # ========================================================
 
     st.markdown(
         """
         <style>
 
-        /* Ocultar cabecera */
-        header {
+        /* ==================================================
+           FONDO BLANCO
+           ================================================== */
+
+        html,
+        body,
+        [data-testid="stApp"],
+        [data-testid="stAppViewContainer"] {
+            background: white !important;
+        }
+
+
+        /* ==================================================
+           OCULTAR CONTENIDO DE LA APLICACIÓN
+           ================================================== */
+
+        [data-testid="stAppViewContainer"] > .main {
             visibility: hidden !important;
         }
 
-        /* Ocultar sidebar */
+
+        /* ==================================================
+           OCULTAR SIDEBAR
+           ================================================== */
+
         [data-testid="stSidebar"] {
             display: none !important;
         }
 
-        /* Centrar spinner */
+
+        /* ==================================================
+           OCULTAR HEADER
+           ================================================== */
+
+        header {
+            visibility: hidden !important;
+        }
+
+
+        /* ==================================================
+           SPINNER
+           ================================================== */
+
         [data-testid="stSpinner"] {
+            visibility: visible !important;
+
             position: fixed !important;
 
             top: 50% !important;
@@ -264,19 +298,28 @@ if st.session_state.get("cargando_app", False):
             z-index: 999999 !important;
 
             display: flex !important;
+
             align-items: center !important;
             justify-content: center !important;
         }
 
-        /* Hacer grande el spinner */
+
+        /* ==================================================
+           SPINNER GRANDE
+           ================================================== */
+
         [data-testid="stSpinner"] svg {
             width: 70px !important;
             height: 70px !important;
         }
 
-        /* Ocultar texto */
+
+        /* ==================================================
+           OCULTAR TEXTO DEL SPINNER
+           ================================================== */
+
         [data-testid="stSpinner"] > div:last-child {
-            font-size: 0 !important;
+            display: none !important;
         }
 
         </style>
@@ -284,27 +327,9 @@ if st.session_state.get("cargando_app", False):
         unsafe_allow_html=True,
     )
 
-    # ========================================================
-    # LOGO CENTRADO
-    # ========================================================
-
-    logo_path = (
-        Path(__file__).resolve().parent.parent
-        / "assets"
-        / "logo.png"
-    )
-
-    col1, col2, col3 = st.columns([1, 1, 1])
-
-    with col2:
-
-        st.image(
-            str(logo_path),
-            width=180,
-        )
 
     # ========================================================
-    # CARGAR APLICACIÓN
+    # CARGAR RECURSOS
     # ========================================================
 
     inicio = time.time()
@@ -312,19 +337,19 @@ if st.session_state.get("cargando_app", False):
     with st.spinner(""):
 
         # ----------------------------------------------------
-        # Cargar conexión
+        # Conexión
         # ----------------------------------------------------
 
         supabase = obtener_cliente()
 
         # ----------------------------------------------------
-        # Cargar modelo de IA
+        # Modelo de IA
         # ----------------------------------------------------
 
         encoder = obtener_encoder()
 
         # ----------------------------------------------------
-        # Garantizar 5 segundos de carga
+        # Garantizar 5 segundos
         # ----------------------------------------------------
 
         tiempo_transcurrido = time.time() - inicio
@@ -333,6 +358,7 @@ if st.session_state.get("cargando_app", False):
 
         if tiempo_restante > 0:
             time.sleep(tiempo_restante)
+
 
     # ========================================================
     # FINALIZAR CARGA
@@ -364,6 +390,7 @@ encoder = obtener_encoder()
 # ============================================================
 
 col_titulo, col_logout = st.columns([8, 1])
+
 
 with col_titulo:
 
