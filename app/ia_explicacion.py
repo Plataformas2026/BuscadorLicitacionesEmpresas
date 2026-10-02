@@ -131,7 +131,7 @@ def _llamar_groq(prompt_usuario: str):
                     {"role": "user", "content": prompt_usuario},
                 ],
                 "temperature": 0.3,
-                "max_tokens": 400,
+                "max_tokens": 600,
             },
             timeout=TIMEOUT_PETICION_SEGUNDOS,
         )
