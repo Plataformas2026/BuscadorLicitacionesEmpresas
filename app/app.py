@@ -50,7 +50,7 @@ def login():
            ================================================== */
     
         header[data-testid="stHeader"] {
-            background-color: #6C2BD9 !important;
+            background-color: #172554 !important;
             height: 60px !important;
         }
     
@@ -61,7 +61,7 @@ def login():
             left: 0;
             width: 100%;
             height: 60px;
-            background-color: #6C2BD9;
+            background-color: #172554;
         }
     
     
