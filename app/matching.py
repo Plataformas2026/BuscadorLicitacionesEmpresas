@@ -67,6 +67,11 @@ Novedades de la v2 (categoría de la licitación + nuevos datos del Excel):
   - Los campos geográficos de la empresa son ahora texto libre (p. ej.
     "España (Tenerife, La Gomera)"): se buscan por palabra completa y se
     ignoran fragmentos demasiado cortos para dar falsas coincidencias.
+  - OBSERVACIONES IMPORTANTES (col. AI del Excel, `observaciones_importantes`):
+    avisos como "ESTÁ INACTIVA" o exclusiones sectoriales. Se muestran como
+    PRIMER motivo de la explicación (⚠️), íntegras y pidiendo revisarlas. Es
+    solo un aviso: no suma ni resta puntuación, no cuenta como coincidencia y
+    no entra en los embeddings (ver ingest/sync_empresas_drive.py).
 """
 
 import re
@@ -330,6 +335,36 @@ def localizar_licitacion(supabase: Client, encoder: SentenceTransformer, entrada
     return _completar_campos_licitacion(supabase, candidatos[:8])
 
 
+def _completar_observaciones(supabase: Client, empresas: list) -> list:
+    """
+    Garantiza que cada empresa candidata lleve `observaciones_importantes`.
+    Las RPC actualizadas (sql/migracion_empresas_v3.sql) ya la devuelven; si
+    todavía no (código desplegado antes que el SQL, o RPC antigua), se pide
+    en UNA sola consulta por lote. Si la columna aún no existe en la base de
+    datos, la consulta falla y se sigue sin observaciones -- nunca se rompe la
+    pestaña por esto.
+    """
+    if not empresas or all("observaciones_importantes" in e for e in empresas):
+        return empresas
+
+    ids = [e["numero_interno"] for e in empresas if e.get("numero_interno")]
+    observaciones = {}
+    try:
+        respuesta = (
+            supabase.table("empresas")
+            .select("numero_interno, observaciones_importantes")
+            .in_("numero_interno", ids)
+            .execute()
+        )
+        observaciones = {f["numero_interno"]: f.get("observaciones_importantes") for f in (respuesta.data or [])}
+    except Exception:
+        pass
+
+    for empresa in empresas:
+        empresa.setdefault("observaciones_importantes", observaciones.get(empresa.get("numero_interno")))
+    return empresas
+
+
 def obtener_coincidencias(supabase: Client, codigo_unico: str, match_threshold: float = 0.15, match_count: int = 30) -> list:
     respuesta = supabase.rpc(
         "buscar_empresas_para_licitacion",
@@ -339,7 +374,7 @@ def obtener_coincidencias(supabase: Client, codigo_unico: str, match_threshold: 
             "match_count": match_count,
         },
     ).execute()
-    return respuesta.data or []
+    return _completar_observaciones(supabase, respuesta.data or [])
 
 
 def obtener_coincidencias_texto_libre(
@@ -374,7 +409,7 @@ def obtener_coincidencias_texto_libre(
             "match_count": match_count,
         },
     ).execute()
-    return respuesta.data or []
+    return _completar_observaciones(supabase, respuesta.data or [])
 
 
 def _clave_titulo(titulo: str) -> str:
@@ -589,6 +624,34 @@ def _etiqueta_organismo(organismo_licitacion: str) -> str:
     return ", ".join(canonicos) if canonicos else _recortar(organismo_licitacion, 60)
 
 
+MAX_CARACTERES_OBSERVACIONES = 1200
+
+
+def _aviso_observaciones(observaciones):
+    """
+    Frase de aviso a partir de OBSERVACIONES IMPORTANTES (col. AI del Excel),
+    o None si la empresa no tiene. Son notas libres ("ESTÁ INACTIVA", o
+    documentos largos con exclusiones sectoriales y geográficas, como el de HMS
+    INTELLIGENCE): se citan tal cual, compactadas a una línea, y se pide
+    revisarlas. NO se intenta deducir automáticamente si la empresa queda
+    excluida de ESTA licitación -- el texto mezcla exclusiones y ámbito
+    exclusivo, y una heurística de palabras daría avisos engañosos --, y
+    tampoco es una señal de coincidencia: nunca cambia el resumen ni
+    activa/desactiva las Capas 2 y 3.
+    """
+    texto = str(observaciones or "")
+    # Viñetas pegadas desde Word ("•<tab>", "o<tab>" al empezar línea) y saltos de línea -> una sola línea limpia.
+    texto = re.sub(r"(?m)^[ \t]*[•·▪◦o]\t", "", texto)
+    texto = re.sub(r"\s+", " ", texto).strip()
+    if not texto:
+        return None
+    return (
+        "⚠️ Observación importante registrada en el Excel para esta empresa -- revísala antes de valorarla "
+        f"para esta licitación: «{_recortar(texto, MAX_CARACTERES_OBSERVACIONES)}»"
+        + ("" if texto.endswith((".", "!", "?")) else ".")
+    )
+
+
 def _certificaciones_relacionadas(texto_licitacion: str, certificaciones_empresa: str) -> list:
     """Certificaciones de la empresa que la licitación también cita (p. ej. "ISO 9001", "ENS")."""
     if not certificaciones_empresa or not texto_licitacion:
@@ -758,6 +821,11 @@ def explicar_coincidencia(
     referencias_empresa = referencias_empresa or []
     texto_licitacion = _con_categoria(texto_licitacion, categoria_licitacion)
     texto_norm = _normalizar(texto_licitacion)
+
+    # Avisos de la empresa (inactiva, exclusiones...): lo primero que se ve tras el resumen.
+    aviso_observaciones = _aviso_observaciones(empresa.get("observaciones_importantes"))
+    if aviso_observaciones:
+        motivos_detalle.append(aviso_observaciones)
 
     # Las 4 variantes de idioma de las palabras clave que ya tiene cada
     # empresa (antes solo se comparaba la española, aunque la licitación
