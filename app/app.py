@@ -24,10 +24,6 @@ def login():
     if st.session_state.get("logueado", False):
         return True
 
-    # --------------------------------------------------------
-    # ESTILOS SOLO PARA EL LOGIN
-    # --------------------------------------------------------
-
     st.markdown(
         """
         <style>
@@ -54,15 +50,9 @@ def login():
             visibility: hidden;
         }
 
-        /* Centrar el contenido del formulario */
-        .login-input {
-            max-width: 420px;
-            margin: 0 auto;
-        }
-
-        /* Botón de login */
+        /* Botón de iniciar sesión */
         .login-button button {
-            background-color: #006dcc;
+            background-color: #315EFB;
             color: white;
             border: none;
             border-radius: 8px;
@@ -71,8 +61,13 @@ def login():
         }
 
         .login-button button:hover {
-            background-color: #005bb5;
+            background-color: #2449D8;
             color: white;
+        }
+
+        /* Borde de los campos */
+        div[data-baseweb="input"] {
+            border-radius: 8px;
         }
 
         </style>
@@ -80,41 +75,56 @@ def login():
         unsafe_allow_html=True,
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # ESPACIO SUPERIOR
-    # --------------------------------------------------------
+    # ========================================================
 
     st.write("")
     st.write("")
     st.write("")
 
-    # --------------------------------------------------------
-    # CONTENEDOR CENTRADO
-    # --------------------------------------------------------
+    # ========================================================
+    # LOGO
+    # ========================================================
+
+    col_logo_1, col_logo_2, col_logo_3 = st.columns([1, 2, 1])
+
+    with col_logo_2:
+        st.image(
+            "assets/logo.png",
+            width=230,
+        )
+
+    # ========================================================
+    # LOGIN
+    # ========================================================
 
     col1, col2, col3 = st.columns([1, 2, 1])
 
     with col2:
 
-        # Tarjeta del login
         with st.container(border=True):
 
             st.markdown(
-                "<h1 style='text-align:center; "
-                "font-size:30px; "
-                "color:#172033; "
-                "margin-bottom:5px;'>"
-                "Licitaciones & Empresas"
-                "</h1>",
-                unsafe_allow_html=True,
-            )
+                """
+                <h1 style="
+                    text-align:center;
+                    font-size:30px;
+                    color:#172033;
+                    margin-top:10px;
+                    margin-bottom:5px;
+                ">
+                    Licitaciones & Empresas
+                </h1>
 
-            st.markdown(
-                "<p style='text-align:center; "
-                "color:#667085; "
-                "margin-bottom:25px;'>"
-                "Accede a tu plataforma"
-                "</p>",
+                <p style="
+                    text-align:center;
+                    color:#667085;
+                    margin-bottom:25px;
+                ">
+                    Accede a tu plataforma
+                </p>
+                """,
                 unsafe_allow_html=True,
             )
 
@@ -157,7 +167,6 @@ def login():
                     st.error("Usuario o contraseña incorrectos.")
 
     return False
-
 
 # ============================================================
 # COMPROBAR LOGIN
