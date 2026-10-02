@@ -39,55 +39,21 @@ def login():
     st.markdown(
         """
         <style>
-
-        /* Fondo del login */
-        .stApp {
-            background: linear-gradient(
-                135deg,
-                #f8fafc 0%,
-                #eef2ff 100%
-            );
+    
+        div[data-testid="stImage"] {
+            width: 100%;
         }
-
-        /* Ocultar elementos de Streamlit */
-        #MainMenu {
-            visibility: hidden;
+    
+        div[data-testid="stImage"] img {
+            display: block;
+            margin-left: auto !important;
+            margin-right: auto !important;
         }
-
-        header {
-            visibility: hidden;
-        }
-
-        footer {
-            visibility: hidden;
-        }
-
-        /* Borde azul del recuadro */
-        div[data-testid="stVerticalBlockBorderWrapper"] {
-            border: 1.5px solid #315EFB !important;
-            border-radius: 12px !important;
-        }
-
-        /* Botón de iniciar sesión */
-        .login-button button {
-            background-color: #315EFB;
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-weight: 600;
-            min-height: 45px;
-        }
-
-        .login-button button:hover {
-            background-color: #2449D8;
-            color: white;
-        }
-
+    
         </style>
         """,
         unsafe_allow_html=True,
     )
-
     # ========================================================
     # ESPACIO SUPERIOR
     # ========================================================
