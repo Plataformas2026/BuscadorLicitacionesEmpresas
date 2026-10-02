@@ -423,49 +423,19 @@ if not st.session_state.get("logueado", False):
 # ============================================================
 # 2. SI ESTÁ LOGUEADO PERO ESTÁ CARGANDO → PANTALLA DE CARGA
 # ============================================================
-
 if st.session_state.get("cargando_app", False):
-
-    # --------------------------------------------------------
-    # Mostrar inmediatamente la pantalla de carga.
-    #
-    # Esto evita que el usuario vea:
-    #
-    # LOGIN → pestañas → aplicación
-    #
-    # y en su lugar verá:
-    #
-    # LOGIN → CARGANDO → aplicación
-    # --------------------------------------------------------
 
     mostrar_pantalla_carga()
 
-    # --------------------------------------------------------
-    # Cargar recursos pesados mientras la pantalla de carga
-    # permanece visible.
-    # --------------------------------------------------------
-
+    # Cargar recursos
     encoder = cargar_encoder()
-
-    # --------------------------------------------------------
-    # También inicializamos la conexión a Supabase aquí para
-    # aprovechar la pantalla de carga.
-    # --------------------------------------------------------
-
     supabase = obtener_cliente()
 
-    # --------------------------------------------------------
-    # Marcamos que ya terminó la carga.
-    # --------------------------------------------------------
+    # Mantener la pantalla de carga visible durante 5 segundos
+    time.sleep(5)
 
+    # Terminamos la carga
     st.session_state["cargando_app"] = False
-
-    # --------------------------------------------------------
-    # Nuevo renderizado.
-    #
-    # Como cargando_app ahora es False, la siguiente ejecución
-    # entra directamente en la aplicación.
-    # --------------------------------------------------------
 
     st.rerun()
 
