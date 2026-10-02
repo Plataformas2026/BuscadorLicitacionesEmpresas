@@ -38,7 +38,6 @@ def mostrar_pantalla_carga():
         """
         <style>
 
-        /* Ocultar elementos de Streamlit */
         header {
             visibility: hidden;
         }
@@ -46,10 +45,6 @@ def mostrar_pantalla_carga():
         [data-testid="stSidebar"] {
             display: none;
         }
-
-        /* ==================================================
-           PANTALLA COMPLETA
-           ================================================== */
 
         .pantalla-carga {
             position: fixed;
@@ -70,13 +65,7 @@ def mostrar_pantalla_carga():
             z-index: 999999;
         }
 
-
-        /* ==================================================
-           SPINNER GRANDE
-           ================================================== */
-
         .spinner-grande {
-
             width: 70px;
             height: 70px;
 
@@ -90,13 +79,7 @@ def mostrar_pantalla_carga():
             margin-bottom: 30px;
         }
 
-
-        /* ==================================================
-           TEXTO PRINCIPAL
-           ================================================== */
-
         .texto-carga {
-
             font-family: Arial, sans-serif;
 
             font-size: 22px;
@@ -104,15 +87,11 @@ def mostrar_pantalla_carga():
             font-weight: 600;
 
             color: #172033;
+
+            text-align: center;
         }
 
-
-        /* ==================================================
-           SUBTEXTO
-           ================================================== */
-
         .subtexto-carga {
-
             font-family: Arial, sans-serif;
 
             font-size: 15px;
@@ -120,12 +99,9 @@ def mostrar_pantalla_carga():
             color: #667085;
 
             margin-top: 8px;
+
+            text-align: center;
         }
-
-
-        /* ==================================================
-           ANIMACIÓN
-           ================================================== */
 
         @keyframes girar {
 
@@ -140,7 +116,6 @@ def mostrar_pantalla_carga():
         }
 
         </style>
-
 
         <div class="pantalla-carga">
 
@@ -158,7 +133,6 @@ def mostrar_pantalla_carga():
         """,
         unsafe_allow_html=True,
     )
-
 
 # ============================================================
 # LOGIN
