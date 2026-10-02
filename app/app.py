@@ -1,4 +1,5 @@
 import streamlit as st
+from pathlib import Path
 
 from db import obtener_cliente, obtener_encoder
 from styles import aplicar_estilos
@@ -14,7 +15,6 @@ st.set_page_config(
     layout="wide",
 )
 
-
 # ============================================================
 # LOGIN
 # ============================================================
@@ -25,6 +25,14 @@ def login():
         return True
 
     # ========================================================
+    # RUTA DEL LOGO
+    # app.py está dentro de /app
+    # logo.png está dentro de /assets
+    # ========================================================
+
+    logo_path = Path(__file__).resolve().parent.parent / "assets" / "logo.png"
+
+    # ========================================================
     # ESTILOS SOLO PARA EL LOGIN
     # ========================================================
 
@@ -32,7 +40,7 @@ def login():
         """
         <style>
 
-        /* Fondo */
+        /* Fondo del login */
         .stApp {
             background: linear-gradient(
                 135deg,
@@ -54,19 +62,13 @@ def login():
             visibility: hidden;
         }
 
-        /* ====================================================
-           RECUADRO DEL LOGIN
-           ==================================================== */
-
+        /* Borde azul del recuadro */
         div[data-testid="stVerticalBlockBorderWrapper"] {
             border: 1.5px solid #315EFB !important;
             border-radius: 12px !important;
         }
 
-        /* ====================================================
-           BOTÓN LOGIN
-           ==================================================== */
-
+        /* Botón de iniciar sesión */
         .login-button button {
             background-color: #315EFB;
             color: white;
@@ -88,41 +90,25 @@ def login():
 
     # ========================================================
     # ESPACIO SUPERIOR
-    # Lo reducimos para subir todo el login
     # ========================================================
 
     st.write("")
+    st.write("")
 
     # ========================================================
-    # LOGO CENTRADO
+    # LOGO
     # ========================================================
 
-    col1, col2, col3 = st.columns([1, 1, 1])
+    col1, col2, col3 = st.columns([1, 2, 1])
 
     with col2:
-        st.markdown(
-            """
-            <div style="
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                margin-bottom: 25px;
-            ">
-                <img
-                    src="data:image/png;base64,LOGO_PLACEHOLDER"
-                    style="
-                        width: 230px;
-                        height: auto;
-                        display: block;
-                    "
-                >
-            </div>
-            """,
-            unsafe_allow_html=True,
+        st.image(
+            str(logo_path),
+            width=230,
         )
 
     # ========================================================
-    # RECUADRO
+    # RECUADRO DEL LOGIN
     # ========================================================
 
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -179,6 +165,10 @@ def login():
                 "</div>",
                 unsafe_allow_html=True,
             )
+
+            # =================================================
+            # COMPROBAR CREDENCIALES
+            # =================================================
 
             if entrar:
 
