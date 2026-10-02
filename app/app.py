@@ -99,7 +99,7 @@ def login():
     # LOGO
     # ========================================================
 
-    col1, col2, col3 = st.columns([1.6, 2, 0.4])
+    col1, col2, col3 = st.columns([1.5, 2, 0.5])
 
     with col2:
         st.image(
