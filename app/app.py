@@ -311,6 +311,8 @@ if st.session_state.get("cargando_app", False):
         [data-testid="stSpinner"] svg {
             width: 70px !important;
             height: 70px !important;
+            color: #315EFB !important;
+            stroke: #315EFB !important;
         }
 
 
