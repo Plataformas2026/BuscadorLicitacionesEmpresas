@@ -1,7 +1,7 @@
 # Licitaciones & Empresas
 
 App de 3 pestañas: buscador de licitaciones internacionales, coincidencia
-inteligente (licitación → empresas) y directorio de empresas. 
+inteligente (licitación → empresas) y directorio de empresas.  
 
 ```
 .
