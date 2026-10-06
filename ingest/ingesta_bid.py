@@ -72,7 +72,7 @@ from common import (
 
 BASE_URL = "https://beo-procurement.iadb.org/home"
 FUENTE = "BEO/IADB"
-DIAS_ATRAS = 2   # el script de prueba validado exigía fecha_publicacion en {hoy, ayer}
+DIAS_ATRAS = 7   # el script de prueba validado exigía fecha_publicacion en {hoy, ayer}
 LOTE_ENVIO_SUPABASE = 15
 CAMPOS_COMPARABLES = ("titulo", "descripcion", "pais", "fecha_publicacion", "fecha_limite")
 
