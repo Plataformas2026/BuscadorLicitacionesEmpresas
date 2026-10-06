@@ -23,6 +23,23 @@ ESTRATEGIA DE LA TABLA AUXILIAR (IGUAL QUE CAF):
 4. Al arrancar cada ejecución, se eliminan de la tabla auxiliar los concursos
    cuya fecha límite ya ha pasado.
 
+CORRECCIONES (listado incompleto: solo se guardaban 2 concursos)
+--------------------------------------------------------------------------
+1. `codigo_unico` se calculaba con la REFERENCIA ("Projeto ID", p. ej. P176981),
+   pero esa referencia es el código del PROYECTO del Banco Mundial y la
+   comparten varios concursos distintos (P176981 aparece en 4+, P169265 en 4...).
+   Los registros colisionaban y el dedupe `{codigo_unico: registro}` dejaba
+   solo uno por proyecto. Ahora el código sale siempre del slug de la URL de
+   la ficha (único por concurso), igual que en la tabla auxiliar.
+2. El rastreo se detenía en 15 páginas; el portal tiene ~44. Ahora se lee el
+   total del paginador y se recorren todas.
+3. El título de la tarjeta era la referencia: cada fila tiene dos enlaces al
+   mismo concurso (columna REF y columna descripción) y se conservaba el
+   primero. Ahora se lee la fila por celdas (REF, descripción, estados,
+   deadline, categoría, cobertura) y se descartan las vencidas por fecha.
+4. Las fichas que fallan ya no se marcan como "vistas" (se reintentan), y
+   solo se marcan tras subirse todo a Supabase.
+
 VALIDACIÓN REAL (a diferencia de CAF/BID, ver sus propios docstrings): esta
 lógica de extracción SÍ se ha ejecutado con éxito contra el portal real
 (ugpe.gov.cv) fuera de este entorno de desarrollo. Un único ajuste salió de
@@ -34,6 +51,7 @@ Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
 Ejecución local o programada: python ingesta_ugpe.py
 """
 
+import hashlib
 import re
 import time
 from datetime import date, datetime, timezone
@@ -64,7 +82,9 @@ FUENTE = "UGPE"
 TABLA_AUXILIAR = "ugpe_convocatorias_activas"
 PAIS_UGPE = "Cabo Verde"
 
-MAX_PAGINAS_SEGURIDAD = 15
+MAX_PAGINAS_SEGURIDAD = 80  # el portal tiene ~44 páginas (10 concursos por página)
+MAX_FALLOS_PAGINA_SEGUIDOS = 2
+LOTE_CONSULTA_AUX = 40  # nº de códigos por consulta .in_() (evita URLs demasiado largas)
 MAX_DETALLES_POR_EJECUCION = 150  # Tope sobre las NUEVAS por ejecución
 TIEMPO_ESPERA_CARGA_MS = 45000
 PAUSA_ENTRE_PAGINAS_SEGUNDOS = 0.8
@@ -157,84 +177,172 @@ def _generar_slug(texto: str) -> str:
     return (slug or "sin-referencia")[:120]
 
 
+def _codigo_unico_desde_slug(slug: str) -> str:
+    """UGPE-<slug de la URL>. Único por concurso (la referencia NO lo es: la comparten
+    varios concursos del mismo proyecto). Si el slug es muy largo se recorta y se añade
+    un hash para que dos slugs que solo difieren al final no colisionen."""
+    base = re.sub(r"[^a-z0-9]+", "-", (slug or "").strip().lower()).strip("-") or "sin-referencia"
+    if len(base) > 100:
+        base = base[:100].rstrip("-") + "-" + hashlib.md5(base.encode("utf-8")).hexdigest()[:8]
+    return f"UGPE-{base}"
+
+
 # ------------------------------------------------------------------
 # Listado (Playwright Async)
 # ------------------------------------------------------------------
 _JS_EXTRAER_TARJETAS = """
 () => {
-    const resultados = [];
-    const vistos = new Set();
-    const enlaces = Array.from(document.querySelectorAll('a[href*="/concurso/"]'));
-    for (const enlace of enlaces) {
-        const href = enlace.getAttribute('href') || '';
-        const titulo = (enlace.innerText || '').trim();
-        if (!titulo || vistos.has(href)) continue;
-        vistos.add(href);
-
-        let nodo = enlace;
-        let textoContenedor = '';
-        for (let i = 0; i < 6 && nodo.parentElement; i++) {
-            nodo = nodo.parentElement;
-            const texto = (nodo.innerText || '').trim();
-            if (texto.length > titulo.length + 15) {
-                textoContenedor = texto;
-                break;
+    const limpiar = (t) => (t || '').replace(/\\s+/g, ' ').trim();
+    const porHref = new Map();
+    for (const a of document.querySelectorAll('a[href*="/concurso/"]')) {
+        const href = a.getAttribute('href') || '';
+        const texto = limpiar(a.textContent);
+        if (!texto) continue;
+        let fila = porHref.get(href);
+        if (!fila) {
+            // La fila del listado es el primer ancestro con >= 5 hijos
+            // (REF, descripción, estado anuncio, estado concurso, deadline, categoría, cobertura)
+            let nodo = a, filaDom = null;
+            for (let i = 0; i < 6 && nodo.parentElement; i++) {
+                nodo = nodo.parentElement;
+                if (nodo.children.length >= 5) { filaDom = nodo; break; }
             }
+            fila = {
+                href,
+                textos: [],
+                celdas: filaDom ? Array.from(filaDom.children).map((c) => limpiar(c.textContent)) : [],
+                textoFila: filaDom ? limpiar(filaDom.textContent) : '',
+            };
+            porHref.set(href, fila);
         }
-        resultados.push({ titulo, href, textoContenedor });
+        fila.textos.push(texto);
     }
-    return resultados;
+    return Array.from(porHref.values()).map((f) => ({
+        href: f.href,
+        ref: f.textos.reduce((a, b) => (b.length < a.length ? b : a)),
+        titulo: f.textos.reduce((a, b) => (b.length > a.length ? b : a)),
+        celdas: f.celdas,
+        textoFila: f.textoFila,
+    }));
 }
 """
 
-async def extraer_tarjetas_de_pagina(page) -> list:
-    filas = await page.evaluate(_JS_EXTRAER_TARJETAS)
+_JS_TOTAL_PAGINAS = """
+() => {
+    let max = 0;
+    for (const a of document.querySelectorAll('ul.paginate-wrap a[aria-label^="Page "], ul.paginate-wrap a[aria-label^="Página "]')) {
+        const n = parseInt((a.getAttribute('aria-label') || '').replace(/\\D/g, ''), 10);
+        if (n > max) max = n;
+    }
+    return max;
+}
+"""
+
+
+def tarjetas_desde_filas(filas: list, hoy: date) -> list:
+    """Convierte las filas extraídas del DOM en tarjetas. Cada fila tiene 7 celdas:
+    REF | descripción | estado anuncio | estado concurso | deadline | categoría | cobertura."""
     tarjetas = []
     for fila in filas:
-        href = fila.get("href", "")
-        coincidencia = PATRON_ENLACE_CONCURSO.search(href)
+        coincidencia = PATRON_ENLACE_CONCURSO.search(fila.get("href", ""))
         if not coincidencia:
             continue
         slug = coincidencia.group(1)
-        texto_tarjeta = fila.get("textoContenedor", "")
+        celdas = fila.get("celdas") or []
+        estructurada = len(celdas) >= 7
+
+        if estructurada:
+            titulo = celdas[1] or fila.get("titulo", "")
+            texto_estado = " ".join(celdas[2:4])
+            fecha_limite = _parsear_fecha_flexible(celdas[4])
+            categoria = celdas[5] or None
+            abrangencia = celdas[6] or None
+        else:  # maquetación inesperada: se usa el texto completo de la fila
+            titulo = fila.get("titulo", "")
+            texto_estado = fila.get("textoFila", "")
+            fecha_limite = None
+            categoria = abrangencia = None
+
+        cerrada = _estado_es_cerrado(texto_estado) or (fecha_limite is not None and fecha_limite < hoy)
         tarjetas.append({
-            "titulo": fila.get("titulo", "").strip(),
+            "titulo": titulo.strip(),
             "slug": slug,
             "url_oficial": f"{BASE_URL}/concurso/{slug}",
-            "cerrada_segun_listado": _estado_es_cerrado(texto_tarjeta),
-            "texto_tarjeta": texto_tarjeta,
+            "referencia_listado": fila.get("ref"),
+            "categoria_listado": categoria,
+            "abrangencia_listado": abrangencia,
+            "fecha_limite_listado": fecha_limite,
+            "cerrada_segun_listado": cerrada,
+            "texto_tarjeta": fila.get("textoFila", ""),
         })
     return tarjetas
 
 
-async def rastrear_listado_completo(page) -> list:
-    tarjetas = []
-    pagina = 1
+async def extraer_tarjetas_de_pagina(page) -> list:
+    filas = await page.evaluate(_JS_EXTRAER_TARJETAS)
+    return tarjetas_desde_filas(filas, date.today())
 
-    while pagina <= MAX_PAGINAS_SEGURIDAD:
-        url_pagina = f"{LISTADO_URL}?page={pagina}"
-        print(f"--> Cargando {url_pagina} ...", flush=True)
+
+async def _cargar_pagina(page, pagina: int) -> bool:
+    url_pagina = f"{LISTADO_URL}?page={pagina}"
+    print(f"--> Cargando {url_pagina} ...", flush=True)
+    for intento in (1, 2):
         try:
             await page.goto(url_pagina, timeout=TIEMPO_ESPERA_CARGA_MS, wait_until="domcontentloaded")
             await page.wait_for_selector('a[href*="/concurso/"]', timeout=TIEMPO_ESPERA_CARGA_MS)
+            return True
         except Exception as error:
-            print(f"    No apareció ningún concurso reconocible a tiempo en la página {pagina}: {error}", flush=True)
+            print(f"    Intento {intento}/2 fallido en la página {pagina}: {error}", flush=True)
+    return False
+
+
+async def rastrear_listado_completo(page) -> list:
+    tarjetas = []
+    vistas = set()
+    pagina = 1
+    total_paginas = None
+    fallos_seguidos = 0
+
+    while pagina <= MAX_PAGINAS_SEGURIDAD:
+        if total_paginas and pagina > total_paginas:
+            break
+
+        if not await _cargar_pagina(page, pagina):
             if pagina == 1:
                 await page.screenshot(path=CAPTURA_DEPURACION, full_page=True)
                 print(f"    Captura de depuración guardada en {CAPTURA_DEPURACION}.", flush=True)
-            break
+                break
+            fallos_seguidos += 1
+            if fallos_seguidos >= MAX_FALLOS_PAGINA_SEGUIDOS:
+                print("    Demasiados fallos seguidos; se detiene el rastreo.", flush=True)
+                break
+            pagina += 1
+            continue
+        fallos_seguidos = 0
+
+        if total_paginas is None:
+            total = await page.evaluate(_JS_TOTAL_PAGINAS)
+            if total:
+                total_paginas = min(total, MAX_PAGINAS_SEGURIDAD)
+                print(f"    El paginador indica {total} páginas.", flush=True)
 
         tarjetas_pagina = await extraer_tarjetas_de_pagina(page)
-        print(f"    Concursos reconocidos en la página {pagina}: {len(tarjetas_pagina)}", flush=True)
-
-        if not tarjetas_pagina:
+        nuevas_url = [t for t in tarjetas_pagina if t["url_oficial"] not in vistas]
+        print(
+            f"    Concursos en la página {pagina}: {len(tarjetas_pagina)} "
+            f"(activos: {sum(1 for t in tarjetas_pagina if not t['cerrada_segun_listado'])})",
+            flush=True,
+        )
+        if not nuevas_url:  # página vacía o repetida: no hay más resultados
             break
 
-        tarjetas.extend(tarjetas_pagina)
+        for t in nuevas_url:
+            vistas.add(t["url_oficial"])
+            tarjetas.append(t)
         pagina += 1
         await asyncio.sleep(PAUSA_ENTRE_PAGINAS_SEGUNDOS)
 
-    return list({t["url_oficial"]: t for t in tarjetas}.values())
+    return tarjetas
 
 
 async def rastrear_listado_playwright() -> list:
@@ -311,6 +419,8 @@ def obtener_detalle_concurso(url: str) -> dict:
     fecha_limite = _parsear_fecha_flexible(campos.get(ETIQUETA_DEADLINE))
 
     partes_descripcion = []
+    if campos.get(ETIQUETA_ID):
+        partes_descripcion.append(f"Projeto ID: {campos[ETIQUETA_ID]}.")
     if campos.get(ETIQUETA_CATEGORIA):
         partes_descripcion.append(f"Categoria: {campos[ETIQUETA_CATEGORIA]}.")
     if campos.get(ETIQUETA_ABRANGENCIA):
@@ -368,10 +478,16 @@ def refrescar_tabla_auxiliar(supabase, candidatos: list) -> dict:
     candidatos_unicos = list({c["codigo_unico"]: c for c in candidatos}.values())
 
     codigos = [c["codigo_unico"] for c in candidatos_unicos]
-    respuesta_existentes = (
-        supabase.table(TABLA_AUXILIAR).select("codigo_unico, visto").in_("codigo_unico", codigos).execute()
-    )
-    visto_por_codigo = {f["codigo_unico"]: bool(f["visto"]) for f in (respuesta_existentes.data or [])}
+    visto_por_codigo = {}
+    for i in range(0, len(codigos), LOTE_CONSULTA_AUX):
+        respuesta_existentes = (
+            supabase.table(TABLA_AUXILIAR)
+            .select("codigo_unico, visto")
+            .in_("codigo_unico", codigos[i:i + LOTE_CONSULTA_AUX])
+            .execute()
+        )
+        for f in respuesta_existentes.data or []:
+            visto_por_codigo[f["codigo_unico"]] = bool(f["visto"])
 
     ahora = datetime.now(timezone.utc).isoformat()
     filas = []
@@ -393,36 +509,39 @@ def refrescar_tabla_auxiliar(supabase, candidatos: list) -> dict:
 def marcar_como_vistas(supabase, codigos: list):
     if not codigos:
         return
-    supabase.table(TABLA_AUXILIAR).update({"visto": True}).in_("codigo_unico", codigos).execute()
+    for i in range(0, len(codigos), LOTE_CONSULTA_AUX):
+        supabase.table(TABLA_AUXILIAR).update({"visto": True}).in_(
+            "codigo_unico", codigos[i:i + LOTE_CONSULTA_AUX]
+        ).execute()
 
 
 # ------------------------------------------------------------------
 # Normalización al esquema de `licitaciones_internacionales`
 # ------------------------------------------------------------------
 def construir_registro(tarjeta: dict, detalle: dict) -> dict:
-    referencia = (detalle or {}).get("referencia") or None
-    slug_base = referencia or tarjeta["slug"]
-    titulo_final = (detalle or {}).get("titulo_real") or tarjeta["titulo"]
-    
-    fecha_pub = (detalle or {}).get("fecha_publicacion")
-    fecha_lim = (detalle or {}).get("fecha_limite")
+    detalle = detalle or {}
+    titulo_final = detalle.get("titulo_real") or tarjeta["titulo"]
 
-    abrangencia = (detalle or {}).get("abrangencia")
+    fecha_pub = detalle.get("fecha_publicacion")
+    fecha_lim = detalle.get("fecha_limite") or tarjeta.get("fecha_limite_listado")
+
+    abrangencia = detalle.get("abrangencia") or tarjeta.get("abrangencia_listado")
     if abrangencia:
         pais_formateado = f"{abrangencia.strip().lower()} ({PAIS_UGPE})"
     else:
         pais_formateado = PAIS_UGPE
 
     return {
-        "codigo_unico": f"UGPE-{_generar_slug(slug_base)}",
+        # Siempre desde el slug de la URL: la referencia (Projeto ID) se repite entre concursos
+        "codigo_unico": _codigo_unico_desde_slug(tarjeta["slug"]),
         "fuente_origen": FUENTE,
         "tipo_aviso": "Concurso",
         "titulo": titulo_final,
-        "descripcion": (detalle or {}).get("descripcion"),
+        "descripcion": detalle.get("descripcion"),
         "pais": pais_formateado,
         "paises": [pais_formateado],
         "organismo": "UGPE",
-        "categoria": (detalle or {}).get("categoria"),
+        "categoria": detalle.get("categoria") or tarjeta.get("categoria_listado"),
         "url_oficial": tarjeta["url_oficial"],
         "url_documento": None,
         "fecha_publicacion": fecha_pub.isoformat() if fecha_pub else None,
@@ -487,25 +606,31 @@ async def ejecutar_sincronizacion():
         print(f"Error inesperado durante el rastreo del listado: {error}", flush=True)
         return
 
+    total_listado = len(tarjetas)
     tarjetas = [t for t in tarjetas if not t["cerrada_segun_listado"]]
-    print(f"\nConcursos activos rastreados: {len(tarjetas)}", flush=True)
+    print(
+        f"\nConcursos rastreados en el listado: {total_listado} "
+        f"(descartados por cerrados/cancelados/vencidos: {total_listado - len(tarjetas)})",
+        flush=True,
+    )
+    print(f"Concursos activos: {len(tarjetas)}", flush=True)
 
     if not tarjetas:
         print("No se ha rastreado ningún concurso activo.", flush=True)
         return
 
-    # Asignar código único previo y preparar para tabla auxiliar
     candidatos = []
     for t in tarjetas:
-        slug_base = t["slug"]
-        codigo_unico = f"UGPE-{_generar_slug(slug_base)}"
         candidatos.append({
-            "codigo_unico": codigo_unico,
+            "codigo_unico": _codigo_unico_desde_slug(t["slug"]),
             "titulo": t["titulo"],
             "url_oficial": t["url_oficial"],
             "slug": t["slug"],
             "texto_tarjeta": t["texto_tarjeta"],
-            "fecha_limite_aux": None  # Se completará cuando se descargue la ficha o se mantendrá de antes
+            "categoria_listado": t["categoria_listado"],
+            "abrangencia_listado": t["abrangencia_listado"],
+            "fecha_limite_listado": t["fecha_limite_listado"],
+            "fecha_limite_aux": t["fecha_limite_listado"],
         })
 
     # --- Refresco de la tabla auxiliar y detección de novedades ---
@@ -534,24 +659,34 @@ async def ejecutar_sincronizacion():
     print("\nDescargando la ficha de cada concurso nuevo...", flush=True)
     normalizados = []
     codigos_procesados = []
+    fichas_fallidas = 0
 
     for indice, convocatoria in enumerate(nuevas, start=1):
         print(f"  [{indice}/{len(nuevas)}] {convocatoria['titulo'][:90]}", flush=True)
 
         detalle = obtener_detalle_concurso(convocatoria["url_oficial"])
-        
-        # Si se extrajo fecha límite en la ficha, actualizar el auxiliar
-        if detalle and detalle.get("fecha_limite"):
-            convocatoria["fecha_limite_aux"] = detalle.get("fecha_limite")
+        if detalle is None:
+            # No se sube ni se marca como visto: se reintentará en la próxima ejecución.
+            fichas_fallidas += 1
+            time.sleep(PAUSA_ENTRE_DETALLES_SEGUNDOS)
+            continue
 
-        registro = construir_registro(convocatoria, detalle)
-        normalizados.append(registro)
         codigos_procesados.append(convocatoria["codigo_unico"])
+
+        if detalle.get("fecha_limite"):
+            convocatoria["fecha_limite_aux"] = detalle["fecha_limite"]
+            if detalle["fecha_limite"] < hoy:
+                print("      Fecha límite ya vencida según la ficha: se omite.", flush=True)
+                continue
+
+        normalizados.append(construir_registro(convocatoria, detalle))
         time.sleep(PAUSA_ENTRE_DETALLES_SEGUNDOS)
 
-    # Actualizar la fecha límite en la tabla auxiliar con los datos reales de la ficha descargada
-    if nuevas:
-        refrescar_tabla_auxiliar(supabase, nuevas)
+    # Actualizar la fecha límite en la tabla auxiliar con los datos reales de la ficha
+    refrescar_tabla_auxiliar(supabase, nuevas)
+
+    if fichas_fallidas:
+        print(f"Aviso: {fichas_fallidas} fichas no se pudieron descargar; se reintentarán en la próxima ejecución.", flush=True)
 
     normalizados = list({n["codigo_unico"]: n for n in normalizados}.values())
 
@@ -566,16 +701,21 @@ async def ejecutar_sincronizacion():
 
     lote_final = preparar_lote_para_subir(normalizados, registros_existentes)
 
+    subida_completa = True
     if lote_final:
         subidas = subir_en_lotes(
             supabase, "licitaciones_internacionales", "codigo_unico", lote_final, tamano_lote=LOTE_ENVIO_SUPABASE
         )
         print(f"\nSincronización UGPE completada: {subidas}/{len(lote_final)} registros subidos.", flush=True)
+        subida_completa = subidas >= len(lote_final)
     else:
         print("\nNo hay cambios que subir a licitaciones_internacionales.", flush=True)
 
-    # Marcar como vistas todas las procesadas en este ciclo
-    marcar_como_vistas(supabase, codigos_procesados)
+    # Solo se marcan como vistas si se ha subido todo: si algo falló, se reintenta mañana
+    if subida_completa:
+        marcar_como_vistas(supabase, codigos_procesados)
+    else:
+        print("Aviso: subida incompleta; no se marcan como vistas para reintentarlas en la próxima ejecución.", flush=True)
 
 
 if __name__ == "__main__":
