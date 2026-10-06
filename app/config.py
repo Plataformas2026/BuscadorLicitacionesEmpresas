@@ -45,6 +45,7 @@ FUENTES_LICITACIONES = [
     "CAF",
     "Enabel",
     "GIZ-Satellite",
+    "LuxDev",
     "Service-Bund",
     "TED",
     "UGPE",
