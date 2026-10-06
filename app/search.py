@@ -78,9 +78,29 @@ def listar_todas(supabase: Client) -> list:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def obtener_lugares_disponibles(_supabase: Client) -> list:
-    """Opciones del filtro "Lugar", calculadas a partir de los datos reales (columna `pais`)."""
-    respuesta = _supabase.table("licitaciones_internacionales").select("pais").execute()
-    lugares = {f["pais"] for f in (respuesta.data or []) if f.get("pais")}
+    lugares = set()
+    inicio = 0
+    tamano_lote = 1000
+    
+    while True:
+        respuesta = (
+            _supabase.table("licitaciones_internacionales")
+            .select("pais")
+            .range(inicio, inicio + tamano_lote - 1)
+            .execute()
+        )
+        filas = respuesta.data
+        if not filas:
+            break
+            
+        for f in filas:
+            if f.get("pais"):
+                lugares.add(f["pais"].strip())
+                
+        if len(filas) < tamano_lote:
+            break
+        inicio += tamano_lote
+        
     return sorted(lugares)
 
 
