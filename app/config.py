@@ -43,6 +43,7 @@ FUENTES_LICITACIONES = [
     "BEO/IADB",
     "BID",
     "CAF",
+    "Enabel",
     "GIZ-Satellite",
     "Service-Bund",
     "TED",
