@@ -477,7 +477,8 @@ def extraer_ficha_por_clic(pagina, titulo: str, guardar_captura: bool = False):
         return None, None
 
     try:
-        pagina.locator('[data-gt-target="1"]').first.click(timeout=10000)
+        # pagina.locator('[data-gt-target="1"]').first.click(timeout=10000)
+        pagina.locator('[data-gt-target="1"]').first.click(timeout=10000, force=True)
         pagina.wait_for_url(PATRON_URL_FICHA, timeout=TIEMPO_ESPERA_FICHA_MS)
         try:
             pagina.wait_for_function(_JS_FICHA_LISTA, timeout=TIEMPO_ESPERA_FICHA_MS)
