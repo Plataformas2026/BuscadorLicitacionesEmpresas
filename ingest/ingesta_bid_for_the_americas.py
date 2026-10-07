@@ -284,6 +284,7 @@ def parsear_ficha(html: str) -> dict:
         return resultado
     resultado["titulo"] = _limpiar_texto(h1.get_text(" "))
 
+    # Recogemos todos los bloques de texto con dir="auto"
     elementos = h1.find_all_next("div", attrs={"dir": "auto"})
     textos = []
     for el in elementos:
@@ -293,11 +294,48 @@ def parsear_ficha(html: str) -> dict:
     def _etq(t):
         return t.lower().rstrip(":").strip()
 
-    def _indice(etiqueta, empieza_por=False):
-        for i, (limpio, _) in enumerate(textos):
-            if (_etq(limpio).startswith(etiqueta) if empieza_por else _etq(limpio) == etiqueta):
-                return i
-        return None
+    # Extracción inteligente basada en búsqueda de claves por el texto adyacente
+    for i, (limpio, crudo) in enumerate(textos):
+        etiqueta = _etq(limpio)
+        if i + 1 >= len(textos):
+            break
+        siguiente_limpio, siguiente_crudo = textos[i + 1]
+
+        if "ubicación" in etiqueta and not resultado["pais"]:
+            resultado["pais"] = siguiente_limpio
+        elif "cierre de postulación" in etiqueta and not resultado["fecha_limite"]:
+            resultado["fecha_limite"] = parsear_fecha_es(siguiente_limpio or "")
+        elif "unidad ejecutora" in etiqueta and not resultado["organismo"]:
+            resultado["organismo"] = siguiente_limpio
+        elif "descripción" in etiqueta and not resultado["descripcion"]:
+            resultado["descripcion"] = _limpiar_parrafos(siguiente_crudo)
+        elif "tipo de licitación" in etiqueta and not resultado["tipo_aviso"]:
+            resultado["tipo_aviso"] = siguiente_limpio
+        elif "palabras clave de este pliego" in etiqueta and not resultado["palabras_clave"]:
+            claves = re.sub(r"\.\s*$", "", siguiente_limpio or "")
+            resultado["palabras_clave"] = [c.strip() for c in re.split(r"[,;]", claves) if c.strip()]
+
+    # Extracción de categorías y subcategorías de los chips superiores
+    i_sub = None
+    i_ubi = None
+    for i, (limpio, _) in enumerate(textos):
+        etq = _etq(limpio)
+        if "subcategorías" in etq:
+            i_sub = i
+        elif "ubicación" in etq:
+            i_ubi = i
+
+    fin_principales = i_sub if i_sub is not None else (i_ubi if i_ubi is not None else len(textos))
+    for limpio, _ in textos[:fin_principales]:
+        if _es_chip_categoria(limpio, set()) and limpio not in resultado["categorias"]:
+            resultado["categorias"].append(limpio)
+
+    if i_sub is not None and i_ubi is not None and i_ubi > i_sub:
+        for limpio, _ in textos[i_sub + 1:i_ubi]:
+            if limpio and limpio not in resultado["subcategorias"]:
+                resultado["subcategorias"].append(limpio)
+
+    return resultado
 
     def _valor(etiqueta, conservar_saltos=False):
         i = _indice(etiqueta)
