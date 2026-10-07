@@ -42,6 +42,7 @@ FUENTES_LICITACIONES = [
     "BCIE",
     "BEO/IADB",
     "BID",
+    "BID for the Americas APP",
     "CAF",
     "Cabo Verde - Global Tenders",
     "EC-INTPA",
