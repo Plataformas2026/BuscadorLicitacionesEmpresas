@@ -291,6 +291,7 @@ if not login():
 from db import obtener_cliente, obtener_encoder
 
 import directorio
+import estadisticas
 import matching
 import search
 
@@ -349,10 +350,11 @@ with col_logout:
 # TABS
 # ============================================================
 
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "Buscador de Licitaciones",
     "Coincidencia Inteligente",
     "Directorio de Empresas",
+    "Estadísticas",
 ])
 
 
@@ -377,4 +379,11 @@ with tab3:
     directorio.render_tab3(
         supabase,
         encoder,
+    )
+
+
+with tab4:
+
+    estadisticas.render_tab4(
+        supabase,
     )
