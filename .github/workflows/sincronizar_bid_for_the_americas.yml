@@ -1,0 +1,53 @@
+name: Sincronizar Licitaciones (BID for the Americas APP)
+
+on:
+  schedule:
+    - cron: '30 8 * * *'   # todos los dias a las 08:30 UTC (libre; no solapa con el resto)
+  workflow_dispatch:
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+    # La primera ejecucion abre una ficha por cada aviso vigente (clic + vuelta al
+    # listado con scroll infinito); las siguientes solo abren las nuevas o con cambios.
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Instalar el navegador de Playwright
+        run: python -m playwright install --with-deps chromium
+
+      - name: Ejecutar sincronizacion BID for the Americas APP
+        working-directory: ingest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python ingesta_bid_for_the_americas.py
+
+      # Capturas del HTML renderizado (listado y primera ficha) y lista de las
+      # llamadas JSON que hace la app, para depurar si el portal cambia.
+      - name: Subir capturas de depuracion
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-bid-for-the-americas
+          path: |
+            ingest/debug_bid_for_the_americas_listado.html
+            ingest/debug_bid_for_the_americas_ficha.html
+            ingest/debug_bid_for_the_americas_api.txt
+          if-no-files-found: ignore
+          retention-days: 7
