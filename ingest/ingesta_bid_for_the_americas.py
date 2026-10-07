@@ -78,6 +78,7 @@ PAUSA_SCROLL_MS = 1200
 MAX_SCROLLS_SIN_CRECER = 3
 MAX_SCROLLS = 80
 MAX_FICHAS_POR_EJECUCION = 150
+MAX_FALLOS_SEGUIDOS = 4
 PAUSA_ENTRE_FICHAS_MS = 400
 LOTE_ENVIO_SUPABASE = 15
 
@@ -96,7 +97,6 @@ MESES_ES = {
 }
 PATRON_FECHA_ES = re.compile(r"(\d{1,2})\s*/\s*([A-Za-zñÑ]{3,4})\.?\s*/\s*(\d{4})")
 PATRON_ID_URL = re.compile(r"-(\d+)/?$")
-PATRON_URL_FICHA = re.compile(r"/licitaciones/[^/?#]+/[^/?#]+")
 PATRON_TOTAL = re.compile(r"(\d[\d.,]*)\s+resultados?", re.IGNORECASE)
 
 # Comparables para decidir si una licitación ya existente ha cambiado.
@@ -272,7 +272,22 @@ def parsear_listado(html: str) -> list:
 # PARSER DE LA FICHA (HTML renderizado)
 # ============================================================
 
+ETIQUETAS_FICHA = {
+    "ubicación": "pais",
+    "cierre de postulación": "fecha_limite",
+    "unidad ejecutora": "organismo",
+    "descripción": "descripcion",
+    "tipo de licitación": "tipo_aviso",
+    "palabras clave de este pliego": "palabras_clave",
+}
+
+
 def parsear_ficha(html: str) -> dict:
+    """
+    Lee la ficha a partir de los bloques <div dir="auto"> (React Native Web) en orden
+    de documento: cada etiqueta ('Ubicación:', 'Descripción', ...) va seguida de su valor.
+    No depende de clases CSS ni de que exista el <h1>.
+    """
     resultado = {
         "titulo": None, "categorias": [], "subcategorias": [], "pais": None,
         "fecha_limite": None, "organismo": None, "descripcion": None,
@@ -280,13 +295,13 @@ def parsear_ficha(html: str) -> dict:
     }
     soup = BeautifulSoup(html, "html.parser")
     h1 = soup.find("h1")
-    if h1 is None:
-        return resultado
-    resultado["titulo"] = _limpiar_texto(h1.get_text(" "))
+    if h1 is not None:
+        resultado["titulo"] = _limpiar_texto(h1.get_text(" "))
+        elementos = h1.find_all_next("div", attrs={"dir": "auto"})
+    else:
+        elementos = soup.find_all("div", attrs={"dir": "auto"})
 
-    # Recogemos todos los bloques de texto con dir="auto"
-    elementos = h1.find_all_next("div", attrs={"dir": "auto"})
-    textos = []
+    textos = []  # [(texto_limpio, texto_crudo)]
     for el in elementos:
         crudo = el.get_text("")
         textos.append((_limpiar_texto(crudo) or "", crudo))
@@ -294,77 +309,42 @@ def parsear_ficha(html: str) -> dict:
     def _etq(t):
         return t.lower().rstrip(":").strip()
 
-    # Extracción inteligente basada en búsqueda de claves por el texto adyacente
-    for i, (limpio, crudo) in enumerate(textos):
-        etiqueta = _etq(limpio)
-        if i + 1 >= len(textos):
-            break
-        siguiente_limpio, siguiente_crudo = textos[i + 1]
+    es_etiqueta = {i for i, (limpio, _) in enumerate(textos) if _etq(limpio) in ETIQUETAS_FICHA}
+    i_sub = next((i for i, (t, _) in enumerate(textos) if _etq(t).startswith("subcategorías")), None)
+    i_ubi = next((i for i, (t, _) in enumerate(textos) if _etq(t) == "ubicación"), None)
 
-        if "ubicación" in etiqueta and not resultado["pais"]:
-            resultado["pais"] = siguiente_limpio
-        elif "cierre de postulación" in etiqueta and not resultado["fecha_limite"]:
-            resultado["fecha_limite"] = parsear_fecha_es(siguiente_limpio or "")
-        elif "unidad ejecutora" in etiqueta and not resultado["organismo"]:
-            resultado["organismo"] = siguiente_limpio
-        elif "descripción" in etiqueta and not resultado["descripcion"]:
-            resultado["descripcion"] = _limpiar_parrafos(siguiente_crudo)
-        elif "tipo de licitación" in etiqueta and not resultado["tipo_aviso"]:
-            resultado["tipo_aviso"] = siguiente_limpio
-        elif "palabras clave de este pliego" in etiqueta and not resultado["palabras_clave"]:
-            claves = re.sub(r"\.\s*$", "", siguiente_limpio or "")
-            resultado["palabras_clave"] = [c.strip() for c in re.split(r"[,;]", claves) if c.strip()]
-
-    # Extracción de categorías y subcategorías de los chips superiores
-    i_sub = None
-    i_ubi = None
+    # --- Etiqueta -> valor (primera aparición de cada etiqueta) ---
     for i, (limpio, _) in enumerate(textos):
-        etq = _etq(limpio)
-        if "subcategorías" in etq:
-            i_sub = i
-        elif "ubicación" in etq:
-            i_ubi = i
+        clave = ETIQUETAS_FICHA.get(_etq(limpio))
+        if not clave or i + 1 >= len(textos) or (i + 1) in es_etiqueta:
+            continue
+        if clave == "palabras_clave":
+            if resultado["palabras_clave"]:
+                continue
+        elif resultado[clave]:
+            continue
+        valor_limpio, valor_crudo = textos[i + 1]
+        if clave == "fecha_limite":
+            resultado[clave] = parsear_fecha_es(valor_limpio)
+        elif clave == "descripcion":
+            resultado[clave] = _limpiar_parrafos(valor_crudo)
+        elif clave == "palabras_clave":
+            claves = re.sub(r"\.\s*$", "", valor_limpio or "")
+            resultado[clave] = [c.strip() for c in re.split(r"[,;]", claves) if c.strip()]
+        else:
+            resultado[clave] = valor_limpio or None
 
-    fin_principales = i_sub if i_sub is not None else (i_ubi if i_ubi is not None else len(textos))
-    for limpio, _ in textos[:fin_principales]:
-        if _es_chip_categoria(limpio, set()) and limpio not in resultado["categorias"]:
-            resultado["categorias"].append(limpio)
-
-    if i_sub is not None and i_ubi is not None and i_ubi > i_sub:
-        for limpio, _ in textos[i_sub + 1:i_ubi]:
-            if limpio and limpio not in resultado["subcategorias"]:
-                resultado["subcategorias"].append(limpio)
-
-    return resultado
-
-    def _valor(etiqueta, conservar_saltos=False):
-        i = _indice(etiqueta)
-        if i is None or i + 1 >= len(textos):
-            return None
-        limpio, crudo = textos[i + 1]
-        return _limpiar_parrafos(crudo) if conservar_saltos else limpio or None
-
-    i_sub = _indice("subcategorías", empieza_por=True)
-    i_ubi = _indice("ubicación")
+    # --- Categorías (chips en mayúsculas antes de 'Subcategorías'/'Ubicación') ---
     fin_principales = i_sub if i_sub is not None else (i_ubi if i_ubi is not None else 0)
     for limpio, _ in textos[:fin_principales]:
         if _es_chip_categoria(limpio, set()) and limpio not in resultado["categorias"]:
             resultado["categorias"].append(limpio)
+
+    # --- Subcategorías (entre 'Subcategorías (N)' y 'Ubicación:') ---
     if i_sub is not None and i_ubi is not None and i_ubi > i_sub:
         for limpio, _ in textos[i_sub + 1:i_ubi]:
             if limpio and limpio not in resultado["subcategorias"]:
                 resultado["subcategorias"].append(limpio)
-
-    resultado["pais"] = _valor("ubicación")
-    resultado["fecha_limite"] = parsear_fecha_es(_valor("cierre de postulación") or "")
-    resultado["organismo"] = _valor("unidad ejecutora")
-    resultado["descripcion"] = _valor("descripción", conservar_saltos=True)
-    resultado["tipo_aviso"] = _valor("tipo de licitación")
-
-    claves = _valor("palabras clave de este pliego")
-    if claves:
-        claves = re.sub(r"\.\s*$", "", claves)
-        resultado["palabras_clave"] = [c.strip() for c in re.split(r"[,;]", claves) if c.strip()]
 
     return resultado
 
@@ -392,13 +372,15 @@ _JS_SCROLL = """
 }
 """
 
-# Marca con data-gt-target el botón 'Ver detalle' de la tarjeta cuyo título coincide.
+# Marca con data-gt-target el botón 'Ver detalle' de la tarjeta cuyo título coincide
+# (y con data-gt-titulo el propio título, que también es pulsable).
 _JS_MARCAR_TARJETA = """
 (titulo) => {
   const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
   const botones = [...document.querySelectorAll('div[dir="auto"]')]
       .filter(e => norm(e.textContent) === 'Ver detalle');
   document.querySelectorAll('[data-gt-target]').forEach(e => e.removeAttribute('data-gt-target'));
+  document.querySelectorAll('[data-gt-titulo]').forEach(e => e.removeAttribute('data-gt-titulo'));
   for (const b of botones) {
     let nodo = b;
     while (nodo.parentElement && nodo.parentElement !== document.body) {
@@ -408,9 +390,10 @@ _JS_MARCAR_TARJETA = """
       if (n > 1) break;
       nodo = p;
     }
-    const spans = [...nodo.querySelectorAll('span > span')].map(s => norm(s.textContent)).filter(Boolean);
-    if (spans.length >= 2 && spans[1] === titulo) {
+    const spans = [...nodo.querySelectorAll('span > span')].filter(s => norm(s.textContent));
+    if (spans.length >= 2 && norm(spans[1].textContent) === titulo) {
       b.setAttribute('data-gt-target', '1');
+      spans[1].setAttribute('data-gt-titulo', '1');
       b.scrollIntoView({block: 'center'});
       return true;
     }
@@ -419,12 +402,30 @@ _JS_MARCAR_TARJETA = """
 }
 """
 
-_JS_FICHA_LISTA = """
+# La navegación ha ocurrido cuando la ruta pasa a /licitaciones/<pais>/<slug>-<id>.
+_JS_URL_FICHA = r"""
+() => /\/licitaciones\/[^\/]+\/[^\/]+/.test(location.pathname)
+"""
+
+# La ficha está pintada cuando existen los bloques <div dir="auto"> con las etiquetas
+# 'Descripción' y alguna de 'Ubicación:' / 'Unidad ejecutora' / 'Cierre de postulación'.
+_JS_EN_FICHA = r"""
 () => {
-  const h1 = document.querySelector('h1');
-  if (!h1) return false;
-  const t = (h1.textContent || '').trim();
-  return t !== '' && t !== 'Licitaciones' && /Descripci[oó]n/.test(document.body.innerText);
+  const textos = new Set([...document.querySelectorAll('div[dir="auto"]')]
+      .map(e => (e.textContent || '').replace(/\s+/g, ' ').trim()));
+  const hay = (...t) => t.some(x => textos.has(x));
+  return hay('Descripción', 'Descripcion') &&
+         hay('Ubicación:', 'Ubicación', 'Unidad ejecutora', 'Cierre de postulación');
+}
+"""
+
+# Enfoca el Pressable que contiene el botón marcado (para activarlo con el teclado).
+_JS_ENFOCAR_TARJETA = """
+() => {
+  let n = document.querySelector('[data-gt-target="1"]');
+  while (n && n.getAttribute('tabindex') === null) n = n.parentElement;
+  if (n) n.focus();
+  return !!n;
 }
 """
 
@@ -505,26 +506,112 @@ def _volver_al_listado(pagina):
         _cargar_listado(pagina)
 
 
+DIAGNOSTICO = []          # líneas que se vuelcan a CAPTURA_API al terminar
+_fallo_volcado = [False]  # solo se guarda el HTML del PRIMER fallo
+TIEMPO_ESPERA_NAVEGACION_MS = 10000   # por estrategia de clic (Next pide antes /_next/data/...)
+
+
+def _volcar_fallo(pagina, motivo: str):
+    """Deja constancia de lo que había en pantalla cuando falla una ficha."""
+    try:
+        textos = pagina.evaluate(
+            "() => [...document.querySelectorAll('div[dir=\"auto\"]')]"
+            ".map(e => (e.textContent || '').replace(/\\s+/g, ' ').trim()).filter(Boolean).slice(0, 40)"
+        )
+    except Exception:
+        textos = ["(no se pudo leer el DOM)"]
+    DIAGNOSTICO.append(f"[FALLO] {motivo} | URL: {pagina.url}")
+    DIAGNOSTICO.append("        primeros textos div[dir=auto]: " + " || ".join(textos))
+    print(f"      {motivo} (URL actual: {pagina.url})", flush=True)
+    if not _fallo_volcado[0]:
+        _fallo_volcado[0] = True
+        try:
+            with open(CAPTURA_FICHA, "w", encoding="utf-8") as f:
+                f.write(pagina.content())
+            print(f"      HTML del fallo guardado en {CAPTURA_FICHA}.", flush=True)
+        except Exception:
+            pass
+
+
+def _estrategias_de_activacion(pagina):
+    """Formas de activar un Pressable de React Native Web, de la más a la menos 'natural'."""
+    boton = pagina.locator('[data-gt-target="1"]').first
+    titulo = pagina.locator('[data-gt-titulo="1"]').first
+
+    def clic_normal():
+        boton.click(timeout=8000)
+
+    def clic_raton_en_coordenadas():
+        boton.scroll_into_view_if_needed(timeout=5000)
+        caja = boton.bounding_box()
+        if not caja:
+            raise RuntimeError("el botón no tiene caja visible")
+        pagina.mouse.click(caja["x"] + caja["width"] / 2, caja["y"] + caja["height"] / 2)
+
+    def clic_por_evento():
+        boton.dispatch_event("click")
+
+    def clic_en_titulo():
+        titulo.click(timeout=8000)
+
+    def teclado_enter():
+        if not pagina.evaluate(_JS_ENFOCAR_TARJETA):
+            raise RuntimeError("no se encontró el Pressable a enfocar")
+        pagina.keyboard.press("Enter")
+
+    return [
+        ("clic normal", clic_normal),
+        ("clic de ratón en coordenadas", clic_raton_en_coordenadas),
+        ("evento click", clic_por_evento),
+        ("clic en el título", clic_en_titulo),
+        ("teclado (Enter)", teclado_enter),
+    ]
+
+
+def _abrir_ficha(pagina) -> bool:
+    """Activa la tarjeta marcada y espera a que la ruta cambie a la ficha. True si navegó."""
+    for nombre, accion in _estrategias_de_activacion(pagina):
+        try:
+            accion()
+        except Exception as error:
+            print(f"      ({nombre}: {str(error).splitlines()[0][:110]})", flush=True)
+            continue
+        try:
+            pagina.wait_for_function(_JS_URL_FICHA, timeout=TIEMPO_ESPERA_NAVEGACION_MS)
+            if nombre != "clic normal":
+                print(f"      (la ficha se abrió con: {nombre})", flush=True)
+            return True
+        except Exception:
+            print(f"      ({nombre}: sin cambio de ruta tras {TIEMPO_ESPERA_NAVEGACION_MS // 1000}s)", flush=True)
+    return False
+
+
 def extraer_ficha_por_clic(pagina, titulo: str, guardar_captura: bool = False):
     """
-    Localiza la tarjeta por su título, hace clic en 'Ver detalle', lee la ficha
-    y vuelve al listado. Devuelve (url_ficha, datos_ficha) o (None, None) si falla.
+    Localiza la tarjeta por su título, la activa, espera a que la ficha esté pintada,
+    la lee y vuelve al listado. Devuelve (url_ficha, datos_ficha) o (None, None) si falla.
     """
     if not _asegurar_tarjeta_marcada(pagina, titulo):
         print("      No se encontró la tarjeta en el listado (¿ha cambiado el aviso?).", flush=True)
         return None, None
 
     try:
-        # Usamos force=True por si hay algún backdrop transparente interrumpiendo
-        pagina.locator('[data-gt-target="1"]').first.click(timeout=10000, force=True)
-        
-        # ELIMINAMOS page.wait_for_url() porque es una SPA y no hay navegación real de red.
-        # En su lugar, esperamos directamente a que el DOM de la ficha esté listo:
-        pagina.wait_for_function(_JS_FICHA_LISTA, timeout=TIEMPO_ESPERA_FICHA_MS)
-        
+        if not _abrir_ficha(pagina):
+            _volcar_fallo(pagina, "Ninguna forma de clic cambió la ruta")
+            _cargar_listado(pagina)
+            return None, None
+
+        # La ruta ya es la de la ficha: ahora se espera al CONTENIDO (puede tardar la API).
+        try:
+            pagina.wait_for_function(_JS_EN_FICHA, timeout=TIEMPO_ESPERA_FICHA_MS)
+        except Exception:
+            _volcar_fallo(pagina, "La ruta cambió pero la ficha no llegó a pintarse")
+            _cargar_listado(pagina)
+            return None, None
+
         url = pagina.url.split("#")[0].split("?")[0]
         html = pagina.content()
-        if guardar_captura:
+        if guardar_captura and not _fallo_volcado[0]:
             try:
                 with open(CAPTURA_FICHA, "w", encoding="utf-8") as f:
                     f.write(html)
@@ -687,7 +774,11 @@ def recorrer_portal(existentes: dict, hoy: date) -> list:
         navegador = None
         try:
             navegador = p.chromium.launch(headless=True)
-            contexto = navegador.new_context(user_agent=CABECERAS_USER_AGENT, locale="es-ES")
+            contexto = navegador.new_context(
+                user_agent=CABECERAS_USER_AGENT,
+                locale="es-ES",
+                viewport={"width": 1280, "height": 900},
+            )
             pagina = contexto.new_page()
             pagina.route("**/*", _bloquear_recursos_prescindibles)
 
@@ -738,11 +829,21 @@ def recorrer_portal(existentes: dict, hoy: date) -> list:
                 print(f"    Se limita a {MAX_FICHAS_POR_EJECUCION} fichas; el resto queda para la próxima ejecución.", flush=True)
                 pendientes = pendientes[:MAX_FICHAS_POR_EJECUCION]
 
+            fallos_seguidos = 0
             for indice, tarjeta in enumerate(pendientes, start=1):
                 print(f"  [{indice}/{len(pendientes)}] {tarjeta['pais']} | {tarjeta['titulo'][:90]}", flush=True)
                 url, ficha = extraer_ficha_por_clic(pagina, tarjeta["titulo"], guardar_captura=(indice == 1))
                 if not url or ficha is None:
+                    fallos_seguidos += 1
+                    if fallos_seguidos >= MAX_FALLOS_SEGUIDOS:
+                        print(
+                            f"    {MAX_FALLOS_SEGUIDOS} fichas seguidas sin abrir: se detiene el recorrido "
+                            f"(revisa {CAPTURA_FICHA} y {CAPTURA_API}).",
+                            flush=True,
+                        )
+                        break
                     continue
+                fallos_seguidos = 0
                 registro = construir_registro(tarjeta, url, ficha, hoy)
                 normalizados[registro["codigo_unico"]] = registro
                 pagina.wait_for_timeout(PAUSA_ENTRE_FICHAS_MS)
@@ -761,7 +862,10 @@ def recorrer_portal(existentes: dict, hoy: date) -> list:
         finally:
             try:
                 with open(CAPTURA_API, "w", encoding="utf-8") as f:
+                    f.write("LLAMADAS JSON (xhr/fetch):\n")
                     f.write("\n".join(dict.fromkeys(endpoints_json)) or "(sin llamadas JSON registradas)")
+                    if DIAGNOSTICO:
+                        f.write("\n\nDIAGNOSTICO DE FICHAS FALLIDAS:\n" + "\n".join(DIAGNOSTICO))
             except Exception:
                 pass
             if navegador is not None:
