@@ -161,12 +161,20 @@ def _generar_slug(texto: str) -> str:
 
 
 def parsear_fecha_wb(cadena_fecha: str):
-    """Convierte 'September 17,2026' / 'September 17, 2026' / '17-Sep-2026' a date."""
+    """Convierte 'October 01,2026' y otros formatos de fecha del World Bank a date."""
     if not cadena_fecha:
         return None
-    cadena_fecha = cadena_fecha.strip().lower()
+    
+    cadena_fecha_original = cadena_fecha
+    
+    # Normalizar espacios (eliminar non-breaking spaces \xa0 y espacios múltiples)
+    cadena_fecha = cadena_fecha.replace("\xa0", " ")
+    cadena_fecha = " ".join(cadena_fecha.split()).lower()
 
-    coincidencia = PATRON_FECHA_COMA.search(cadena_fecha)
+    # Patrón robusto para 'October 01,2026' (con o sin espacio tras la coma)
+    patron_coma = re.compile(r"([a-z]+)\s+(\d{1,2})\s*,\s*(\d{4})")
+    
+    coincidencia = patron_coma.search(cadena_fecha)
     if coincidencia:
         mes_texto, dia, anio = coincidencia.groups()
         mes = MESES.get(mes_texto)
@@ -176,6 +184,7 @@ def parsear_fecha_wb(cadena_fecha: str):
             except ValueError:
                 pass
 
+    # Si hay otros formatos, mantenemos el resto de patrones por si acaso
     coincidencia = PATRON_FECHA_GUION.search(cadena_fecha)
     if coincidencia:
         dia, mes_texto, anio = coincidencia.groups()
@@ -186,6 +195,7 @@ def parsear_fecha_wb(cadena_fecha: str):
             except ValueError:
                 pass
 
+    print(f"    [AVISO] No se pudo parsear la fecha raw: '{cadena_fecha_original}'", flush=True)
     return None
 
 
