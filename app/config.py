@@ -43,6 +43,7 @@ FUENTES_LICITACIONES = [
     "BEO/IADB",
     "BID",
     "CAF",
+    "Cabo Verde - Global Tenders",
     "EC-INTPA",
     "Enabel",
     "GIZ-Satellite",
