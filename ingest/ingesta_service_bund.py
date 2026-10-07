@@ -254,7 +254,11 @@ def obtener_datos_ficha(url: str) -> dict:
 
     etiqueta_titulo = soup.find("title")
     if etiqueta_titulo:
-        resultado["titulo"] = _limpiar_texto(etiqueta_titulo.get_text())
+        texto_titulo = etiqueta_titulo.get_text()
+        prefijo_portal = "SERVICE.BUND.DE - Aktuelle Ausschreibungen der öffentlichen Verwaltung Deutschlands (Bund, Länder, Städte und Kommunen) - "
+        if texto_titulo.startswith(prefijo_portal):
+            texto_titulo = texto_titulo[len(prefijo_portal):]
+        resultado["titulo"] = _limpiar_texto(texto_titulo)
 
     def _valor_por_dt(clave: str):
         for dt in soup.find_all("dt"):
