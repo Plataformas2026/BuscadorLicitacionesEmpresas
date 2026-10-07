@@ -49,6 +49,7 @@ FUENTES_LICITACIONES = [
     "Enabel",
     "GIZ-Satellite",
     "LuxDev",
+    "PLACSP",
     "Service-Bund",
     "TED",
     "UGPE",
