@@ -1,0 +1,48 @@
+name: Sincronizar Licitaciones (Cabo Verde - Global Tenders)
+
+on:
+  schedule:
+    - cron: '15 4 * * *'   # todos los dias a las 04:15 UTC
+  workflow_dispatch:
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Este script no usa Playwright (scraping directo con requests +
+      # BeautifulSoup, ver docstring de ingesta_globaltenders_cabo_verde.py),
+      # así que no hace falta instalar ningún navegador.
+
+      - name: Ejecutar sincronizacion Cabo Verde (Global Tenders)
+        working-directory: ingest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python ingesta_globaltenders_cabo_verde.py
+
+      - name: Subir capturas de depuracion (listado y primera ficha)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-globaltenders-cabo-verde
+          path: |
+            ingest/debug_globaltenders_cabo_verde_listado.html
+            ingest/debug_globaltenders_cabo_verde_ficha.html
+          if-no-files-found: ignore
+          retention-days: 7
