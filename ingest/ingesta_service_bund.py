@@ -255,10 +255,15 @@ def obtener_datos_ficha(url: str) -> dict:
     etiqueta_titulo = soup.find("title")
     if etiqueta_titulo:
         texto_titulo = etiqueta_titulo.get_text()
-        prefijo_portal = "SERVICE.BUND.DE - Aktuelle Ausschreibungen der öffentlichen Verwaltung Deutschlands (Bund, Länder, Städte und Kommunen) - "
-        if texto_titulo.startswith(prefijo_portal):
-            texto_titulo = texto_titulo[len(prefijo_portal):]
-        resultado["titulo"] = _limpiar_texto(texto_titulo)
+        partes = [p.strip() for p in texto_titulo.split(" - ")]
+        
+        # Si tiene la estructura del portal (más de 2 partes), omitimos las 2 primeras
+        if len(partes) > 2:
+            resultado["titulo"] = _limpiar_texto(" - ".join(partes[2:]))
+        elif partes:
+            resultado["titulo"] = _limpiar_texto(partes[-1])
+        else:
+            resultado["titulo"] = None
 
     def _valor_por_dt(clave: str):
         for dt in soup.find_all("dt"):
