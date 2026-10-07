@@ -254,8 +254,7 @@ def obtener_datos_ficha(url: str) -> dict:
 
     etiqueta_titulo = soup.find("title")
     if etiqueta_titulo:
-        # partes = etiqueta_titulo.get_text().split(" - ")
-        resultado["titulo"] = _limpiar_texto(partes[-1]) if partes else None
+        resultado["titulo"] = _limpiar_texto(etiqueta_titulo.get_text())
 
     def _valor_por_dt(clave: str):
         for dt in soup.find_all("dt"):
