@@ -37,6 +37,7 @@ GROQ_MODELO = _config("GROQ_MODELO", "openai/gpt-oss-20b")
 MODELO_EMBEDDING = "intfloat/multilingual-e5-small"  # 384 dimensiones
 
 FUENTES_LICITACIONES = [
+    "AECID",
     "AfDB",
     "AFD",
     "BCIE",
