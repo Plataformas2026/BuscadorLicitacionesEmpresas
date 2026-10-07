@@ -1,0 +1,48 @@
+name: Sincronizar Licitaciones (AECID)
+
+on:
+  schedule:
+    - cron: '15 6 * * *'   # todos los dias a las 06:15 UTC (libre; no solapa con el resto)
+  workflow_dispatch:
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Este script no usa Playwright (el listado de la sede electronica de la
+      # AECID viene renderizado en servidor, ver docstring de ingesta_aecid.py),
+      # asi que no hace falta instalar ningun navegador.
+
+      - name: Ejecutar sincronizacion AECID
+        working-directory: ingest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python ingesta_aecid.py
+
+      - name: Subir capturas de depuracion (listado y primera ficha)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-aecid
+          path: |
+            ingest/debug_aecid_listado.html
+            ingest/debug_aecid_detalle.html
+          if-no-files-found: ignore
+          retention-days: 7
