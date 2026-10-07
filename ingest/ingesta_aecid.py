@@ -82,6 +82,10 @@ TABLA = "licitaciones_internacionales"
 # ------------------------------------------------------------------
 # AJUSTES DE FILTRADO (se pueden tocar sin cambiar la lógica)
 # ------------------------------------------------------------------
+
+# No se descarta ningún procedimiento por antigüedad.
+MAX_ANTIGUEDAD_DIAS = None
+
 # Familias del listado que son trámites administrativos y no oportunidades
 # (registro de ONGD, acceso a información pública, altas de representante,
 # certificados). Vacía la tupla para ingestarlo todo.
@@ -91,10 +95,6 @@ FAMILIAS_EXCLUIDAS = (
     "Alta representante legal/Autorizado a trámite",
     "Certificación de ausencia de beca de las convocatorias MAEC-AECID",
 )
-# El portal mantiene en /activos procedimientos cuyo último trámite es de
-# hace años. Se descartan los que llevan más de estos días sin ningún trámite,
-# salvo que tengan el plazo abierto o estén en tramitación. None = no filtrar.
-MAX_ANTIGUEDAD_DIAS = 365
 
 OBTENER_DETALLE = True           # abrir la ficha de los procedimientos nuevos/cambiados
 MAX_FICHAS_POR_EJECUCION = 80
