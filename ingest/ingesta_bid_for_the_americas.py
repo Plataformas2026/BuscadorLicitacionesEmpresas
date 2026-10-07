@@ -477,13 +477,13 @@ def extraer_ficha_por_clic(pagina, titulo: str, guardar_captura: bool = False):
         return None, None
 
     try:
-        # pagina.locator('[data-gt-target="1"]').first.click(timeout=10000)
+        # Usamos force=True por si hay algún backdrop transparente interrumpiendo
         pagina.locator('[data-gt-target="1"]').first.click(timeout=10000, force=True)
-        pagina.wait_for_url(PATRON_URL_FICHA, timeout=TIEMPO_ESPERA_FICHA_MS)
-        try:
-            pagina.wait_for_function(_JS_FICHA_LISTA, timeout=TIEMPO_ESPERA_FICHA_MS)
-        except Exception:
-            print("      Aviso: la ficha tardó en completarse; se parsea lo que haya.", flush=True)
+        
+        # ELIMINAMOS page.wait_for_url() porque es una SPA y no hay navegación real de red.
+        # En su lugar, esperamos directamente a que el DOM de la ficha esté listo:
+        pagina.wait_for_function(_JS_FICHA_LISTA, timeout=TIEMPO_ESPERA_FICHA_MS)
+        
         url = pagina.url.split("#")[0].split("?")[0]
         html = pagina.content()
         if guardar_captura:
