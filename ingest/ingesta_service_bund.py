@@ -352,7 +352,7 @@ async def ejecutar_sincronizacion_async():
     print("=" * 100, flush=True)
 
     hoy = date.today()
-    ayer = hoy - timedelta(days=1)
+    ayer = hoy - timedelta(days=8)
     print(f"Ventana de fecha de publicación objetivo: {ayer} .. {hoy}", flush=True)
 
     crudos = await asyncio.to_thread(extraer_avisos_listado, ayer, hoy)
