@@ -292,6 +292,7 @@ from db import obtener_cliente, obtener_encoder
 
 import directorio
 import estadisticas
+import estadisticas_interes
 import fiabilidad
 import matching
 import search
@@ -351,11 +352,12 @@ with col_logout:
 # TABS
 # ============================================================
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab_interes, tab4, tab5 = st.tabs([
     "Buscador de Licitaciones",
     "Coincidencia Inteligente",
     "Directorio de Empresas",
-    "Estadísticas",
+    "Estadísticas de interés",
+    "Estadísticas de adjudicación",
     "Fiabilidad",
 ])
 
@@ -381,6 +383,13 @@ with tab3:
     directorio.render_tab3(
         supabase,
         encoder,
+    )
+
+
+with tab_interes:
+
+    estadisticas_interes.render_tab_interes(
+        supabase,
     )
 
 
