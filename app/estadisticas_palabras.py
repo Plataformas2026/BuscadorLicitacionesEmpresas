@@ -3,7 +3,11 @@ estadisticas_palabras.py
 ------------------------
 Pestaña Estadísticas, sección "Palabras clave según el estado": las 15
 palabras más repetidas en los títulos de las licitaciones ADJUDICADAS y en
-los de las NO ADJUDICADAS, cada una como una nube de palabras.
+los de las NO ADJUDICADAS, cada una como una nube de palabras (`render_nubes`);
+y, justo debajo, el mismo recuento desglosado por empresa en dos tablas
+paralelas (`render_palabras_por_empresa`): se elige una empresa en un
+desplegable y se ven sus palabras de las adjudicadas y de las no adjudicadas,
+con la palabra y su frecuencia.
 
 CÓMO SE CUENTA
 --------------
@@ -21,7 +25,7 @@ CÓMO SE CUENTA
 - Para excluir además palabras genéricas del sector (p. ej. «servicio»,
   «proyecto»), añádelas a `PALABRAS_EXCLUIDAS_EXTRA`.
 
-El módulo es puro salvo `render_nubes`: las funciones de conteo y de HTML no
+El módulo es puro salvo las funciones `render_*`: las funciones de conteo y de HTML no
 dependen de Streamlit y se pueden probar sueltas.
 """
 import hashlib
@@ -33,7 +37,7 @@ from collections import Counter, defaultdict
 import pandas as pd
 import streamlit as st
 
-from estadisticas_comun import COLOR_NEGATIVO, COLOR_POSITIVO
+from estadisticas_comun import COLOR_NEGATIVO, COLOR_POSITIVO, ancho_completo
 from normalizacion_resultados import NEGATIVO, POSITIVO, limpiar_texto
 
 NUMERO_DE_PALABRAS = 15
@@ -219,5 +223,93 @@ def render_nubes(base: pd.DataFrame):
     st.caption(
         "Tamaño y color según el número de licitaciones (títulos distintos) en que aparece cada palabra, que es la cifra "
         "pequeña. Se ignoran artículos, preposiciones y demás palabras vacías en español, inglés, portugués y francés. "
+        "Respeta los filtros de empresa y año."
+    )
+
+
+# ============================================================
+# DESGLOSE POR EMPRESA (tablas)
+# ============================================================
+
+def tabla_de_palabras(palabras: list) -> pd.DataFrame:
+    """[(palabra, frecuencia), ...] -> tabla con las columnas Nº, Palabra y Títulos."""
+    return pd.DataFrame(
+        {
+            "Nº": range(1, len(palabras) + 1),
+            "Palabra": [p for p, _ in palabras],
+            "Títulos": [c for _, c in palabras],
+        },
+        columns=["Nº", "Palabra", "Títulos"],
+    )
+
+
+def palabras_de_empresa(base: pd.DataFrame, empresa: str) -> tuple:
+    """
+    Palabras más repetidas de una empresa, separadas por estado:
+    (adjudicadas, nº de títulos adjudicados, no adjudicadas, nº de títulos no adjudicados).
+    """
+    de_la_empresa = base[base["empresa"] == empresa]
+    positivas, n_positivas = palabras_mas_repetidas(de_la_empresa.loc[de_la_empresa["categoria"] == POSITIVO, "titulo"])
+    negativas, n_negativas = palabras_mas_repetidas(de_la_empresa.loc[de_la_empresa["categoria"] == NEGATIVO, "titulo"])
+    return positivas, n_positivas, negativas, n_negativas
+
+
+def _columna_de_palabras(titulo: str, color: str, palabras: list, n_titulos: int):
+    st.markdown(
+        f'<div style="display:flex;align-items:center;justify-content:space-between;margin:2px 0 6px 0">'
+        f'<span style="background:{color}1a;color:{color};font-weight:700;font-size:12.5px;border-radius:999px;'
+        f'padding:3px 12px;border:1px solid {color}55">{html.escape(titulo)}</span>'
+        f'<span style="font-size:11.5px;color:#5b6470">{n_titulos} títulos analizados</span></div>',
+        unsafe_allow_html=True,
+    )
+    if not palabras:
+        st.caption("Sin títulos para esta empresa en este estado.")
+        return
+    ancho_completo(
+        st.dataframe,
+        tabla_de_palabras(palabras),
+        hide_index=True,
+        height=min(38 + 35 * len(palabras), 38 + 35 * NUMERO_DE_PALABRAS),
+        column_config={
+            "Nº": st.column_config.NumberColumn("Nº", width="small"),
+            "Palabra": st.column_config.TextColumn("Palabra"),
+            "Títulos": st.column_config.ProgressColumn(
+                "Títulos", min_value=0, max_value=max(c for _, c in palabras), format="%d",
+                help="Nº de licitaciones (títulos distintos) en que aparece la palabra",
+            ),
+        },
+    )
+
+
+def render_palabras_por_empresa(base: pd.DataFrame):
+    """
+    Desplegable de empresa y, al elegirla, dos tablas paralelas (adjudicadas / no adjudicadas) con sus palabras
+    más repetidas. `base`: referencias con resultado claro ya filtradas por empresa y año
+    (columnas `empresa`, `titulo` y `categoria`).
+    """
+    st.markdown("#### Palabras clave más repetidas por empresa")
+
+    if base.empty or "empresa" not in base.columns:
+        st.info("No hay títulos con resultado claro para esta combinación de filtros.")
+        return
+
+    empresas = sorted(base["empresa"].unique(), key=str.casefold)
+    elegida = st.selectbox(
+        "Empresa", empresas, index=None, placeholder="Elige una empresa", key="tab4_palabras_empresa",
+        help="Si la empresa elegida deja de estar en los filtros de arriba, vuelve a elegirla.",
+    )
+    if elegida is None:
+        st.caption("Elige una empresa para ver las palabras más repetidas en los títulos de sus licitaciones.")
+        return
+
+    positivas, n_positivas, negativas, n_negativas = palabras_de_empresa(base, elegida)
+    col_positivas, col_negativas = st.columns(2)
+    with col_positivas:
+        _columna_de_palabras("Adjudicadas", COLOR_POSITIVO, positivas, n_positivas)
+    with col_negativas:
+        _columna_de_palabras("No adjudicadas", COLOR_NEGATIVO, negativas, n_negativas)
+    st.caption(
+        f"Las {NUMERO_DE_PALABRAS} palabras más repetidas en los títulos de {elegida}; «Títulos» es el número de "
+        "licitaciones distintas en que aparece cada una. Mismas reglas que las nubes de arriba. "
         "Respeta los filtros de empresa y año."
     )

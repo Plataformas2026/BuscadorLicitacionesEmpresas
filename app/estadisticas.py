@@ -38,11 +38,15 @@ QUÉ MUESTRA
    filtro de resultado no se aplica aquí porque el % necesita ambos.
 3. Las 15 palabras más repetidas en los títulos de las licitaciones
    adjudicadas y en las no adjudicadas (`estadisticas_palabras.py`).
-4. Fiabilidad de la herramienta: formulario para registrar si la empresa
-   adjudicada estaba entre las 5 primeras recomendaciones y carrusel con el %
-   de acierto por empresa (`estadisticas_fiabilidad.py`).
-5. Un desplegable que explica cómo se ha interpretado cada redacción de
-   RESULTADO, para poder comprobar la normalización.
+4. Porcentaje de éxito por organismo financiador, en barras horizontales
+   (`estadisticas_organismos.py`), justo debajo del carrusel de empresas.
+5. Palabras clave por empresa (`estadisticas_palabras.py`): desplegable de
+   empresa y dos tablas paralelas (adjudicadas / no adjudicadas), debajo de
+   las nubes.
+
+La fiabilidad de la herramienta tiene su propia pestaña (`fiabilidad.py`),
+que también muestra el desplegable de cómo se ha interpretado RESULTADO
+(`render_interpretacion`, definida aquí).
 
 Los elementos compartidos (colores, paginación, carrusel) están en
 `estadisticas_comun.py`.
@@ -61,8 +65,8 @@ from estadisticas_comun import (
     leer_paginado,
     mostrar_html,
 )
-from estadisticas_fiabilidad import render_fiabilidad
-from estadisticas_palabras import render_nubes
+from estadisticas_organismos import render_organismos
+from estadisticas_palabras import render_nubes, render_palabras_por_empresa
 from normalizacion_resultados import (
     IGNORADO,
     NEGATIVO,
@@ -73,7 +77,7 @@ from normalizacion_resultados import (
 )
 
 TABLA_REFERENCIAS = "empresas_referencias"
-COLUMNAS_REFERENCIAS = "id, numero_interno, nombre_empresa_excel, titulo, fecha, resultado"
+COLUMNAS_REFERENCIAS = "id, numero_interno, nombre_empresa_excel, titulo, fecha, resultado, organismo_financiador"
 
 # Empresas cuya hoja propia del Excel repite filas de "REFERENCIAS P BÚSQUEDAS"
 # (clave = nombre tal y como lo normaliza `limpiar_texto`).
@@ -102,9 +106,10 @@ def construir_dataframe(filas: list, nombres_canonicos: dict) -> tuple:
     interpretadas, nº de duplicados de la hoja HMS eliminados).
 
     Columnas: empresa, titulo, anio (Int64, puede ser NA), categoria
-    (POSITIVO / NEGATIVO / IGNORADO), regla, resultado_original.
+    (POSITIVO / NEGATIVO / IGNORADO), regla, resultado_original,
+    organismo_original (texto libre del Excel; se unifica en estadisticas_organismos.py).
     """
-    columnas = ["empresa", "titulo", "anio", "categoria", "regla", "resultado_original"]
+    columnas = ["empresa", "titulo", "anio", "categoria", "regla", "resultado_original", "organismo_original"]
     if not filas:
         return pd.DataFrame(columns=columnas), 0
 
@@ -122,6 +127,7 @@ def construir_dataframe(filas: list, nombres_canonicos: dict) -> tuple:
             "categoria": categoria,
             "regla": regla,
             "resultado_original": (fila.get("resultado") or "").strip(),
+            "organismo_original": (fila.get("organismo_financiador") or "").strip(),
             # solo para detectar duplicados; no se conservan
             "_empresa_excel": limpiar_texto(nombre_excel),
             "_titulo": limpiar_texto(fila.get("titulo")),
@@ -258,6 +264,29 @@ def construir_grafica(serie: pd.DataFrame, tipo: str):
 
 
 # ============================================================
+# DESPLEGABLE DE INTERPRETACIÓN (se muestra en la pestaña Fiabilidad)
+# ============================================================
+
+def render_interpretacion(df: pd.DataFrame, duplicadas_hms: int = 0):
+    """Desplegable que explica cómo se ha interpretado cada redacción de RESULTADO. `df`: todas las referencias."""
+    with st.expander("¿Cómo se ha interpretado el campo RESULTADO?"):
+        total = len(df)
+        n_pos_total = int((df["categoria"] == POSITIVO).sum())
+        n_neg_total = int((df["categoria"] == NEGATIVO).sum())
+        st.markdown(
+            f"De **{total}** referencias, **{n_pos_total}** se interpretan como adjudicadas, **{n_neg_total}** como no "
+            f"adjudicadas y **{total - n_pos_total - n_neg_total}** se ignoran (sin resultado, sin información, "
+            "pendientes, canceladas o no presentadas, o textos que solo nombran socios)."
+        )
+        if duplicadas_hms:
+            st.caption(
+                f"Se han descartado {duplicadas_hms} filas duplicadas de HMS (la hoja HMS repite las de "
+                "«REFERENCIAS P BÚSQUEDAS»)."
+            )
+        ancho_completo(st.dataframe, resumen_interpretacion(df), hide_index=True, height=360)
+
+
+# ============================================================
 # PESTAÑA
 # ============================================================
 
@@ -328,25 +357,11 @@ def render_tab4(supabase: Client):
             "Respeta los filtros de empresa y año."
         )
 
+    # ---------------- Porcentaje de éxito por organismo financiador ----------------
+    render_organismos(base)
+
     # ---------------- Palabras clave de los títulos, según el estado ----------------
     render_nubes(base)
 
-    # ---------------- Fiabilidad de la herramienta ----------------
-    render_fiabilidad(supabase)
-
-    # ---------------- Cómo se ha interpretado RESULTADO ----------------
-    with st.expander("¿Cómo se ha interpretado el campo RESULTADO?"):
-        total = len(df)
-        n_pos_total = int((df["categoria"] == POSITIVO).sum())
-        n_neg_total = int((df["categoria"] == NEGATIVO).sum())
-        st.markdown(
-            f"De **{total}** referencias, **{n_pos_total}** se interpretan como adjudicadas, **{n_neg_total}** como no "
-            f"adjudicadas y **{total - n_pos_total - n_neg_total}** se ignoran (sin resultado, sin información, "
-            "pendientes, canceladas o no presentadas, o textos que solo nombran socios)."
-        )
-        if duplicadas_hms:
-            st.caption(
-                f"Se han descartado {duplicadas_hms} filas duplicadas de HMS (la hoja HMS repite las de "
-                "«REFERENCIAS P BÚSQUEDAS»)."
-            )
-        ancho_completo(st.dataframe, resumen_interpretacion(df), hide_index=True, height=360)
+    # ---------------- Palabras clave por empresa (tablas) ----------------
+    render_palabras_por_empresa(base)
