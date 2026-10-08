@@ -1,0 +1,53 @@
+name: Sincronizar licitaciones informadas (Google Drive)
+
+on:
+  schedule:
+    # Una vez al día (03:00 UTC). El script solo carga datos si el Excel ha
+    # cambiado en Drive desde la última vez (o si cambió su lógica); si no, la
+    # ejecución dura unos segundos.
+    - cron: '0 3 * * *'
+  workflow_dispatch:   # sincronización inmediata a mano (pestaña Actions > Run workflow)
+    inputs:
+      forzar:
+        description: 'Forzar resincronización completa aunque el Excel no haya cambiado'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Nunca dos sincronizaciones a la vez: la carga vacía y vuelve a llenar la tabla.
+concurrency:
+  group: sincronizar-licitaciones-informadas
+  cancel-in-progress: false
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Solo lo imprescindible (no hace falta el modelo de embeddings ni el resto de requirements.txt).
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install supabase openpyxl google-api-python-client google-auth
+
+      - name: Ejecutar sincronización de licitaciones informadas
+        working-directory: ingest
+        env:
+          PYTHONUNBUFFERED: "1"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_DRIVE_FILE_ID_INFORMADAS: ${{ secrets.GOOGLE_DRIVE_FILE_ID_INFORMADAS }}
+          FORZAR_SINCRONIZACION: ${{ github.event.inputs.forzar }}
+        run: python sync_licitaciones_informadas_drive.py
