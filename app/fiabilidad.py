@@ -5,9 +5,11 @@ Pestaña 5: Fiabilidad de la herramienta.
 
 QUÉ HACE
 --------
-Cuando una licitación se adjudica a una empresa, el usuario la registra aquí y
-responde a una pregunta: ¿la empresa adjudicada estaba entre las 5 primeras
-recomendaciones de la herramienta? Cada respuesta se guarda en la tabla
+La fiabilidad se mide según el INTERÉS de las empresas, no según la
+adjudicación: se le ha informado a una empresa de una licitación, y esta ha
+mostrado interés y confirmado que encaja con su perfil. Cuando eso ocurre, el
+usuario lo registra aquí y responde a una pregunta: ¿esa empresa estaba entre
+las 5 primeras recomendaciones de la herramienta? Cada respuesta se guarda en la tabla
 `fiabilidad_herramienta` (empresa, titulo, bool_acierto, fecha) y con ellas
 la pestaña muestra:
 
@@ -282,7 +284,7 @@ def _al_guardar(supabase: Client):
     respuesta = st.session_state.get(CLAVE_RESPUESTA)
 
     if not empresa:
-        st.session_state[CLAVE_MENSAJE] = ("error", "Elige la empresa que ha sido adjudicada.")
+        st.session_state[CLAVE_MENSAJE] = ("error", "Elige la empresa que ha mostrado interés.")
         return
     if not titulo:
         st.session_state[CLAVE_MENSAJE] = ("error", "Escribe el título de la licitación.")
@@ -311,7 +313,8 @@ def _formulario(supabase: Client, empresas: list):
     with st.container(border=True):
         st.markdown("**Registrar un caso**")
         st.caption(
-            "Cuando una licitación se adjudique a una empresa, apúntala aquí. La fecha se guarda sola (la de hoy, "
+            "Cuando se le informe a una empresa de una licitación y esta muestre interés y confirme que encaja con "
+            "su perfil, apúntalo aquí (no hace falta que se adjudique). La fecha se guarda sola (la de hoy, "
             f"{hoy():%d/%m/%Y}). Si registras otra vez la misma empresa y título, se corrige la respuesta anterior "
             "y la fecha pasa a ser la de hoy."
         )
@@ -319,7 +322,7 @@ def _formulario(supabase: Client, empresas: list):
             col_empresa, col_titulo = st.columns([2, 3])
             with col_empresa:
                 st.selectbox(
-                    "Empresa adjudicada", empresas, index=None, placeholder="Elige la empresa", key=CLAVE_EMPRESA
+                    "Empresa con interés confirmado", empresas, index=None, placeholder="Elige la empresa", key=CLAVE_EMPRESA
                 )
             with col_titulo:
                 st.text_input(
@@ -329,8 +332,8 @@ def _formulario(supabase: Client, empresas: list):
                     key=CLAVE_TITULO,
                 )
             st.radio(
-                f"¿La empresa que ha sido adjudicada estaba entre las {NUM_RECOMENDACIONES} primeras "
-                "recomendaciones de la herramienta?",
+                "¿La empresa que ha mostrado interés y ha confirmado que encaja con su perfil estaba entre las "
+                f"{NUM_RECOMENDACIONES} primeras recomendaciones de la herramienta?",
                 [RESPUESTA_SI, RESPUESTA_NO],
                 index=None,
                 horizontal=True,
@@ -423,8 +426,8 @@ def _resultados(supabase: Client, datos: pd.DataFrame):
         ALTURA_CARRUSEL,
     )
     st.caption(
-        f"Porcentaje de casos en que la empresa adjudicada estaba entre las {NUM_RECOMENDACIONES} primeras "
-        "recomendaciones. De la empresa con la que más acierta la herramienta a la que menos: las últimas son los "
+        "Porcentaje de casos en que la empresa que mostró interés y confirmó que encaja con su perfil (no la "
+        f"adjudicada) estaba entre las {NUM_RECOMENDACIONES} primeras recomendaciones. De la empresa con la que más acierta la herramienta a la que menos: las últimas son los "
         "perfiles en los que conviene afinar las búsquedas. Con pocos casos el porcentaje es poco representativo: "
         "fíjate en «X de Y»."
     )
@@ -439,9 +442,10 @@ def _resultados(supabase: Client, datos: pd.DataFrame):
 def render_tab5(supabase: Client):
     st.subheader("Fiabilidad de la herramienta")
     st.caption(
-        f"¿Con qué frecuencia la empresa que acaba adjudicada estaba entre las {NUM_RECOMENDACIONES} primeras "
-        "recomendaciones de la herramienta? Registra los casos y consulta cómo evoluciona la fiabilidad y con qué "
-        "empresas acierta más y menos."
+        "La fiabilidad se mide según el interés de las empresas, no según la adjudicación: se le ha informado a una "
+        "empresa de la licitación, y esta ha mostrado interés y confirmado que encaja con su perfil. "
+        f"¿Con qué frecuencia esa empresa estaba entre las {NUM_RECOMENDACIONES} primeras recomendaciones de la "
+        "herramienta? Registra los casos y consulta cómo evoluciona la fiabilidad y con qué empresas acierta más y menos."
     )
 
     try:

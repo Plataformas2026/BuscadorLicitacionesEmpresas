@@ -37,7 +37,7 @@ from collections import Counter, defaultdict
 import pandas as pd
 import streamlit as st
 
-from estadisticas_comun import COLOR_NEGATIVO, COLOR_POSITIVO, ancho_completo
+from estadisticas_comun import COLOR_NEGATIVO, COLOR_POSITIVO, PERFIL_ADJUDICACION, Perfil, ancho_completo
 from normalizacion_resultados import NEGATIVO, POSITIVO, limpiar_texto
 
 NUMERO_DE_PALABRAS = 15
@@ -188,14 +188,16 @@ def _bloque(titulo: str, color: str, n_titulos: int, nube: str) -> str:
     )
 
 
-def construir_html_panel(positivas: list, n_positivas: int, negativas: list, n_negativas: int) -> str:
+def construir_html_panel(
+    positivas: list, n_positivas: int, negativas: list, n_negativas: int, perfil: Perfil = PERFIL_ADJUDICACION
+) -> str:
     """Panel con las dos nubes lado a lado (una debajo de otra en pantallas estrechas)."""
     return (
         '<div style="background:#ffffff;border:1px solid #dfe5f1;border-radius:14px;padding:14px 8px 8px 8px;'
         'box-shadow:0 2px 8px rgba(23,32,51,0.07);margin:4px 0 6px 0">'
         '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:6px">'
-        + _bloque("Adjudicadas", COLOR_POSITIVO, n_positivas, construir_html_nube(positivas, PALETA_POSITIVA))
-        + _bloque("No adjudicadas", COLOR_NEGATIVO, n_negativas, construir_html_nube(negativas, PALETA_NEGATIVA))
+        + _bloque(perfil.positivos, COLOR_POSITIVO, n_positivas, construir_html_nube(positivas, PALETA_POSITIVA))
+        + _bloque(perfil.negativos, COLOR_NEGATIVO, n_negativas, construir_html_nube(negativas, PALETA_NEGATIVA))
         + "</div></div>"
     )
 
@@ -204,7 +206,7 @@ def construir_html_panel(positivas: list, n_positivas: int, negativas: list, n_n
 # SECCIÓN DE LA PESTAÑA
 # ============================================================
 
-def render_nubes(base: pd.DataFrame):
+def render_nubes(base: pd.DataFrame, perfil: Perfil = PERFIL_ADJUDICACION):
     """
     `base`: referencias con resultado claro ya filtradas por empresa y año
     (columnas `titulo` y `categoria`).
@@ -212,18 +214,18 @@ def render_nubes(base: pd.DataFrame):
     st.markdown(f"#### Las {NUMERO_DE_PALABRAS} palabras clave más repetidas en los títulos, según el estado")
 
     if base.empty or "titulo" not in base.columns:
-        st.info("No hay títulos con resultado claro para esta combinación de filtros.")
+        st.info(f"No hay títulos con {perfil.claro} para esta combinación de filtros.")
         return
 
     positivas, n_positivas = palabras_mas_repetidas(base.loc[base["categoria"] == POSITIVO, "titulo"])
     negativas, n_negativas = palabras_mas_repetidas(base.loc[base["categoria"] == NEGATIVO, "titulo"])
 
     # Una sola línea y sin sangrías: el parser de Markdown trataría líneas con 4 espacios como código.
-    st.markdown(construir_html_panel(positivas, n_positivas, negativas, n_negativas), unsafe_allow_html=True)
+    st.markdown(construir_html_panel(positivas, n_positivas, negativas, n_negativas, perfil), unsafe_allow_html=True)
     st.caption(
         "Tamaño y color según el número de licitaciones (títulos distintos) en que aparece cada palabra, que es la cifra "
         "pequeña. Se ignoran artículos, preposiciones y demás palabras vacías en español, inglés, portugués y francés. "
-        "Respeta los filtros de empresa y año."
+        + f"Respeta los filtros de {perfil.filtros}."
     )
 
 
@@ -281,7 +283,7 @@ def _columna_de_palabras(titulo: str, color: str, palabras: list, n_titulos: int
     )
 
 
-def render_palabras_por_empresa(base: pd.DataFrame):
+def render_palabras_por_empresa(base: pd.DataFrame, perfil: Perfil = PERFIL_ADJUDICACION):
     """
     Desplegable de empresa y, al elegirla, dos tablas paralelas (adjudicadas / no adjudicadas) con sus palabras
     más repetidas. `base`: referencias con resultado claro ya filtradas por empresa y año
@@ -290,12 +292,12 @@ def render_palabras_por_empresa(base: pd.DataFrame):
     st.markdown("#### Palabras clave más repetidas por empresa")
 
     if base.empty or "empresa" not in base.columns:
-        st.info("No hay títulos con resultado claro para esta combinación de filtros.")
+        st.info(f"No hay títulos con {perfil.claro} para esta combinación de filtros.")
         return
 
     empresas = sorted(base["empresa"].unique(), key=str.casefold)
     elegida = st.selectbox(
-        "Empresa", empresas, index=None, placeholder="Elige una empresa", key="tab4_palabras_empresa",
+        "Empresa", empresas, index=None, placeholder="Elige una empresa", key=f"{perfil.clave}_palabras_empresa",
         help="Si la empresa elegida deja de estar en los filtros de arriba, vuelve a elegirla.",
     )
     if elegida is None:
@@ -305,11 +307,11 @@ def render_palabras_por_empresa(base: pd.DataFrame):
     positivas, n_positivas, negativas, n_negativas = palabras_de_empresa(base, elegida)
     col_positivas, col_negativas = st.columns(2)
     with col_positivas:
-        _columna_de_palabras("Adjudicadas", COLOR_POSITIVO, positivas, n_positivas)
+        _columna_de_palabras(perfil.positivos, COLOR_POSITIVO, positivas, n_positivas)
     with col_negativas:
-        _columna_de_palabras("No adjudicadas", COLOR_NEGATIVO, negativas, n_negativas)
+        _columna_de_palabras(perfil.negativos, COLOR_NEGATIVO, negativas, n_negativas)
     st.caption(
         f"Las {NUMERO_DE_PALABRAS} palabras más repetidas en los títulos de {elegida}; «Títulos» es el número de "
         "licitaciones distintas en que aparece cada una. Mismas reglas que las nubes de arriba. "
-        "Respeta los filtros de empresa y año."
+        + f"Respeta los filtros de {perfil.filtros}."
     )

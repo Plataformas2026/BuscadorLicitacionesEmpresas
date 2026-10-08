@@ -42,12 +42,10 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from estadisticas_comun import COLOR_NEGATIVO, COLOR_POSITIVO, ancho_completo
+from estadisticas_comun import COLOR_NEGATIVO, COLOR_POSITIVO, PERFIL_ADJUDICACION, Perfil, ancho_completo
 from normalizacion_resultados import NEGATIVO, POSITIVO
 
 MINIMO_POR_DEFECTO = 3
-ETIQUETA_POSITIVO = "Adjudicada"
-ETIQUETA_NEGATIVO = "No adjudicada"
 
 _ISLAS = {
     "gran canaria": "Gran Canaria", "tenerife": "Tenerife", "palma": "La Palma", "gomera": "La Gomera",
@@ -65,7 +63,7 @@ REGLAS_ORGANISMOS = [
     (r"^bid\b|^idb$|banco interamericano|inter-american development", "BID"),
     (r"^caf\b|camara andina de fomento|corporacion andina de fomento", "CAF"),
     (r"\bafd\b|agence francaise", "AFD"),
-    (r"\bbafd\b|\bafdb\b|banco africano|african development bank", "Banco Africano de Desarrollo"),
+    (r"\bbafd\b|\bafdb\b|^bad\b|banco africano|african development bank", "Banco Africano de Desarrollo"),
     (r"\badb\b|asian development bank|banco asiatico", "Banco Asiático de Desarrollo"),
     (r"\bebrd\b|\bberd\b|european bank for reconstruction", "BERD (EBRD)"),
     (r"\bbcie\b|centroamericano de integracion", "BCIE"),
@@ -76,7 +74,7 @@ REGLAS_ORGANISMOS = [
     (r"cabildo (?:insular )?de (?:la |el )?(" + "|".join(_ISLAS) + r")\b", None),  # nombre = «Cabildo de <isla>»
     (r"\bproexca\b", "PROEXCA"),
     (r"\bpnud\b|\bundp\b", "PNUD (UNDP)"),
-    (r"naciones unidas|\bonu\b|\bnnuu\b|^un$|\bfao\b|\bpma\b|\bunido\b|\boit\b", "Naciones Unidas (ONU)"),
+    (r"naciones unidas|\bonu\b|\bnnuu\b|^un$|\bfao\b|\bpma\b|\bunido\b|\boit\b|\bungm\b|unicef", "Naciones Unidas (ONU)"),
     (r"\bue\b|\beu\b|^ce\b|union europea|comision europea|european commission|interreg|\bfeder\b|erasmus"
      r"|programa life|^life$|\bhorizon\b|digital europe|cordis", UNION_EUROPEA),
     (r"cliente privado|cliente publico", CLIENTE_MIXTO),
@@ -173,7 +171,8 @@ def tabla_de_agrupaciones(claros: pd.DataFrame) -> pd.DataFrame:
 # GRÁFICA
 # ============================================================
 
-def construir_grafica_organismos(exito: pd.DataFrame):
+def construir_grafica_organismos(exito: pd.DataFrame, perfil: Perfil = PERFIL_ADJUDICACION):
+    ETIQUETA_POSITIVO, ETIQUETA_NEGATIVO = perfil.positivo, perfil.negativo
     orden = list(exito["organismo"])
     partes = pd.concat([
         pd.DataFrame({"organismo": exito["organismo"], "resultado": ETIQUETA_POSITIVO, "n": exito["adjudicadas"]}),
@@ -188,7 +187,7 @@ def construir_grafica_organismos(exito: pd.DataFrame):
     barras = alt.Chart(partes).mark_bar().encode(
         y=eje_y,
         x=alt.X(
-            "fraccion:Q", title="% de las licitaciones con resultado claro", scale=escala_x,
+            "fraccion:Q", title=f"% de las licitaciones con {perfil.claro}", scale=escala_x,
             axis=alt.Axis(values=[0, 25, 50, 75, 100], format="d", grid=True),
         ),
         order=alt.Order("resultado:N", sort="descending"),
@@ -219,30 +218,33 @@ def construir_grafica_organismos(exito: pd.DataFrame):
 # SECCIÓN DE LA PESTAÑA
 # ============================================================
 
-def render_organismos(base: pd.DataFrame):
+def render_organismos(base: pd.DataFrame, perfil: Perfil = PERFIL_ADJUDICACION):
     """`base`: referencias con resultado claro ya filtradas por empresa y año (columnas `organismo_original` y `categoria`)."""
     st.markdown("#### Porcentaje de éxito por organismo financiador")
 
     minimo = int(st.number_input(
         "Mínimo de licitaciones por organismo", min_value=1, max_value=50, value=MINIMO_POR_DEFECTO, step=1,
-        key="tab4_organismos_minimo",
+        key=f"{perfil.clave}_organismos_minimo",
         help="Con muy pocas licitaciones el porcentaje no es representativo (1 de 1 sería un 100 %).",
     ))
     exito, descartados = exito_por_organismo(base, minimo)
 
     if exito.empty:
         st.info(
-            "No hay organismos financiadores con suficientes licitaciones de resultado claro para esta combinación "
+            f"No hay organismos financiadores con suficientes licitaciones de {perfil.claro} para esta combinación "
             "de filtros. Prueba a bajar el mínimo."
         )
         return
 
-    ancho_completo(st.altair_chart, construir_grafica_organismos(exito))
+    ancho_completo(st.altair_chart, construir_grafica_organismos(exito, perfil))
 
     nota = (
-        "Adjudicadas / (adjudicadas + no adjudicadas) según el organismo financiador del Excel, de mayor a menor. "
-        "Las filas sin organismo financiador no cuentan. Respeta los filtros de empresa y año."
+        f"{perfil.formula} según el organismo "
+        "financiador del Excel, de mayor a menor. Las filas sin organismo financiador no cuentan. "
+        + f"Respeta los filtros de {perfil.filtros}."
     )
+    if perfil.definicion:
+        nota = perfil.definicion + " " + nota
     if descartados:
         nota += f" Quedan fuera {descartados} organismos con menos de {minimo} licitaciones."
     st.caption(nota)

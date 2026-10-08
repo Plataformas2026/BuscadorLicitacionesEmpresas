@@ -1,7 +1,11 @@
 """
 estadisticas.py
 ---------------
-Pestaña 4: Estadísticas de resultados de licitaciones.
+Pestaña 4: Estadísticas de adjudicación (resultados de licitaciones).
+
+El mismo motor (`render_estadisticas`) dibuja también la pestaña «Estadísticas
+de interés» (`estadisticas_interes.py`): cambian los datos, la lectura del
+resultado y los textos (`Perfil` de `estadisticas_comun.py`), no las gráficas.
 
 ORIGEN DE LOS DATOS
 -------------------
@@ -60,6 +64,9 @@ from estadisticas_comun import (
     ALTURA_CARRUSEL,
     COLOR_NEGATIVO,
     COLOR_POSITIVO,
+    NOMBRES_MESES,
+    PERFIL_ADJUDICACION,
+    Perfil,
     ancho_completo,
     construir_html_carrusel,
     leer_paginado,
@@ -83,9 +90,13 @@ COLUMNAS_REFERENCIAS = "id, numero_interno, nombre_empresa_excel, titulo, fecha,
 # (clave = nombre tal y como lo normaliza `limpiar_texto`).
 EMPRESAS_CON_HOJA_ESPEJO = {"hms"}
 
-ETIQUETA_POSITIVO = "Adjudicada"
-ETIQUETA_NEGATIVO = "No adjudicada"
+ETIQUETA_POSITIVO = PERFIL_ADJUDICACION.positivo
+ETIQUETA_NEGATIVO = PERFIL_ADJUDICACION.negativo
 ETIQUETAS = {POSITIVO: ETIQUETA_POSITIVO, NEGATIVO: ETIQUETA_NEGATIVO}
+
+
+def etiquetas_de(perfil: Perfil) -> dict:
+    return {POSITIVO: perfil.positivo, NEGATIVO: perfil.negativo}
 
 
 
@@ -159,16 +170,20 @@ def cargar_referencias(_supabase: Client) -> tuple:
 # CÁLCULOS (puros: reciben y devuelven DataFrames)
 # ============================================================
 
-def filtrar(claros: pd.DataFrame, empresas: list, anios: list) -> pd.DataFrame:
-    """Aplica los filtros de empresa y año (lista vacía = sin filtrar)."""
+def filtrar(claros: pd.DataFrame, empresas: list, anios: list, meses: list = ()) -> pd.DataFrame:
+    """Aplica los filtros de empresa, año y mes (1-12; solo si la tabla tiene la columna `mes`). Vacío = sin filtrar."""
     if empresas:
         claros = claros[claros["empresa"].isin(empresas)]
     if anios:
         claros = claros[claros["anio"].isin(anios)]
+    if len(meses) and "mes" in claros.columns:
+        claros = claros[claros["mes"].isin(meses)]
     return claros
 
 
-def serie_por_anio(claros: pd.DataFrame, anios_elegidos: list, categorias: list) -> pd.DataFrame:
+def serie_por_anio(
+    claros: pd.DataFrame, anios_elegidos: list, categorias: list, etiquetas: dict = ETIQUETAS
+) -> pd.DataFrame:
     """
     Nº de licitaciones por (año, resultado) con ceros donde no hay ninguna,
     para que la gráfica no "salte" años y las barras queden alineadas.
@@ -189,7 +204,7 @@ def serie_por_anio(claros: pd.DataFrame, anios_elegidos: list, categorias: list)
         for categoria in categorias:
             filas.append({
                 "anio": anio,
-                "resultado": ETIQUETAS[categoria],
+                "resultado": etiquetas[categoria],
                 "n": int(conteo.get((anio, categoria), 0)),
             })
     return pd.DataFrame(filas)
@@ -213,8 +228,8 @@ def exito_por_empresa(claros: pd.DataFrame) -> pd.DataFrame:
     return agrupado.sort_values(["pct", "total", "empresa"], ascending=[False, False, True]).reset_index(drop=True)
 
 
-def resumen_interpretacion(df: pd.DataFrame) -> pd.DataFrame:
-    """Una fila por redacción distinta de RESULTADO: cómo se ha clasificado y cuántas veces aparece."""
+def resumen_interpretacion(df: pd.DataFrame, perfil: Perfil = PERFIL_ADJUDICACION) -> pd.DataFrame:
+    """Una fila por redacción distinta del campo de texto (RESULTADO o COMENTARIOS): cómo se ha clasificado y cuántas veces aparece."""
     if df.empty:
         return pd.DataFrame(columns=["Redacción en el Excel", "Se interpreta como", "Regla aplicada", "Nº"])
 
@@ -224,7 +239,7 @@ def resumen_interpretacion(df: pd.DataFrame) -> pd.DataFrame:
         .size()
         .reset_index(name="Nº")
     )
-    nombres = {POSITIVO: ETIQUETA_POSITIVO, NEGATIVO: ETIQUETA_NEGATIVO, IGNORADO: "Se ignora"}
+    nombres = {POSITIVO: perfil.positivo, NEGATIVO: perfil.negativo, IGNORADO: "Se ignora"}
     tabla["Se interpreta como"] = tabla["categoria"].map(nombres)
     tabla["Redacción en el Excel"] = tabla["texto"].map(lambda t: (t[:90] + "…") if len(t) > 90 else (t or "(vacío)"))
     tabla = tabla.rename(columns={"regla": "Regla aplicada"})
@@ -237,10 +252,10 @@ def resumen_interpretacion(df: pd.DataFrame) -> pd.DataFrame:
 # GRÁFICA
 # ============================================================
 
-def construir_grafica(serie: pd.DataFrame, tipo: str):
+def construir_grafica(serie: pd.DataFrame, tipo: str, perfil: Perfil = PERFIL_ADJUDICACION):
     codificacion_color = alt.Color(
         "resultado:N",
-        scale=alt.Scale(domain=[ETIQUETA_POSITIVO, ETIQUETA_NEGATIVO], range=[COLOR_POSITIVO, COLOR_NEGATIVO]),
+        scale=alt.Scale(domain=[perfil.positivo, perfil.negativo], range=[COLOR_POSITIVO, COLOR_NEGATIVO]),
         legend=alt.Legend(title=None, orient="top", direction="horizontal"),
     )
     eje_x = alt.X("anio:O", title="Año", axis=alt.Axis(labelAngle=0))
@@ -264,104 +279,168 @@ def construir_grafica(serie: pd.DataFrame, tipo: str):
 
 
 # ============================================================
-# DESPLEGABLE DE INTERPRETACIÓN (se muestra en la pestaña Fiabilidad)
+# DESPLEGABLE DE INTERPRETACIÓN
 # ============================================================
 
-def render_interpretacion(df: pd.DataFrame, duplicadas_hms: int = 0):
-    """Desplegable que explica cómo se ha interpretado cada redacción de RESULTADO. `df`: todas las referencias."""
-    with st.expander("¿Cómo se ha interpretado el campo RESULTADO?"):
+def render_interpretacion(
+    df: pd.DataFrame,
+    duplicadas_hms: int = 0,
+    perfil: Perfil = PERFIL_ADJUDICACION,
+    campo: str = "RESULTADO",
+    explicacion: str = "",
+):
+    """
+    Desplegable que explica cómo se ha interpretado cada redacción del campo de texto libre (RESULTADO en la
+    pestaña de adjudicación, COMENTARIOS en la de interés). `df`: todas las filas, también las ignoradas.
+    """
+    with st.expander(f"¿Cómo se ha interpretado el campo {campo}?"):
         total = len(df)
         n_pos_total = int((df["categoria"] == POSITIVO).sum())
         n_neg_total = int((df["categoria"] == NEGATIVO).sum())
         st.markdown(
-            f"De **{total}** referencias, **{n_pos_total}** se interpretan como adjudicadas, **{n_neg_total}** como no "
-            f"adjudicadas y **{total - n_pos_total - n_neg_total}** se ignoran (sin resultado, sin información, "
-            "pendientes, canceladas o no presentadas, o textos que solo nombran socios)."
+            f"De **{total}** referencias, **{n_pos_total}** se interpretan como {perfil.positivos.lower()}, "
+            f"**{n_neg_total}** como {perfil.negativos.lower()} y **{total - n_pos_total - n_neg_total}** se ignoran "
+            + (
+                "(sin resultado, sin información, pendientes, canceladas o no presentadas, o textos que solo nombran socios)."
+                if not explicacion else f"({explicacion})."
+            )
         )
         if duplicadas_hms:
             st.caption(
                 f"Se han descartado {duplicadas_hms} filas duplicadas de HMS (la hoja HMS repite las de "
                 "«REFERENCIAS P BÚSQUEDAS»)."
             )
-        ancho_completo(st.dataframe, resumen_interpretacion(df), hide_index=True, height=360)
+        ancho_completo(st.dataframe, resumen_interpretacion(df, perfil), hide_index=True, height=360)
 
 
 # ============================================================
-# PESTAÑA
+# PESTAÑA (la misma para adjudicación y para interés)
 # ============================================================
 
-def render_tab4(supabase: Client):
-    st.subheader("Estadísticas de licitaciones")
-    st.caption(
-        "Resultados de las referencias de la hoja «REFERENCIAS P BÚSQUEDAS» del Excel. "
-        "Solo cuentan las licitaciones con un resultado claro (adjudicada o no adjudicada)."
-    )
+def render_estadisticas(
+    supabase: Client,
+    perfil: Perfil,
+    cargar,
+    titulo: str,
+    descripcion: str,
+    mensaje_vacio: str,
+    con_mes: bool = False,
+    pie=None,
+):
+    """
+    Dibuja la pestaña de estadísticas completa.
+
+    `cargar(supabase)` -> (DataFrame con TODAS las filas ya interpretadas, dato extra para `pie`); columnas:
+    empresa, titulo, anio, categoria, regla, resultado_original, organismo_original (y `mes`, 1-12, si `con_mes`).
+    `pie(df, extra)` dibuja, si se indica, lo que va al final (el desplegable de interpretación).
+    """
+    st.subheader(titulo)
+    st.caption(descripcion)
 
     try:
         with st.spinner("Cargando estadísticas..."):
-            df, duplicadas_hms = cargar_referencias(supabase)
+            df, extra = cargar(supabase)
     except Exception as error:
-        st.error(f"No se han podido cargar las referencias de Supabase: {error}")
+        st.error(f"No se han podido cargar los datos de Supabase: {error}")
         return
 
     claros = df[df["categoria"] != IGNORADO]
     if claros.empty:
-        st.info("Todavía no hay referencias con un resultado claro (adjudicada / no adjudicada) para mostrar.")
+        st.info(mensaje_vacio)
+        if pie:
+            pie(df, extra)
         return
+
+    clave = perfil.clave
+    etiquetas = etiquetas_de(perfil)
 
     # ---------------- Filtros ----------------
     opciones_empresas = sorted(claros["empresa"].unique(), key=str.casefold)
     opciones_anios = sorted((int(a) for a in claros["anio"].dropna().unique()), reverse=True)
 
-    col_empresa, col_anio, col_resultado, col_tipo = st.columns([3, 2, 2, 2])
+    anchuras = [3, 2, 2, 2, 2] if con_mes else [3, 2, 2, 2]
+    columnas = st.columns(anchuras)
+    col_empresa, col_anio = columnas[0], columnas[1]
+    col_mes = columnas[2] if con_mes else None
+    col_resultado, col_tipo = columnas[-2], columnas[-1]
+
     with col_empresa:
-        filtro_empresas = st.multiselect("Empresa", opciones_empresas, key="tab4_filtro_empresa", placeholder="Todas")
+        filtro_empresas = st.multiselect("Empresa", opciones_empresas, key=f"{clave}_filtro_empresa", placeholder="Todas")
     with col_anio:
-        filtro_anios = st.multiselect("Año", opciones_anios, key="tab4_filtro_anio", placeholder="Todos")
+        filtro_anios = st.multiselect("Año", opciones_anios, key=f"{clave}_filtro_anio", placeholder="Todos")
+    filtro_meses = []
+    if con_mes:
+        opciones_meses = sorted(int(m) for m in claros["mes"].dropna().unique())
+        with col_mes:
+            filtro_meses = st.multiselect(
+                "Mes", opciones_meses, key=f"{clave}_filtro_mes", placeholder="Todos", format_func=NOMBRES_MESES.get
+            )
     with col_resultado:
         filtro_resultados = st.multiselect(
-            "Resultado", [ETIQUETA_POSITIVO, ETIQUETA_NEGATIVO], key="tab4_filtro_resultado", placeholder="Todos"
+            "Resultado", [perfil.positivo, perfil.negativo], key=f"{clave}_filtro_resultado", placeholder="Todos"
         )
     with col_tipo:
-        tipo_grafica = st.radio("Tipo de gráfica", ["Barras", "Líneas"], horizontal=True, key="tab4_tipo_grafica")
+        tipo_grafica = st.radio("Tipo de gráfica", ["Barras", "Líneas"], horizontal=True, key=f"{clave}_tipo_grafica")
 
-    base = filtrar(claros, filtro_empresas, filtro_anios)
+    base = filtrar(claros, filtro_empresas, filtro_anios, filtro_meses)
 
-    categorias = [c for c, etiqueta in ETIQUETAS.items() if not filtro_resultados or etiqueta in filtro_resultados]
+    categorias = [c for c, etiqueta in etiquetas.items() if not filtro_resultados or etiqueta in filtro_resultados]
     seleccion = base[base["categoria"].isin(categorias)]
 
     # ---------------- Gráfica ----------------
-    serie = serie_por_anio(seleccion, filtro_anios, categorias)
+    serie = serie_por_anio(seleccion, filtro_anios, categorias, etiquetas)
     if serie.empty or int(serie["n"].sum()) == 0:
-        st.info("No hay licitaciones con resultado claro para esta combinación de filtros.")
+        st.info(f"No hay licitaciones con {perfil.claro} para esta combinación de filtros.")
     else:
         n_pos = int((seleccion["categoria"] == POSITIVO).sum())
         n_neg = int((seleccion["categoria"] == NEGATIVO).sum())
         sin_anio = int(seleccion["anio"].isna().sum())
-        texto_resumen = f"{n_pos + n_neg} licitaciones con resultado claro: {n_pos} adjudicadas · {n_neg} no adjudicadas"
+        texto_resumen = (
+            f"{n_pos + n_neg} licitaciones con {perfil.claro}: {n_pos} {perfil.positivos.lower()} · "
+            f"{n_neg} {perfil.negativos.lower()}"
+        )
         if sin_anio and not filtro_anios:
-            texto_resumen += f" ({sin_anio} sin año en FECHA no aparecen en la gráfica)"
+            texto_resumen += f" ({sin_anio} sin año no aparecen en la gráfica)"
         st.caption(texto_resumen)
-        ancho_completo(st.altair_chart, construir_grafica(serie, tipo_grafica))
+        ancho_completo(st.altair_chart, construir_grafica(serie, tipo_grafica, perfil))
 
     # ---------------- Carrusel de % de éxito ----------------
     st.markdown("#### Porcentaje de éxito por empresa")
     exito = exito_por_empresa(base)
     if exito.empty:
-        st.info("No hay empresas con resultado claro para esta combinación de filtros.")
+        st.info(f"No hay empresas con {perfil.claro} para esta combinación de filtros.")
     else:
-        mostrar_html(construir_html_carrusel(exito), ALTURA_CARRUSEL)
+        mostrar_html(construir_html_carrusel(exito, etiqueta_exitos=perfil.unidad_exito), ALTURA_CARRUSEL)
         st.caption(
-            "Adjudicadas / (adjudicadas + no adjudicadas), de mayor a menor; a igual porcentaje, antes la que tiene más "
-            "licitaciones. Con pocas licitaciones el porcentaje es poco representativo: fíjate en «X de Y». "
-            "Respeta los filtros de empresa y año."
+            (perfil.definicion + " " if perfil.definicion else "")
+            + f"{perfil.formula}, de mayor a menor; "
+            "a igual porcentaje, antes la que tiene más licitaciones. Con pocas licitaciones el porcentaje es poco "
+            f"representativo: fíjate en «X de Y». Respeta los filtros de {perfil.filtros}."
         )
 
     # ---------------- Porcentaje de éxito por organismo financiador ----------------
-    render_organismos(base)
+    render_organismos(base, perfil)
 
     # ---------------- Palabras clave de los títulos, según el estado ----------------
-    render_nubes(base)
+    render_nubes(base, perfil)
 
     # ---------------- Palabras clave por empresa (tablas) ----------------
-    render_palabras_por_empresa(base)
+    render_palabras_por_empresa(base, perfil)
+
+    if pie:
+        pie(df, extra)
+
+
+def render_tab4(supabase: Client):
+    """Pestaña «Estadísticas de adjudicación»: hoja «REFERENCIAS P BÚSQUEDAS» y su campo RESULTADO."""
+    render_estadisticas(
+        supabase,
+        PERFIL_ADJUDICACION,
+        cargar_referencias,
+        titulo="Estadísticas de adjudicación",
+        descripcion=(
+            "Resultados de las referencias de la hoja «REFERENCIAS P BÚSQUEDAS» del Excel. "
+            "Solo cuentan las licitaciones con un resultado claro (adjudicada o no adjudicada)."
+        ),
+        mensaje_vacio="Todavía no hay referencias con un resultado claro (adjudicada / no adjudicada) para mostrar.",
+    )

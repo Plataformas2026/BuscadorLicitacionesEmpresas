@@ -7,6 +7,7 @@ colores, lectura paginada de Supabase, ayudas para mostrar elementos de
 Streamlit y el carrusel de tarjetas.
 """
 import html
+from dataclasses import dataclass
 
 import pandas as pd
 import streamlit as st
@@ -17,6 +18,60 @@ COLOR_POSITIVO = "#0066cc"
 COLOR_NEGATIVO = "#e8590c"
 
 ALTURA_CARRUSEL = 132  # px del iframe del carrusel (compacto)
+
+NOMBRES_MESES = {
+    1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
+    7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
+}
+
+
+@dataclass(frozen=True)
+class Perfil:
+    """
+    Cómo se llama el «éxito» y el «fracaso» en cada pestaña de estadísticas. Las mismas gráficas y tablas
+    (empresas, organismos, palabras) sirven para las dos pestañas y solo cambian estos textos.
+    """
+    clave: str              # prefijo de las claves de los widgets (tiene que ser distinto en cada pestaña)
+    positivo: str           # etiqueta de un caso de éxito (leyenda, filtro, tooltip)
+    negativo: str           # etiqueta de un caso de fracaso
+    positivos: str          # lo mismo, para titulares de listas («Adjudicadas»)
+    negativos: str
+    unidad_exito: str       # lo que se cuenta en «X de Y <unidad>» del carrusel
+    claro: str              # «resultado claro» / «respuesta clara»
+    definicion: str = ""    # definición de éxito que se repite en los textos descriptivos (opcional)
+    filtros: str = "empresa y año"  # filtros que respetan las secciones («Respeta los filtros de ...»)
+    formula_texto: str = ""         # cómo se expresa el % de éxito en los textos (si no, se deduce de las etiquetas)
+
+    @property
+    def formula(self) -> str:
+        return self.formula_texto or f"{self.positivos} / ({self.positivos.lower()} + {self.negativos.lower()})"
+
+
+PERFIL_ADJUDICACION = Perfil(
+    clave="tab4",
+    positivo="Adjudicada",
+    negativo="No adjudicada",
+    positivos="Adjudicadas",
+    negativos="No adjudicadas",
+    unidad_exito="adjudicadas",
+    claro="resultado claro",
+)
+
+PERFIL_INTERES = Perfil(
+    clave="tab_interes",
+    positivo="Interés confirmado",
+    negativo="Sin interés / no encaja",
+    positivos="Interés confirmado",
+    negativos="Sin interés / no encaja",
+    unidad_exito="con interés",
+    claro="respuesta clara",
+    filtros="empresa, año y mes",
+    formula_texto="Con interés confirmado / (con interés confirmado + sin interés o no encaja)",
+    definicion=(
+        "Éxito = que se le ha informado a una empresa de la licitación, y esta ha mostrado interés y confirmado "
+        "que encaja con su perfil."
+    ),
+)
 
 
 def leer_paginado(construir_consulta, tamano_pagina: int = 1000) -> list:
