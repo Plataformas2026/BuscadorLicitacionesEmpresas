@@ -48,6 +48,8 @@ COLUMNAS_INFORMADAS = "id, anio, mes, empresa, titulo, organismo_financiador, co
 # Variantes de nombre que son la misma empresa (clave en mayúsculas -> nombre que se muestra).
 ALIAS_EMPRESAS = {
     "CANARY TEK": "CANARYTEK",
+    "RALEY" : "RALEY ESTUDIOS COSTEROS",
+    "INNOVARIS" : "GRUPO INNOVARIS",
 }
 
 COLUMNAS = [
