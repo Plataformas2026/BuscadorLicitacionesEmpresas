@@ -304,7 +304,13 @@ def construir_grafica(serie: pd.DataFrame, tipo: str, tipo_eje: str, perfil: Per
     titulo_eje_x = "Mes y Año" if tipo_eje == "mes" else "Año"
     rotacion_etiquetas = -45 if tipo_eje == "mes" else 0
     
-    eje_x = alt.X("periodo:O", title=titulo_eje_x, axis=alt.Axis(labelAngle=rotacion_etiquetas))
+    # Forzamos el orden cronológico exacto usando sort con los valores únicos del DataFrame
+    eje_x = alt.X(
+        "periodo:O", 
+        title=titulo_eje_x, 
+        sort=list(serie["periodo"].unique()), 
+        axis=alt.Axis(labelAngle=rotacion_etiquetas)
+    )
     eje_y = alt.Y("n:Q", title="Número de resultados", axis=alt.Axis(tickMinStep=1, format="d"))
     
     tooltip = [
