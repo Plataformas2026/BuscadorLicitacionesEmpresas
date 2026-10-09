@@ -138,7 +138,7 @@ def render_tab_interes(supabase: Client):
         cargar,
         titulo="Estadísticas de interés",
         descripcion=(
-            "Licitaciones informadas a las empresas, del Excel de seguimiento (Google Drive). "
+            ""
             + PERFIL_INTERES.definicion
             + " Solo cuentan las licitaciones con una respuesta clara de la empresa (columna COMENTARIOS): "
             "las que aún no tienen respuesta registrada no entran en los porcentajes."
