@@ -120,7 +120,7 @@ def construir_dataframe(filas: list, nombres_canonicos: dict) -> tuple:
     (POSITIVO / NEGATIVO / IGNORADO), regla, resultado_original,
     organismo_original (texto libre del Excel; se unifica en estadisticas_organismos.py).
     """
-    columnas = ["empresa", "titulo", "anio", "categoria", "regla", "resultado_original", "organismo_original"]
+    columnas = ["empresa", "titulo", "anio", "mes", "categoria", "regla", "resultado_original", "organismo_original"]
     if not filas:
         return pd.DataFrame(columns=columnas), 0
 
@@ -131,10 +131,25 @@ def construir_dataframe(filas: list, nombres_canonicos: dict) -> tuple:
         if not empresa:
             continue
         categoria, regla = clasificar_resultado(fila.get("resultado"))
+        
+        # Extraemos mes y año de la fecha si es posible
+        fecha_str = str(fila.get("fecha") or "")
+        anio_val = extraer_anio(fecha_str)
+        
+        # Intentar extraer el mes de la fecha (asumiendo formato estándar YYYY-MM-DD o similar)
+        mes_val = None
+        try:
+            dt_parsed = pd.to_datetime(fila.get("fecha"), errors="coerce")
+            if pd.notna(dt_parsed):
+                mes_val = int(dt_parsed.month)
+        except Exception:
+            pass
+
         registros.append({
             "empresa": empresa,
             "titulo": (fila.get("titulo") or "").strip(),
-            "anio": extraer_anio(fila.get("fecha")),
+            "anio": anio_val,
+            "mes": mes_val,
             "categoria": categoria,
             "regla": regla,
             "resultado_original": (fila.get("resultado") or "").strip(),
@@ -142,26 +157,27 @@ def construir_dataframe(filas: list, nombres_canonicos: dict) -> tuple:
             # solo para detectar duplicados; no se conservan
             "_empresa_excel": limpiar_texto(nombre_excel),
             "_titulo": limpiar_texto(fila.get("titulo")),
-            "_fecha": str(fila.get("fecha") or ""),
+            "_fecha": fecha_str,
         })
 
     df = pd.DataFrame(registros)
     es_espejo = df["_empresa_excel"].isin(EMPRESAS_CON_HOJA_ESPEJO)
-    # Se compara la INTERPRETACIÓN y no el texto: la hoja HMS usa la columna RESULTADO
-    # para describir la tarea, así que el texto difiere aunque la fila sea la misma.
     duplicada = es_espejo & df.duplicated(
         subset=["_empresa_excel", "_titulo", "_fecha", "categoria"], keep="first"
     )
     df = df[~duplicada]
 
-    df["anio"] = df["anio"].astype("Int64")
+    df["anio"] = pd.to_numeric(df["anio"], errors="coerce").astype("Int64")
+    if "mes" in df.columns:
+        df["mes"] = pd.to_numeric(df["mes"], errors="coerce").astype("Int64")
+        
     return df[columnas].reset_index(drop=True), int(duplicada.sum())
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def cargar_referencias(_supabase: Client) -> tuple:
     filas = leer_paginado(
-        lambda: _supabase.table(TABLA_REFERENCIAS).select(COLUMNAS_REFERENCIAS).order("id")
+        lambda: _supabase.table(TABLA_REFERENCIAS).select(COLUMNAS_REFERENCIAS + ", fecha").order("id")
     )
     return construir_dataframe(filas, _nombres_canonicos(_supabase))
 
@@ -171,7 +187,7 @@ def cargar_referencias(_supabase: Client) -> tuple:
 # ============================================================
 
 def filtrar(claros: pd.DataFrame, empresas: list, anios: list, meses: list = ()) -> pd.DataFrame:
-    """Aplica los filtros de empresa, año y mes (1-12; solo si la tabla tiene la columna `mes`). Vacío = sin filtrar."""
+    """Aplica los filtros de empresa, año y mes (1-12). Vacío = sin filtrar."""
     if empresas:
         claros = claros[claros["empresa"].isin(empresas)]
     if anios:
@@ -181,41 +197,68 @@ def filtrar(claros: pd.DataFrame, empresas: list, anios: list, meses: list = ())
     return claros
 
 
-def serie_por_anio(
+def serie_por_periodo(
     claros: pd.DataFrame, anios_elegidos: list, categorias: list, etiquetas: dict = ETIQUETAS
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, str]:
     """
-    Nº de licitaciones por (año, resultado) con ceros donde no hay ninguna,
-    para que la gráfica no "salte" años y las barras queden alineadas.
-    Columnas: anio (int), resultado (etiqueta), n.
+    Agrupa por mes si hay menos de 3 años (en total o seleccionados),
+    o por año si hay 3 o más.
+    Devuelve (DataFrame con columnas: periodo, resultado, n, y tipo_eje: 'anio' o 'mes').
     """
-    con_anio = claros.dropna(subset=["anio"])
-    if con_anio.empty:
-        return pd.DataFrame(columns=["anio", "resultado", "n"])
+    con_datos = claros.dropna(subset=["anio"])
+    if con_datos.empty:
+        return pd.DataFrame(columns=["periodo", "resultado", "n"]), "anio"
 
+    anios_disponibles = sorted(int(a) for a in con_datos["anio"].unique())
     if anios_elegidos:
         anios = sorted(int(a) for a in anios_elegidos)
     else:
-        anios = list(range(int(con_anio["anio"].min()), int(con_anio["anio"].max()) + 1))
+        anios = anios_disponibles
 
-    conteo = con_anio.groupby(["anio", "categoria"]).size()
+    # CONDICIÓN: Si hay menos de 3 años, agrupamos por mes
+    if len(anios) < 3 and "mes" in con_datos.columns:
+        if anios_elegidos:
+            con_datos = con_datos[con_datos["anio"].isin(anios_elegidos)]
+        
+        conteo = con_datos.groupby(["anio", "mes", "categoria"]).size()
+        filas = []
+        for anio in anios:
+            for mes in range(1, 13):
+                nombre_mes = NOMBRES_MESES.get(mes, str(mes))
+                periodo_str = f"{nombre_mes} {anio}"
+                for categoria in categorias:
+                    filas.append({
+                        "periodo": periodo_str,
+                        "resultado": etiquetas[categoria],
+                        "n": int(conteo.get((anio, mes, categoria), 0)),
+                        "_orden": f"{anio}-{mes:02d}",
+                    })
+        df_res = pd.DataFrame(filas)
+        if not df_res.empty:
+            df_res = df_res.sort_values("_orden").drop(columns=["_orden"])
+        return df_res, "mes"
+    
+    # Comportamiento por defecto (por año si hay 3 o más)
+    if anios_elegidos:
+        anios_finales = sorted(int(a) for a in anios_elegidos)
+    else:
+        anios_finales = list(range(int(con_datos["anio"].min()), int(con_datos["anio"].max()) + 1))
+
+    conteo = con_datos.groupby(["anio", "categoria"]).size()
     filas = []
-    for anio in anios:
+    for anio in anios_finales:
         for categoria in categorias:
             filas.append({
-                "anio": anio,
+                "periodo": str(anio),
                 "resultado": etiquetas[categoria],
                 "n": int(conteo.get((anio, categoria), 0)),
             })
-    return pd.DataFrame(filas)
+    return pd.DataFrame(filas), "anio"
 
 
 def exito_por_empresa(claros: pd.DataFrame) -> pd.DataFrame:
     """
-    % de éxito = adjudicadas / (adjudicadas + no adjudicadas), de mayor a
-    menor. Con el mismo % va primero la empresa con más licitaciones (más
-    fiable), y después el orden alfabético.
-    Columnas: empresa, adjudicadas, total, pct.
+    % de éxito = adjudicadas / (adjudicadas + no adjudicadas), de mayor a menor.
     """
     if claros.empty:
         return pd.DataFrame(columns=["empresa", "adjudicadas", "total", "pct"])
@@ -229,7 +272,6 @@ def exito_por_empresa(claros: pd.DataFrame) -> pd.DataFrame:
 
 
 def resumen_interpretacion(df: pd.DataFrame, perfil: Perfil = PERFIL_ADJUDICACION) -> pd.DataFrame:
-    """Una fila por redacción distinta del campo de texto (RESULTADO o COMENTARIOS): cómo se ha clasificado y cuántas veces aparece."""
     if df.empty:
         return pd.DataFrame(columns=["Redacción en el Excel", "Se interpreta como", "Regla aplicada", "Nº"])
 
@@ -252,16 +294,21 @@ def resumen_interpretacion(df: pd.DataFrame, perfil: Perfil = PERFIL_ADJUDICACIO
 # GRÁFICA
 # ============================================================
 
-def construir_grafica(serie: pd.DataFrame, tipo: str, perfil: Perfil = PERFIL_ADJUDICACION):
+def construir_grafica(serie: pd.DataFrame, tipo: str, tipo_eje: str, perfil: Perfil = PERFIL_ADJUDICACION):
     codificacion_color = alt.Color(
         "resultado:N",
         scale=alt.Scale(domain=[perfil.positivo, perfil.negativo], range=[COLOR_POSITIVO, COLOR_NEGATIVO]),
         legend=alt.Legend(title=None, orient="top", direction="horizontal"),
     )
-    eje_x = alt.X("anio:O", title="Año", axis=alt.Axis(labelAngle=0))
+    
+    titulo_eje_x = "Mes y Año" if tipo_eje == "mes" else "Año"
+    rotacion_etiquetas = -45 if tipo_eje == "mes" else 0
+    
+    eje_x = alt.X("periodo:O", title=titulo_eje_x, axis=alt.Axis(labelAngle=rotacion_etiquetas))
     eje_y = alt.Y("n:Q", title="Número de resultados", axis=alt.Axis(tickMinStep=1, format="d"))
+    
     tooltip = [
-        alt.Tooltip("anio:O", title="Año"),
+        alt.Tooltip("periodo:O", title="Periodo"),
         alt.Tooltip("resultado:N", title="Resultado"),
         alt.Tooltip("n:Q", title="Nº de licitaciones"),
     ]
@@ -289,10 +336,6 @@ def render_interpretacion(
     campo: str = "RESULTADO",
     explicacion: str = "",
 ):
-    """
-    Desplegable que explica cómo se ha interpretado cada redacción del campo de texto libre (RESULTADO en la
-    pestaña de adjudicación, COMENTARIOS en la de interés). `df`: todas las filas, también las ignoradas.
-    """
     with st.expander(f"¿Cómo se ha interpretado el campo {campo}?"):
         total = len(df)
         n_pos_total = int((df["categoria"] == POSITIVO).sum())
@@ -327,13 +370,6 @@ def render_estadisticas(
     con_mes: bool = False,
     pie=None,
 ):
-    """
-    Dibuja la pestaña de estadísticas completa.
-
-    `cargar(supabase)` -> (DataFrame con TODAS las filas ya interpretadas, dato extra para `pie`); columnas:
-    empresa, titulo, anio, categoria, regla, resultado_original, organismo_original (y `mes`, 1-12, si `con_mes`).
-    `pie(df, extra)` dibuja, si se indica, lo que va al final (el desplegable de interpretación).
-    """
     st.subheader(titulo)
     st.caption(descripcion)
 
@@ -368,6 +404,7 @@ def render_estadisticas(
         filtro_empresas = st.multiselect("Empresa", opciones_empresas, key=f"{clave}_filtro_empresa", placeholder="Todas")
     with col_anio:
         filtro_anios = st.multiselect("Año", opciones_anios, key=f"{clave}_filtro_anio", placeholder="Todos")
+    
     filtro_meses = []
     if con_mes:
         opciones_meses = sorted(int(m) for m in claros["mes"].dropna().unique())
@@ -375,6 +412,7 @@ def render_estadisticas(
             filtro_meses = st.multiselect(
                 "Mes", opciones_meses, key=f"{clave}_filtro_mes", placeholder="Todos", format_func=NOMBRES_MESES.get
             )
+            
     with col_resultado:
         filtro_resultados = st.multiselect(
             "Resultado", [perfil.positivo, perfil.negativo], key=f"{clave}_filtro_resultado", placeholder="Todos"
@@ -387,8 +425,8 @@ def render_estadisticas(
     categorias = [c for c, etiqueta in etiquetas.items() if not filtro_resultados or etiqueta in filtro_resultados]
     seleccion = base[base["categoria"].isin(categorias)]
 
-    # ---------------- Gráfica ----------------
-    serie = serie_por_anio(seleccion, filtro_anios, categorias, etiquetas)
+    # ---------------- Gráfica (Dinámica: Año o Meses) ----------------
+    serie, tipo_eje = serie_por_periodo(seleccion, filtro_anios, categorias, etiquetas)
     if serie.empty or int(serie["n"].sum()) == 0:
         st.info(f"No hay licitaciones con {perfil.claro} para esta combinación de filtros.")
     else:
@@ -402,7 +440,7 @@ def render_estadisticas(
         if sin_anio and not filtro_anios:
             texto_resumen += f" ({sin_anio} sin año no aparecen en la gráfica)"
         st.caption(texto_resumen)
-        ancho_completo(st.altair_chart, construir_grafica(serie, tipo_grafica, perfil))
+        ancho_completo(st.altair_chart, construir_grafica(serie, tipo_grafica, tipo_eje, perfil))
 
     # ---------------- Carrusel de % de éxito ----------------
     st.markdown("#### Porcentaje de éxito por empresa")
