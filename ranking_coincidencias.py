@@ -55,6 +55,17 @@ PESO DE CADA COINCIDENCIA
   menos de 3 letras pesan solo un 25 % y NO cuentan como coincidencia relevante
   (componente 1), aunque suman un poco al peso.
 
+EXPLICAR EL RANKING
+-------------------
+`ordenar_con_detalle` devuelve además, por empresa, qué palabras clave coincidieron
+(con su peso, idioma y si están en el título) para poder contarlo en la
+explicación, y `palabras_semanticas` elige, entre las palabras clave que NO
+coinciden literalmente, las que más se parecen en significado a la licitación
+(las similitudes se calculan fuera, en matching.py, con el mismo modelo de
+embeddings de la app). Las coincidencias semánticas por palabra son
+informativas: en el orden solo cuenta la similitud global de la empresa (3.er
+componente), que ya incluye sus palabras clave en cada idioma.
+
 Módulo SIN dependencias de Streamlit ni de Supabase: funciones puras. Usa
 `snowballstemmer` (raíces en es/en/fr/pt); si no estuviera instalado, recurre
 a un recorte simple de plurales para que la pestaña no se rompa.
@@ -199,6 +210,14 @@ def palabras_clave_de(empresa: dict) -> dict:
     return {i: _lista(empresa.get(campo)) for i, campo in CAMPOS_PALABRAS_CLAVE.items()}
 
 
+def _palabras_de(empresa: dict, palabras_extra: dict = None) -> dict:
+    """Palabras clave de la empresa por idioma (de su propio dict o, si no las trae, de `palabras_extra`)."""
+    palabras = palabras_clave_de(empresa)
+    if not any(palabras.values()):
+        palabras = (palabras_extra or {}).get(empresa.get("numero_interno"), palabras)
+    return palabras
+
+
 def _conceptos_de(palabras_por_idioma: dict) -> dict:
     """
     {clave del concepto: (raíces, idioma, texto original)} de TODAS las palabras clave de la empresa. La clave es la
@@ -229,14 +248,8 @@ def ranking_empresas(empresas: list, texto: str, titulo: str = "", palabras_extr
     (se usan SOLO aquí; nunca se añaden a los datos de la empresa).
     """
     licitacion = LicitacionAnalizada(texto, titulo)
-    palabras_extra = palabras_extra or {}
 
-    conceptos_por_empresa = []
-    for empresa in empresas:
-        palabras = palabras_clave_de(empresa)
-        if not any(palabras.values()):
-            palabras = palabras_extra.get(empresa.get("numero_interno"), palabras)
-        conceptos_por_empresa.append(_conceptos_de(palabras))
+    conceptos_por_empresa = [_conceptos_de(_palabras_de(empresa, palabras_extra)) for empresa in empresas]
 
     # Cuántas empresas tienen cada concepto (rareza = más específico)
     n_empresas = max(len(empresas), 1)
@@ -253,9 +266,13 @@ def ranking_empresas(empresas: list, texto: str, titulo: str = "", palabras_extr
                 continue
             peso, generica = _peso_base(frase, idioma)
             peso *= 1 + math.log(n_empresas / frecuencia[clave])
-            if all(r in licitacion.titulo[idioma] for r in frase):
+            en_titulo = all(r in licitacion.titulo[idioma] for r in frase)
+            if en_titulo:
                 peso *= BONUS_TITULO
-            coincidencias.append({"palabra": original, "idioma": idioma, "peso": round(peso, 4), "generica": generica})
+            coincidencias.append({
+                "palabra": original, "idioma": idioma, "peso": round(peso, 4),
+                "generica": generica, "en_titulo": en_titulo,
+            })
 
         coincidencias.sort(key=lambda c: -c["peso"])
         relevantes = [c for c in coincidencias if c["peso"] >= UMBRAL_RELEVANTE and not c["generica"]]
@@ -269,17 +286,76 @@ def ranking_empresas(empresas: list, texto: str, titulo: str = "", palabras_extr
     return resultado
 
 
+def ordenar_con_detalle(empresas: list, texto: str, titulo: str = "", palabras_extra: dict = None) -> tuple:
+    """
+    Como `ordenar_por_coincidencia`, pero devuelve (empresas ordenadas, detalle) donde `detalle[i]` es el dict de
+    `ranking_empresas` de la empresa que ocupa la posición i (n_exactas, peso_exacto, similarity, coincidencias).
+    """
+    if not empresas:
+        return [], []
+    claves = ranking_empresas(empresas, texto, titulo, palabras_extra)
+    orden = sorted(
+        range(len(empresas)),
+        key=lambda i: (-claves[i]["n_exactas"], -claves[i]["peso_exacto"], -claves[i]["similarity"], i),
+    )
+    return [empresas[i] for i in orden], [claves[i] for i in orden]
+
+
 def ordenar_por_coincidencia(empresas: list, texto: str, titulo: str = "", palabras_extra: dict = None) -> list:
     """
     Las mismas empresas (los mismos objetos, sin modificar) en el nuevo orden:
     más coincidencias exactas relevantes > mayor peso de esas coincidencias > mayor similitud semántica >
     orden original de la RPC.
     """
-    if len(empresas) < 2:
-        return list(empresas)
-    claves = ranking_empresas(empresas, texto, titulo, palabras_extra)
-    orden = sorted(
-        range(len(empresas)),
-        key=lambda i: (-claves[i]["n_exactas"], -claves[i]["peso_exacto"], -claves[i]["similarity"], i),
-    )
-    return [empresas[i] for i in orden]
+    return ordenar_con_detalle(empresas, texto, titulo, palabras_extra)[0]
+
+
+# ============================================================
+# PALABRAS CLAVE SEMÁNTICAS (informativas)
+# ============================================================
+
+Z_MINIMO_SEMANTICO = 1.5     # cuántas desviaciones típicas por encima de la media de la búsqueda
+MAXIMO_SEMANTICAS = 5
+MINIMO_PARA_ESTADISTICA = 8  # con menos palabras clave en total, la media y la desviación no dicen nada
+
+
+def textos_de_palabras_clave(empresas: list, palabras_extra: dict = None) -> list:
+    """Textos distintos de palabras clave de todas las empresas (en el orden en que aparecen), para calcular sus embeddings."""
+    vistos = {}
+    for empresa in empresas:
+        for lista in _palabras_de(empresa, palabras_extra).values():
+            for palabra in lista:
+                limpia = " ".join(palabra.split())
+                if limpia:
+                    vistos.setdefault(normalizar(limpia), limpia)
+    return list(vistos.values())
+
+
+def palabras_semanticas(empresa: dict, similitudes: dict, exactas: list, palabras_extra: dict = None) -> list:
+    """
+    Palabras clave de la empresa que, sin coincidir literalmente, más se parecen en significado a la licitación.
+    `similitudes`: {palabra normalizada: coseno con la licitación} de las palabras clave de TODAS las empresas de la
+    búsqueda. Como los cosenos de este modelo van muy juntos (hasta lo no relacionado puntúa alto), «parecida» se
+    mide frente al resto: cuentan las que superan la media de la búsqueda en `Z_MINIMO_SEMANTICO` desviaciones.
+    Devuelve [(palabra, idioma, similitud)], de más a menos parecida.
+    """
+    valores = list(similitudes.values())
+    if len(valores) < MINIMO_PARA_ESTADISTICA:
+        return []
+    media = sum(valores) / len(valores)
+    desviacion = math.sqrt(sum((v - media) ** 2 for v in valores) / len(valores))
+    if desviacion == 0:
+        return []
+    umbral = media + Z_MINIMO_SEMANTICO * desviacion
+
+    ya_exactas = {normalizar(" ".join(c["palabra"].split())) for c in exactas}
+    candidatas = {}
+    for idioma, lista in _palabras_de(empresa, palabras_extra).items():
+        for palabra in lista:
+            limpia = " ".join(palabra.split())
+            clave = normalizar(limpia)
+            similitud = similitudes.get(clave)
+            if similitud is None or clave in ya_exactas or similitud < umbral or clave in candidatas:
+                continue
+            candidatas[clave] = (limpia, idioma, float(similitud))
+    return sorted(candidatas.values(), key=lambda c: -c[2])[:MAXIMO_SEMANTICAS]
