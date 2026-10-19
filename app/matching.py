@@ -18,17 +18,17 @@ Flujo:
   4. `obtener_referencias_por_empresas()` -- trae en UNA sola consulta
      (nunca N+1) los títulos de licitaciones antiguas de todas las
      empresas candidatas, desde `empresas_referencias`.
-  4b. `ordenar_por_coincidencia()` (ranking_coincidencias.py) -- reordena en
-     Python las empresas que devuelve la RPC: primero las que tienen más
-     palabras clave (en sus 4 idiomas) presentes en la licitación, después las
-     de coincidencias más específicas y, por último, la similitud semántica de
-     la RPC. Solo cambia el ORDEN: ni `similarity` ni los datos de las empresas
-     o de la licitación se tocan, así que las explicaciones y la IA reciben lo
-     mismo que antes.
-  4c. `_motivo_ranking()` -- punto extra que se MUESTRA en la explicación de
-     cada empresa con las palabras clave que han construido su puesto: las
-     exactas (con su peso), las más afines por significado y cómo se ha
-     ordenado. Es solo para pantalla: la IA recibe los mismos motivos de siempre.
+  4b. `ordenar_por_coincidencia()` (ranking_coincidencias.py) -- sustituye la
+     similitud global de la RPC por una nota de 0 a 100: 60 puntos por palabras
+     clave de la empresa que aparecen en la licitación (más si están en el
+     título) y 40 por palabras clave de significado claramente afín a un término
+     de la licitación. Sin ninguna de las dos, la nota es 0. Solo cambia el ORDEN
+     y el número mostrado: `similarity` y los datos de las empresas o de la
+     licitación no se tocan, así que las explicaciones y la IA reciben lo mismo.
+  4c. `_bloque_ranking()` -- las tres líneas que se MUESTRAN en la explicación
+     (coincidencias exactas «A = B», similares «A ≈ B» y razón de la nota).
+     Sustituyen en pantalla al resumen genérico; la IA recibe los mismos motivos
+     de siempre.
   5. `explicar_coincidencia()` -- construye la explicación de cada
      coincidencia SIEMPRE con evidencia concreta, nunca "no hay datos",
      en tres capas (nada de LLM ni API externa, para mantener la app
@@ -98,8 +98,9 @@ from search import buscar_semantica
 from ranking_coincidencias import (
     CAMPOS_PALABRAS_CLAVE,
     normalizar as _normalizar_clave,
+    idioma_de,
     ordenar_con_detalle,
-    palabras_semanticas,
+    terminos_de_licitacion,
     textos_de_palabras_clave,
 )
 from ia_explicacion import (
@@ -730,79 +731,85 @@ def _vector_cacheado(_encoder, prefijo: str, texto: str):
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
-def _vectores_palabras(_encoder, textos: tuple):
-    """Embeddings (los mismos «passage: ...» de la Capa 3) de una lista de palabras clave, en UNA sola llamada al modelo y
-    cacheados: al pulsar los botones de la IA la página se vuelve a dibujar y no se recalcula nada."""
+def _vectores_textos(_encoder, prefijo: str, textos: tuple):
+    """Embeddings «prefijo: texto» de una lista de textos en UNA sola llamada al modelo, cacheados: al pulsar los botones
+    de la IA la página se vuelve a dibujar y no se recalcula nada."""
     if not textos:
         return np.zeros((0, 0))
-    return np.array(_encoder.encode([f"passage: {t}" for t in textos]))
+    return np.array(_encoder.encode([f"{prefijo}: {t}" for t in textos]))
 
 
-def _similitudes_palabras_clave(encoder, texto_licitacion: str, empresas: list, palabras_extra: dict) -> dict:
-    """{palabra clave normalizada: similitud semántica con la licitación} de las palabras de todas las empresas."""
-    textos = textos_de_palabras_clave(empresas, palabras_extra)
-    if not textos or not texto_licitacion:
+def _pares_afines(encoder, texto_licitacion: str, titulo: str, textos_palabras: list) -> dict:
+    """
+    {palabra clave normalizada: (término de la licitación más parecido, coseno)}. Dos llamadas al modelo (términos de
+    la licitación y palabras clave), cacheadas. Si el modelo falla, devuelve {} y solo puntúan las coincidencias exactas.
+    """
+    terminos = terminos_de_licitacion(texto_licitacion, titulo)
+    if not terminos or not textos_palabras:
         return {}
     try:
-        vector_licitacion = _vector_cacheado(encoder, "query", texto_licitacion)
-        matriz = _vectores_palabras(encoder, tuple(textos))
-        return {
-            _normalizar_clave(" ".join(texto.split())): _similitud_coseno(vector_licitacion, vector)
-            for texto, vector in zip(textos, matriz)
-        }
+        v_terminos = _vectores_textos(encoder, "query", tuple(terminos))
+        v_palabras = _vectores_textos(encoder, "query", tuple(textos_palabras))
+        a = v_palabras / np.maximum(np.linalg.norm(v_palabras, axis=1, keepdims=True), 1e-12)
+        b = v_terminos / np.maximum(np.linalg.norm(v_terminos, axis=1, keepdims=True), 1e-12)
+        coseno = a @ b.T
+        pares = {}
+        for i, texto in enumerate(textos_palabras):
+            clave = _normalizar_clave(" ".join(texto.split()))
+            # Nunca se empareja una palabra con el mismo término escrito igual (eso sería una coincidencia exacta).
+            candidatos = [j for j, t in enumerate(terminos) if _normalizar_clave(t) != clave]
+            if candidatos:
+                j = max(candidatos, key=lambda k: coseno[i, k])
+                pares[clave] = (terminos[j], float(coseno[i, j]))
+        return pares
     except Exception:
-        return {}  # sin esto, la explicación simplemente no lista palabras semánticas
+        return {}
+
+
+PREFIJO_MOTIVO_SEMANTICO = "El modelo de similitud semántica multilingüe relaciona"
 
 
 def _formatear_numero(valor: float) -> str:
     return f"{valor:.1f}".replace(".", ",")
 
 
-def _motivo_ranking(detalle: dict, posicion: int, total: int, similarity, semanticas: list) -> str:
+def _bloque_ranking(detalle: dict) -> list:
     """
-    Punto extra de la explicación (solo para mostrar): palabras clave que coinciden exactamente y las más afines por
-    significado, y cómo han construido el puesto en el ranking. Va en Markdown con sub-puntos.
+    Líneas de la explicación (solo para mostrar), con los hallazgos reales y nada de teoría:
+    coincidencias exactas «palabra de la licitación = palabra clave», similares «… ≈ …» y la razón de la nota.
     """
-    idiomas = {"es": "ES", "en": "EN", "fr": "FR", "pt": "PT"}
-    exactas = detalle["coincidencias"]
-    relevantes = [c for c in exactas if not c["generica"] and c["peso"] >= 0.5]
+    exactas, similares = detalle["exactas"], detalle["similares"]
+    if not exactas and not similares:
+        return ["Sin coincidencias directas ni semánticas encontradas en las palabras clave."]
 
-    lineas = [f"**Palabras clave y ranking** (puesto {posicion} de {total}):"]
+    def exacta(e):
+        texto = f"{e['termino']} = {e['palabra']}"
+        return texto + (" (en el título)" if e["en_titulo"] else "") + (" (genérica)" if e["generica"] else "")
 
+    lineas = [
+        "**Coincidencias exactas:** " + ("; ".join(exacta(e) for e in exactas[:8]) if exactas else "ninguna"),
+        "**Coincidencias similares:** "
+        + ("; ".join(f"{s['termino']} ≈ {s['palabra']}" for s in similares[:5]) if similares else "ninguna"),
+    ]
+
+    partes = []
     if exactas:
-        piezas = []
-        for c in exactas[:8]:
-            etiqueta = f"«{c['palabra']}» ({idiomas.get(c['idioma'], c['idioma'])}, peso {_formatear_numero(c['peso'])}"
-            if c["en_titulo"]:
-                etiqueta += ", en el título"
-            if c not in relevantes:
-                etiqueta += ", genérica: no cuenta"
-            piezas.append(etiqueta + ")")
-        lineas.append(
-            f"  - **Coincidencias exactas ({len(relevantes)} relevante{'' if len(relevantes) == 1 else 's'}):** " + "; ".join(piezas)
-            + (f"; y {len(exactas) - 8} más" if len(exactas) > 8 else "") + "."
+        en_titulo = sum(1 for e in exactas if e["en_titulo"])
+        texto = f"{len(exactas)} coincidencia{'' if len(exactas) == 1 else 's'} exacta{'' if len(exactas) == 1 else 's'}"
+        if en_titulo:
+            texto += f" ({en_titulo} en el título)"
+        partes.append(f"{texto}: {_formatear_numero(detalle['puntos_exactas'])} de 60 puntos")
+    else:
+        partes.append("0 coincidencias exactas: 0 de 60 puntos")
+    if similares:
+        partes.append(
+            f"{len(similares)} similar{'' if len(similares) == 1 else 'es'}: "
+            f"{_formatear_numero(detalle['puntos_similares'])} de 40 puntos"
         )
     else:
-        lineas.append("  - **Coincidencias exactas:** ninguna de sus palabras clave aparece literalmente en la licitación.")
-
-    if semanticas:
-        lineas.append(
-            "  - **Palabras clave afines por significado** (sin coincidir literalmente): "
-            + "; ".join(f"«{p}» ({idiomas.get(i, i)}, {_formatear_numero(sim * 100)} %)" for p, i, sim in semanticas)
-            + ". Destacan frente al resto de palabras clave de las empresas de esta búsqueda."
-        )
-    else:
-        lineas.append("  - **Palabras clave afines por significado:** ninguna destaca sobre el resto en esta búsqueda.")
-
-    similitud_texto = _formatear_numero(float(similarity or 0) * 100)
-    lineas.append(
-        f"  - **Cómo suma al orden:** primero cuenta el número de coincidencias exactas relevantes ({len(relevantes)}), "
-        f"después su peso total ({_formatear_numero(detalle['peso_exacto'])}; más cuanto más específica es la palabra "
-        f"o si está en el título) y, a igualdad, la similitud semántica global de la empresa ({similitud_texto} %, "
-        "que ya tiene en cuenta sus palabras clave en cada idioma). Las palabras afines por significado no puntúan una "
-        "a una: se reflejan en esa similitud global."
-    )
-    return "\n".join(lineas)
+        partes.append("0 similares: 0 de 40 puntos")
+    lineas.append(f"**Razón del ranking:** {'; '.join(partes)}. Total {_formatear_numero(detalle['puntuacion'])} / 100.")
+    return lineas
 
 
 def _similitud_coseno(vector_a, vector_b) -> float:
@@ -1339,19 +1346,21 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
                 pais_licitacion = licitacion.get("pais")
                 licitacion_ia = _licitacion_para_ia(licitacion)
 
-                # Orden: coincidencias exactas de palabras clave > su peso > similitud semántica (ver
-                # ranking_coincidencias.py). Solo reordena la lista; los datos de cada empresa no cambian.
+                # Orden y nota: 60 puntos por palabras clave exactas + 40 por palabras clave claramente afines
+                # (ver ranking_coincidencias.py). Solo reordena la lista; los datos de cada empresa no cambian.
                 palabras_extra = _palabras_clave_para_ranking(supabase, coincidencias)
+                pares_afines = _pares_afines(
+                    encoder,
+                    texto_licitacion,
+                    licitacion.get("titulo") or "",
+                    textos_de_palabras_clave(coincidencias, idioma_de(texto_licitacion), palabras_extra),
+                )
                 coincidencias, detalle_ranking = ordenar_con_detalle(
                     coincidencias,
                     texto_licitacion,
                     licitacion.get("titulo") or "",
                     palabras_extra,
-                )
-                # Solo para la explicación mostrada: similitud de cada palabra clave con la licitación (una única
-                # llamada al modelo para todas las empresas, cacheada).
-                similitudes_palabras = _similitudes_palabras_clave(
-                    encoder, texto_licitacion, coincidencias, palabras_extra
+                    pares_afines,
                 )
 
                 # Una sola consulta por lote para el historial de referencias de
@@ -1359,13 +1368,13 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
                 ids_empresa = [e["numero_interno"] for e in coincidencias if e.get("numero_interno")]
                 referencias_por_empresa = obtener_referencias_por_empresas(supabase, ids_empresa)
 
-                for posicion, (empresa, detalle) in enumerate(zip(coincidencias, detalle_ranking), start=1):
+                for empresa, detalle in zip(coincidencias, detalle_ranking):
                     with st.container(border=True):
                         col_nombre, col_score = st.columns([4, 1])
                         with col_nombre:
                             st.markdown(f"**{empresa['nombre_empresa']}**  ·  `{empresa['numero_interno']}`")
                         with col_score:
-                            st.markdown(f"**{round(empresa['similarity'] * 100, 1)}%**")
+                            st.markdown(f"**{_formatear_numero(detalle['puntuacion'])} pts**")
 
                         referencias_empresa = referencias_por_empresa.get(empresa["numero_interno"], [])
                         motivos = explicar_coincidencia(
@@ -1373,15 +1382,11 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
                             categoria_licitacion=categoria_licitacion,
                             organismo_licitacion=organismo_licitacion,
                         )
-                        # El punto de ranking se muestra, pero NO se añade a `motivos`: la IA recibe lo de siempre.
-                        motivos_visibles = list(motivos)
-                        motivo_ranking = _motivo_ranking(
-                            detalle, posicion, len(coincidencias), empresa.get("similarity"),
-                            palabras_semanticas(empresa, similitudes_palabras, detalle["coincidencias"], palabras_extra),
-                        )
-                        # Tras el resumen (y tras el aviso de observaciones, si lo hay).
-                        hueco = 2 if len(motivos_visibles) > 1 and str(motivos_visibles[1]).startswith("⚠") else 1
-                        motivos_visibles.insert(min(hueco, len(motivos_visibles)), motivo_ranking)
+                        # En pantalla, las líneas de ranking sustituyen al resumen genérico (que citaba la
+                        # similitud global) y al texto del modelo por campo; la IA recibe `motivos` sin tocar.
+                        motivos_visibles = _bloque_ranking(detalle) + [
+                            m for m in list(motivos)[1:] if not str(m).startswith(PREFIJO_MOTIVO_SEMANTICO)
+                        ]
                         for motivo in motivos_visibles:
                             st.markdown(f"- {motivo}")
 
