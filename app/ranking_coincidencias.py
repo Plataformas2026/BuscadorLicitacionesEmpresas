@@ -222,14 +222,18 @@ def _palabras_de(empresa: dict, palabras_extra: dict = None) -> dict:
 def _conceptos_de(palabras_por_idioma: dict) -> dict:
     """
     {clave del concepto: (raíces, idioma, texto original)} de TODAS las palabras clave de la empresa. La clave es la
-    tupla de raíces: el mismo concepto en varios idiomas escrito igual da la misma clave y cuenta una vez.
+    tupla de raíces; además, la misma palabra escrita igual en varios idiomas («Social Media» en español e inglés,
+    cuyas raíces difieren según el idioma) cuenta UNA vez: se queda con la del primer idioma en que figura.
     """
     conceptos = {}
+    textos_vistos = set()
     for idioma, lista in palabras_por_idioma.items():
         for palabra in lista:
+            texto = normalizar(" ".join(str(palabra).split()))
             frase = tuple(_secuencia_de_raices(palabra, idioma))
-            if frase and frase not in conceptos:
+            if frase and frase not in conceptos and texto not in textos_vistos:
                 conceptos[frase] = (frase, idioma, palabra.strip())
+                textos_vistos.add(texto)
     return conceptos
 
 
@@ -276,9 +280,15 @@ def palabras_a_evaluar(empresa: dict, idioma: str, palabras_extra: dict = None) 
     """Palabras clave de la empresa en el idioma de la licitación (si no tiene en ese idioma, las de los demás)."""
     por_idioma = _palabras_de(empresa, palabras_extra)
     elegidas = [p for p in por_idioma.get(idioma, []) if p.strip()]
-    if elegidas:
-        return elegidas
-    return [p for i in IDIOMAS for p in por_idioma.get(i, []) if p.strip()]
+    if not elegidas:
+        elegidas = [p for i in IDIOMAS for p in por_idioma.get(i, []) if p.strip()]
+    vistas, unicas = set(), []
+    for p in elegidas:
+        clave = normalizar(" ".join(p.split()))
+        if clave not in vistas:
+            vistas.add(clave)
+            unicas.append(p)
+    return unicas
 
 
 def textos_de_palabras_clave(empresas: list, idioma: str, palabras_extra: dict = None) -> list:
@@ -453,6 +463,18 @@ def ranking_empresas(empresas: list, texto: str, titulo: str = "", palabras_extr
             raices_exactas.update(frase)
         coincidencias.sort(key=lambda c: -c["peso"])
         exactas.sort(key=lambda e: -e["valor"])
+        # Un mismo fragmento de la licitación se cuenta una sola vez, aunque lo encuentren varias palabras clave
+        # equivalentes (p. ej. la misma expresión escrita igual en dos idiomas).
+        vistos_termino, sin_repetir = set(), []
+        for e in exactas:
+            clave_termino = normalizar(" ".join(e["termino"].split()))
+            if clave_termino not in vistos_termino:
+                vistos_termino.add(clave_termino)
+                sin_repetir.append(e)
+        exactas = sin_repetir
+        coincidencias = [c for c in coincidencias
+                         if any(normalizar(" ".join(c["palabra"].split())) == normalizar(" ".join(e["palabra"].split()))
+                                for e in exactas)]
         relevantes = [c for c in coincidencias if c["peso"] >= UMBRAL_RELEVANTE and not c["generica"]]
         ya_exactas = {normalizar(" ".join(c["palabra"].split())) for c in coincidencias}
 
