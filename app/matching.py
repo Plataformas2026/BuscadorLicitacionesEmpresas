@@ -98,6 +98,7 @@ from search import buscar_semantica
 from ranking_coincidencias import (
     CAMPOS_PALABRAS_CLAVE,
     normalizar as _normalizar_clave,
+    POCO_ESPECIFICA,
     idioma_de,
     ordenar_con_detalle,
     terminos_de_licitacion,
@@ -773,6 +774,24 @@ def _formatear_numero(valor: float) -> str:
     return f"{valor:.1f}".replace(".", ",")
 
 
+def _zonas_licitacion(licitacion: dict) -> list:
+    """[(zona, texto)] de la licitación: título; objeto (categoría y primeras frases de la descripción); alcance y
+    requisitos (el resto de la descripción); información complementaria (descripción manual)."""
+    descripcion = " ".join(str(licitacion.get("descripcion") or "").split())
+    frases = re.split(r"(?<=[.;:!?])\s+", descripcion)
+    objeto = " ".join(frases[:2])
+    alcance = " ".join(frases[2:])
+    return [
+        ("titulo", str(licitacion.get("titulo") or "")),
+        ("objeto", " ".join(filter(None, [str(licitacion.get("categoria") or ""), objeto]))),
+        ("alcance", alcance),
+        ("complementaria", str(licitacion.get("descripcion_manual") or "")),
+    ]
+
+
+ETIQUETA_ZONA = {"titulo": "título", "objeto": "objeto", "alcance": "alcance", "complementaria": "información complementaria"}
+
+
 def _bloque_ranking(detalle: dict) -> list:
     """
     Líneas de la explicación (solo para mostrar), con los hallazgos reales y nada de teoría:
@@ -782,32 +801,32 @@ def _bloque_ranking(detalle: dict) -> list:
     if not exactas and not similares:
         return ["Sin coincidencias directas ni semánticas encontradas en las palabras clave."]
 
-    def exacta(e):
-        texto = f"{e['termino']} = {e['palabra']}"
-        return texto + (" (en el título)" if e["en_titulo"] else "") + (" (genérica)" if e["generica"] else "")
+    def descripcion(e):
+        notas = [ETIQUETA_ZONA.get(e["zona"], e["zona"])]
+        if e.get("generica"):
+            notas.append("genérica")
+        elif e["especificidad"] < POCO_ESPECIFICA:
+            notas.append("poco específica")
+        return " (" + ", ".join(notas) + ")"
 
     lineas = [
-        "**Coincidencias exactas:** " + ("; ".join(exacta(e) for e in exactas[:8]) if exactas else "ninguna"),
+        "**Coincidencias exactas:** "
+        + ("; ".join(f"{e['termino']} = {e['palabra']}{descripcion(e)}" for e in exactas[:8]) if exactas else "ninguna"),
         "**Coincidencias similares:** "
-        + ("; ".join(f"{s['termino']} ≈ {s['palabra']}" for s in similares[:5]) if similares else "ninguna"),
+        + ("; ".join(f"{s['termino']} ≈ {s['palabra']}{descripcion(s)}" for s in similares[:5]) if similares else "ninguna"),
     ]
 
     partes = []
     if exactas:
-        en_titulo = sum(1 for e in exactas if e["en_titulo"])
-        texto = f"{len(exactas)} coincidencia{'' if len(exactas) == 1 else 's'} exacta{'' if len(exactas) == 1 else 's'}"
-        if en_titulo:
-            texto += f" ({en_titulo} en el título)"
-        partes.append(f"{texto}: {_formatear_numero(detalle['puntos_exactas'])} de 60 puntos")
-    else:
-        partes.append("0 coincidencias exactas: 0 de 60 puntos")
-    if similares:
         partes.append(
-            f"{len(similares)} similar{'' if len(similares) == 1 else 'es'}: "
-            f"{_formatear_numero(detalle['puntos_similares'])} de 40 puntos"
+            f"exactas {_formatear_numero(detalle['puntos_exactas'])} de 60"
         )
     else:
-        partes.append("0 similares: 0 de 40 puntos")
+        partes.append("sin exactas: 0 de 60")
+    if similares:
+        partes.append(f"similares {_formatear_numero(detalle['puntos_similares'])} de 40")
+    else:
+        partes.append("sin similares: 0 de 40")
     lineas.append(f"**Razón del ranking:** {'; '.join(partes)}. Total {_formatear_numero(detalle['puntuacion'])} / 100.")
     return lineas
 
@@ -1361,6 +1380,7 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
                     licitacion.get("titulo") or "",
                     palabras_extra,
                     pares_afines,
+                    _zonas_licitacion(licitacion),
                 )
 
                 # Una sola consulta por lote para el historial de referencias de
