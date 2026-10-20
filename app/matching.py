@@ -29,6 +29,12 @@ Flujo:
      (coincidencias exactas «A = B», similares «A ≈ B» y razón de la nota).
      Sustituyen en pantalla al resumen genérico; la IA recibe los mismos motivos
      de siempre.
+  4d. PRUEBA A/B (`_render_resultados`): el ranking actual y el nuevo «Relevancia
+     real» (ranking_relevancia.py, independiente) se muestran a la vez, en dos
+     columnas, sobre LAS MISMAS empresas candidatas. El de la izquierda es el
+     código de siempre (`_tarjeta_ranking_actual`); el de la derecha se calcula
+     aparte y, si falla, solo él muestra un error. La casilla «Modo de prueba
+     A/B» lo desactiva y deja la pantalla exactamente como antes.
   5. `explicar_coincidencia()` -- construye la explicación de cada
      coincidencia SIEMPRE con evidencia concreta, nunca "no hay datos",
      en tres capas (nada de LLM ni API externa, para mantener la app
@@ -104,6 +110,11 @@ from ranking_coincidencias import (
     terminos_de_licitacion,
     textos_de_palabras_clave,
 )
+try:  # el nuevo ranking (prueba A/B) es opcional: si su módulo fallara, el ranking actual sigue funcionando
+    import ranking_relevancia as _ranking_relevancia
+except Exception as _error_import:  # pragma: no cover
+    _ranking_relevancia = None
+    _ERROR_IMPORT_RELEVANCIA = _error_import
 from ia_explicacion import (
     generar_justificacion_ia,
     groq_configurado,
@@ -1262,6 +1273,257 @@ def _licitacion_para_ia(licitacion: dict) -> dict:
     return copia
 
 
+def _tarjeta_ranking_actual(empresa: dict, detalle: dict, ctx: dict, cambio: str = None):
+    """
+    Tarjeta de una empresa en el ranking ACTUAL («Palabras clave»). Es el cuerpo, sin cambios, del bucle que antes estaba
+    dentro de render_tab2; `ctx` trae las variables que usaba. `cambio` (opcional, solo en el modo A/B) es una línea que
+    indica cómo cambia su posición en el nuevo ranking.
+    """
+    encoder = ctx["encoder"]
+    texto_licitacion = ctx["texto_licitacion"]
+    pais_licitacion = ctx["pais_licitacion"]
+    categoria_licitacion = ctx["categoria_licitacion"]
+    organismo_licitacion = ctx["organismo_licitacion"]
+    referencias_por_empresa = ctx["referencias_por_empresa"]
+    licitacion = ctx["licitacion"]
+    licitacion_ia = ctx["licitacion_ia"]
+    with st.container(border=True):
+        col_nombre, col_score = st.columns([4, 1])
+        with col_nombre:
+            st.markdown(f"**{empresa['nombre_empresa']}**  ·  `{empresa['numero_interno']}`")
+        with col_score:
+            st.markdown(f"**{_formatear_numero(detalle['puntuacion'])} pts**")
+        if cambio:
+            st.markdown(cambio)
+
+        referencias_empresa = referencias_por_empresa.get(empresa["numero_interno"], [])
+        motivos = explicar_coincidencia(
+            texto_licitacion, pais_licitacion, empresa, referencias_empresa, encoder,
+            categoria_licitacion=categoria_licitacion,
+            organismo_licitacion=organismo_licitacion,
+        )
+        # En pantalla, las líneas de ranking sustituyen al resumen genérico (que citaba la
+        # similitud global) y al texto del modelo por campo; la IA recibe `motivos` sin tocar.
+        motivos_visibles = _bloque_ranking(detalle) + [
+            m for m in list(motivos)[1:] if not str(m).startswith(PREFIJO_MOTIVO_SEMANTICO)
+        ]
+        for motivo in motivos_visibles:
+            st.markdown(f"- {motivo}")
+
+        # Justificación en lenguaje natural
+        if groq_configurado():
+            ya_en_cache, texto_en_cache = justificacion_en_cache(licitacion, empresa)
+            if ya_en_cache:
+                if texto_en_cache:
+                    st.info(f"**Justificación con IA:** {texto_en_cache}")
+                else:
+                    st.caption(
+                        "No se ha podido generar la justificación con IA "
+                        "(límite de peticiones gratuitas o problema temporal del servicio)."
+                    )
+
+                # Botón para reintentar / regenerar
+                if st.button(
+                    "🔄 Reintentar / Regenerar respuesta IA",
+                    key=f"tab2_btn_reintentar_ia_{empresa['numero_interno']}",
+                    use_container_width=True,
+                ):
+                    # Modificamos temporalmente el valor en la sesión
+                    # para que generar_justificacion_ia() no devuelva el valor guardado
+                    clave = _clave_cache(licitacion, empresa)
+                    if "cache_justificacion_ia" in st.session_state and clave in st.session_state.cache_justificacion_ia:
+                        # Asignamos None momentáneamente
+                        st.session_state.cache_justificacion_ia[clave] = None
+
+                    with st.spinner("Enviando petición a GROQ..."):
+                        generar_justificacion_ia(licitacion_ia, empresa, motivos)
+                    st.rerun()
+
+            elif st.button(
+                "Generar justificación con IA",
+                key=f"tab2_btn_ia_{empresa['numero_interno']}",
+            ):
+                with st.spinner("Generando justificación con IA..."):
+                    texto_ia = generar_justificacion_ia(licitacion_ia, empresa, motivos)
+                st.rerun()
+
+        st.caption(f"Lugar de la licitación: {pais_licitacion or 'No especificado'}")
+        for etiqueta, valor in obtener_lugares_empresa(empresa):
+            st.caption(f"{etiqueta}: {valor}")
+
+
+# ------------------------------------------------------------------
+# Prueba A/B: ranking actual («Palabras clave») frente al nuevo («Relevancia real»)
+# ------------------------------------------------------------------
+_CACHE_VECTORES = {}
+
+
+def _vectores_por_texto(encoder, prefijo: str, textos: list) -> dict:
+    """
+    {texto normalizado: embedding «prefijo: texto»} calculando en UNA llamada solo los textos que faltan. Caché de
+    proceso (el modelo es siempre el mismo); se vacía si crece demasiado.
+    """
+    if len(_CACHE_VECTORES) > 20000:
+        _CACHE_VECTORES.clear()
+    pendientes = {}
+    for texto in textos:
+        clave = (prefijo, _normalizar_clave(" ".join(str(texto).split())))
+        if clave not in _CACHE_VECTORES:
+            pendientes.setdefault(clave, " ".join(str(texto).split()))
+    if pendientes:
+        matriz = np.array(encoder.encode([f"{prefijo}: {t}" for t in pendientes.values()]))
+        for clave, vector in zip(pendientes, matriz):
+            _CACHE_VECTORES[clave] = vector
+    return {
+        _normalizar_clave(" ".join(str(t).split())): _CACHE_VECTORES[(prefijo, _normalizar_clave(" ".join(str(t).split())))]
+        for t in textos
+    }
+
+
+def _calcular_nuevo_ranking(encoder, licitacion: dict, candidatas: list, palabras_extra: dict, referencias: dict) -> dict:
+    """
+    Ranking «Relevancia real» (ranking_relevancia.py) sobre LAS MISMAS candidatas que el ranking actual. No toca las
+    empresas ni la licitación. Devuelve {empresas, detalle, objeto}; cualquier excepción la captura quien lo llama.
+    """
+    if _ranking_relevancia is None:
+        raise RuntimeError(f"no se pudo cargar ranking_relevancia.py: {_ERROR_IMPORT_RELEVANCIA}")
+    objeto = _ranking_relevancia.analizar_objeto(licitacion)
+    textos_conceptos, textos_palabras = _ranking_relevancia.textos_necesarios(objeto, candidatas, palabras_extra)
+    try:
+        vectores_conceptos = _vectores_por_texto(encoder, "query", textos_conceptos)
+        vectores_palabras = _vectores_por_texto(encoder, "query", textos_palabras)
+    except Exception:
+        vectores_conceptos, vectores_palabras = {}, {}  # sin modelo: solo coincidencias literales (se avisa en la tarjeta)
+    empresas, detalle = _ranking_relevancia.ordenar_relevancia(
+        objeto, candidatas, licitacion, palabras_extra, referencias, vectores_conceptos, vectores_palabras,
+    )
+    ids_in = sorted(str(e.get("numero_interno")) for e in candidatas)
+    ids_out = sorted(str(e.get("numero_interno")) for e in empresas)
+    if ids_in != ids_out:
+        raise RuntimeError("el nuevo ranking no ordena exactamente las mismas candidatas que el ranking actual")
+    return {"empresas": empresas, "detalle": detalle, "objeto": objeto}
+
+
+def _insignia_cambio(posicion_propia: int, posicion_otra: int, otro: str) -> str:
+    """Línea Markdown con el cambio de posición respecto al otro ranking (positivo = sube en este)."""
+    delta = posicion_otra - posicion_propia
+    if delta == 0:
+        return f"↔️ Misma posición que en el {otro} (#{posicion_otra})"
+    flecha = "🔺" if delta > 0 else "🔻"
+    color = "green" if delta > 0 else "red"
+    palabra = "sube" if delta > 0 else "baja"
+    texto = f"{flecha} {palabra} {abs(delta)} puesto{'' if abs(delta) == 1 else 's'} (en el {otro}: #{posicion_otra})"
+    return f":{color}[**{texto}**]" if abs(delta) >= 3 else f":{color}[{texto}]"
+
+
+def _tarjeta_nuevo_ranking(empresa: dict, detalle: dict, posicion: int, cambio: str, pais_licitacion):
+    """Tarjeta de una empresa en el NUEVO ranking: nota propia, explicación propia e información empresarial."""
+    with st.container(border=True):
+        col_nombre, col_score = st.columns([4, 1])
+        with col_nombre:
+            st.markdown(f"**{posicion}. {empresa['nombre_empresa']}**  ·  `{empresa['numero_interno']}`")
+        with col_score:
+            st.markdown(f"**{_formatear_numero(detalle['puntuacion'])} / 100**")
+        if cambio:
+            st.markdown(cambio)
+        aviso = _aviso_observaciones(empresa.get("observaciones_importantes"))
+        if aviso:
+            st.markdown(f"- {aviso}")
+        for linea in _ranking_relevancia.explicar(detalle):
+            st.markdown(f"- {linea}")
+        st.caption(f"Lugar de la licitación: {pais_licitacion or 'No especificado'}")
+        for etiqueta, valor in obtener_lugares_empresa(empresa):
+            st.caption(f"{etiqueta}: {valor}")
+
+
+def _render_resultados(candidatas, ordenadas_actual, detalle_actual, ctx, palabras_extra, encoder, licitacion):
+    """
+    Pinta los resultados. Con el modo A/B desactivado es exactamente la lista de siempre. Con él activado, el ranking
+    actual (izquierda) no cambia y el nuevo (derecha) se calcula aparte: si falla, solo la derecha muestra el error.
+    """
+    modo_ab = st.checkbox(
+        "🧪 Modo de prueba A/B: comparar con el nuevo ranking «Relevancia real»",
+        value=True,
+        key="tab2_modo_ab",
+        help="Calcula un segundo ranking con otra lógica sobre las mismas empresas. No sustituye ni modifica el actual.",
+    )
+    if not modo_ab:
+        for empresa, detalle in zip(ordenadas_actual, detalle_actual):
+            _tarjeta_ranking_actual(empresa, detalle, ctx)
+        return
+
+    # --- Nuevo ranking, aislado: un error aquí no afecta al ranking actual ---
+    nuevo, error_nuevo = None, None
+    try:
+        nuevo = _calcular_nuevo_ranking(
+            encoder, licitacion, candidatas, palabras_extra, ctx["referencias_por_empresa"],
+        )
+    except Exception as error:  # noqa: BLE001 - se muestra al usuario, no se propaga
+        error_nuevo = f"{type(error).__name__}: {error}"
+
+    pos_actual = {e["numero_interno"]: i for i, e in enumerate(ordenadas_actual, start=1)}
+    pos_nuevo = {e["numero_interno"]: i for i, e in enumerate(nuevo["empresas"], start=1)} if nuevo else {}
+
+    st.info(
+        "🧪 **Modo de prueba comparativa A/B.** Los dos rankings ordenan las mismas "
+        f"**{len(candidatas)}** empresas candidatas de la misma licitación. Las puntuaciones usan fórmulas distintas "
+        "y **no son comparables entre sí**."
+    )
+    if nuevo:
+        cambian = sum(1 for k, p in pos_actual.items() if pos_nuevo.get(k) != p)
+        top = 5
+        comunes = len({e["numero_interno"] for e in ordenadas_actual[:top]} & {e["numero_interno"] for e in nuevo["empresas"][:top]})
+        objeto = nuevo["objeto"]
+        nucleo = [c["texto"] for c in objeto["conceptos"] if c["nucleo"]][:6]
+        st.caption(
+            f"{cambian} de {len(candidatas)} empresas cambian de posición · {comunes} de {min(top, len(candidatas))} "
+            f"coinciden en el Top {top}. Objeto detectado ({objeto['tipo_contrato']}): "
+            + (", ".join(f"«{c}»" for c in nucleo) or "sin conceptos principales")
+            + (f" · se ignoran (genéricas, administrativas o lugar): {', '.join(objeto['instrumentales'][:6])}" if objeto["instrumentales"] else "")
+        )
+
+    vista = st.radio(
+        "Vista",
+        ["Lado a lado", "Solo ranking actual", "Solo nuevo ranking"],
+        horizontal=True,
+        key="tab2_vista_ab",
+        help="En pantallas pequeñas las columnas se apilan; con este selector puedes ver cada ranking por separado.",
+    )
+
+    def columna_actual():
+        st.markdown("#### Ranking actual — Palabras clave")
+        st.caption("Puntuación 0-100 (60 exactas + 40 similares). Lógica en uso, sin cambios.")
+        for empresa, detalle in zip(ordenadas_actual, detalle_actual):
+            cambio = None
+            if nuevo:
+                cambio = _insignia_cambio(pos_actual[empresa["numero_interno"]], pos_nuevo[empresa["numero_interno"]], "nuevo ranking")
+            _tarjeta_ranking_actual(empresa, detalle, ctx, cambio)
+
+    def columna_nueva():
+        st.markdown("#### Nuevo ranking — Relevancia real")
+        st.caption("Puntuación 0-100 por cobertura del objeto de la licitación. Fórmula distinta a la actual.")
+        if error_nuevo:
+            st.error(f"No se ha podido calcular el nuevo ranking. El ranking actual no se ve afectado. ({error_nuevo})")
+            return
+        for posicion, (empresa, detalle) in enumerate(zip(nuevo["empresas"], nuevo["detalle"]), start=1):
+            try:
+                cambio = _insignia_cambio(posicion, pos_actual[empresa["numero_interno"]], "ranking actual")
+                _tarjeta_nuevo_ranking(empresa, detalle, posicion, cambio, licitacion.get("pais"))
+            except Exception as error:  # noqa: BLE001
+                st.warning(f"No se pudo mostrar la tarjeta de {empresa.get('nombre_empresa')}: {error}")
+
+    if vista == "Lado a lado":
+        izquierda, derecha = st.columns(2)
+        with izquierda:
+            columna_actual()
+        with derecha:
+            columna_nueva()
+    elif vista == "Solo ranking actual":
+        columna_actual()
+    else:
+        columna_nueva()
+
+
 def render_tab2(supabase: Client, encoder: SentenceTransformer):
     st.subheader("Coincidencia Inteligente: Licitación → Empresas")
     st.caption(
@@ -1365,6 +1627,8 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
                 pais_licitacion = licitacion.get("pais")
                 licitacion_ia = _licitacion_para_ia(licitacion)
 
+                candidatas = list(coincidencias)  # las MISMAS empresas para los dos rankings (prueba A/B)
+
                 # Orden y nota: 60 puntos por palabras clave exactas + 40 por palabras clave claramente afines
                 # (ver ranking_coincidencias.py). Solo reordena la lista; los datos de cada empresa no cambian.
                 palabras_extra = _palabras_clave_para_ranking(supabase, coincidencias)
@@ -1388,65 +1652,12 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
                 ids_empresa = [e["numero_interno"] for e in coincidencias if e.get("numero_interno")]
                 referencias_por_empresa = obtener_referencias_por_empresas(supabase, ids_empresa)
 
-                for empresa, detalle in zip(coincidencias, detalle_ranking):
-                    with st.container(border=True):
-                        col_nombre, col_score = st.columns([4, 1])
-                        with col_nombre:
-                            st.markdown(f"**{empresa['nombre_empresa']}**  ·  `{empresa['numero_interno']}`")
-                        with col_score:
-                            st.markdown(f"**{_formatear_numero(detalle['puntuacion'])} pts**")
-
-                        referencias_empresa = referencias_por_empresa.get(empresa["numero_interno"], [])
-                        motivos = explicar_coincidencia(
-                            texto_licitacion, pais_licitacion, empresa, referencias_empresa, encoder,
-                            categoria_licitacion=categoria_licitacion,
-                            organismo_licitacion=organismo_licitacion,
-                        )
-                        # En pantalla, las líneas de ranking sustituyen al resumen genérico (que citaba la
-                        # similitud global) y al texto del modelo por campo; la IA recibe `motivos` sin tocar.
-                        motivos_visibles = _bloque_ranking(detalle) + [
-                            m for m in list(motivos)[1:] if not str(m).startswith(PREFIJO_MOTIVO_SEMANTICO)
-                        ]
-                        for motivo in motivos_visibles:
-                            st.markdown(f"- {motivo}")
-
-                        # Justificación en lenguaje natural
-                        if groq_configurado():
-                            ya_en_cache, texto_en_cache = justificacion_en_cache(licitacion, empresa)
-                            if ya_en_cache:
-                                if texto_en_cache:
-                                    st.info(f"**Justificación con IA:** {texto_en_cache}")
-                                else:
-                                    st.caption(
-                                        "No se ha podido generar la justificación con IA "
-                                        "(límite de peticiones gratuitas o problema temporal del servicio)."
-                                    )
-                                
-                                # Botón para reintentar / regenerar
-                                if st.button(
-                                    "🔄 Reintentar / Regenerar respuesta IA",
-                                    key=f"tab2_btn_reintentar_ia_{empresa['numero_interno']}",
-                                    use_container_width=True,
-                                ):
-                                    # Modificamos temporalmente el valor en la sesión
-                                    # para que generar_justificacion_ia() no devuelva el valor guardado
-                                    clave = _clave_cache(licitacion, empresa)
-                                    if "cache_justificacion_ia" in st.session_state and clave in st.session_state.cache_justificacion_ia:
-                                        # Asignamos None momentáneamente
-                                        st.session_state.cache_justificacion_ia[clave] = None
-
-                                    with st.spinner("Enviando petición a GROQ..."):
-                                        generar_justificacion_ia(licitacion_ia, empresa, motivos)
-                                    st.rerun()
-
-                            elif st.button(
-                                "Generar justificación con IA",
-                                key=f"tab2_btn_ia_{empresa['numero_interno']}",
-                            ):
-                                with st.spinner("Generando justificación con IA..."):
-                                    texto_ia = generar_justificacion_ia(licitacion_ia, empresa, motivos)
-                                st.rerun()
-
-                        st.caption(f"Lugar de la licitación: {pais_licitacion or 'No especificado'}")
-                        for etiqueta, valor in obtener_lugares_empresa(empresa):
-                            st.caption(f"{etiqueta}: {valor}")
+                ctx = {
+                    "encoder": encoder, "texto_licitacion": texto_licitacion, "pais_licitacion": pais_licitacion,
+                    "categoria_licitacion": categoria_licitacion, "organismo_licitacion": organismo_licitacion,
+                    "referencias_por_empresa": referencias_por_empresa, "licitacion": licitacion,
+                    "licitacion_ia": licitacion_ia,
+                }
+                _render_resultados(
+                    candidatas, coincidencias, detalle_ranking, ctx, palabras_extra, encoder, licitacion,
+                )
