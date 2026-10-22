@@ -1452,250 +1452,196 @@ def _fmt_pts(valor) -> str:
     return "—" if valor is None else _formatear_numero(float(valor))
 
 
-def _seccion_rerank(licitacion, candidatas, ordenadas_actual, detalle_actual, nuevo, ctx, palabras_extra):
+def _lineas(titulo: str, items: list):
+    if items:
+        st.markdown(f"**{titulo}**")
+        for linea in items:
+            st.markdown(f"- {linea}")
+
+
+def _lista_secundaria(resultado: dict, por_id: dict):
+    """Empresas dudosas, descartadas y no analizadas: lista independiente, sin posiciones de ranking."""
+    st.markdown("### Empresas dudosas o descartadas")
+    st.caption(
+        "No forman parte del ranking principal ni tienen posición en él. Se distingue entre **falta de información**, "
+        "**incompatibilidad demostrada** e **incertidumbre**."
+    )
+    if not resultado["dudosas"] and not resultado["descartadas"]:
+        st.caption("Groq no ha clasificado ninguna de las empresas analizadas como dudosa o descartada.")
+    for etiqueta, clave in (("🟠 Dudosa", "dudosas"), ("🔴 Descartada", "descartadas")):
+        for e in resultado[clave]:
+            nombre = por_id.get(e["numero_interno"], {}).get("nombre_empresa", e["numero_interno"])
+            with st.container(border=True):
+                st.markdown(f"**{nombre}**  ·  `{e['numero_interno']}`  ·  {etiqueta}")
+                st.markdown(e["motivo"] or e["resumen"] or "(el modelo no indicó el motivo)")
+                for titulo, items in (("Incompatibilidad demostrada", e["incompatibilidades"]),
+                                      ("Falta información", e["informacion_faltante"]),
+                                      ("Incertidumbre", e["incertidumbres"])):
+                    if items:
+                        st.caption(f"{titulo}: " + "; ".join(items))
+                for nota in e.get("notas", []):
+                    st.caption(f"ℹ️ {nota}")
+    if resultado["no_analizadas"]:
+        st.markdown("#### Candidatas no analizadas por Groq")
+        st.caption("No se han evaluado: no hay valoración de Groq para ellas, ni a favor ni en contra.")
+        for clave, motivo in resultado["no_analizadas"]:
+            nombre = por_id.get(clave, {}).get("nombre_empresa", clave)
+            st.markdown(f"- **{nombre}** (`{clave}`) — {motivo}")
+
+
+def _seccion_rerank(licitacion, candidatas, ordenadas_actual, detalle_actual, ctx, palabras_extra, encoder) -> bool:
     """
-    Segunda fase: reranking con Groq (reranking_groq.py). Se ejecuta UNA vez al pulsar «Buscar empresas coincidentes»
-    (o con «Reintentar») y el resultado se guarda en session_state: cambiar de vista o abrir una explicación no vuelve
-    a llamar a Groq. Cualquier fallo se muestra aquí y no afecta a los dos rankings originales, que se pintan debajo.
+    Ranking final con Groq (reranking_groq.py). Se ejecuta UNA vez al pulsar «Buscar empresas coincidentes» (o con
+    «Reintentar», que reutiliza lo ya evaluado) y el resultado se guarda en session_state: cambiar de pestaña o abrir una
+    explicación no vuelve a llamar a Groq. Los dos rankings originales se calculan aquí, solo como fuente de candidatas
+    y contexto, y no se muestran. Devuelve True si hay un resultado utilizable.
     """
-    st.markdown("### 🤖 Reranking final con Groq")
+    st.markdown("### 🤖 Ranking final de empresas — análisis con Groq")
     if _rerank is None:
-        st.error(f"El reranking con Groq no está disponible: no se pudo cargar reranking_groq.py ({_ERROR_IMPORT_RERANK}). "
-                 "Los rankings originales no se ven afectados.")
-        return
+        st.error(f"El análisis con Groq no está disponible: no se pudo cargar reranking_groq.py ({_ERROR_IMPORT_RERANK}).")
+        return False
     cfg = _rerank.configuracion()
     firma = _firma_rerank(licitacion, candidatas)
     estado = st.session_state.get("tab2_rerank")
-    pendiente = st.session_state.pop("tab2_rerank_pendiente", False)
     if estado is not None and estado.get("firma") != firma:
         estado = None
+    pendiente = st.session_state.pop("tab2_rerank_pendiente", None)
     if not cfg["api_key"]:
-        st.info("Para activar el reranking define `GROQ_API_KEY` (y opcionalmente `GROQ_MODEL`) en los secretos o en el "
-                "entorno. Mientras tanto verás solo los rankings originales, sin cambios.")
-        return
+        st.info("Para activar el ranking con Groq define `GROQ_API_KEY` (y opcionalmente `GROQ_MODEL`) en los secretos o en "
+                "el entorno.")
+        return False
+
     if pendiente:
-        with st.spinner(f"Reordenando {len(candidatas)} empresas con Groq ({cfg['modelo']})... puede tardar un minuto"):
-            resultado = _rerank.reordenar(
-                ctx["licitacion_ia"], candidatas,
-                {"empresas": ordenadas_actual, "detalle": detalle_actual}, nuevo,
-                ctx["referencias_por_empresa"], palabras_extra,
-            )
-        estado = {"firma": firma, "resultado": resultado, "ampliaciones": {}}
+        n = min(len(candidatas), cfg["max_empresas"])
+        st.caption(f"Analizando las {n} primeras candidatas por lotes de {cfg['lote']} con **{cfg['modelo']}**. Puede tardar "
+                   "varios minutos por los límites del plan gratuito de Groq: no cierres la página.")
+        barra = st.progress(0.0, text="Preparando el análisis…")
+        parcial = st.session_state.get("tab2_rerank_parcial")
+        if pendiente == "nuevo" or parcial is None or parcial.get("firma") != firma:
+            parcial = {"firma": firma, "evals": {}}
+            st.session_state.tab2_rerank_parcial = parcial
+        try:
+            nuevo = _calcular_nuevo_ranking(encoder, licitacion, candidatas, palabras_extra, ctx["referencias_por_empresa"])
+        except Exception:  # noqa: BLE001 - sin el nuevo ranking el modelo recibe solo el actual (se avisa en el resultado)
+            nuevo = None
+        actual = {"empresas": ordenadas_actual, "detalle": detalle_actual}
+        resultado = _rerank.reordenar(
+            ctx["licitacion_ia"], candidatas, actual, nuevo, ctx["referencias_por_empresa"], palabras_extra,
+            progreso=lambda f, t: barra.progress(float(f), text=t),
+            previas=dict(parcial["evals"]), al_evaluar=lambda i, ev: parcial["evals"].__setitem__(i, ev),
+        )
+        barra.empty()
+        estado = {"firma": firma, "resultado": resultado, "ampliaciones": {},
+                  "rankings": _rerank.resumen_rankings(candidatas, actual, nuevo)}
         st.session_state.tab2_rerank = estado
     elif estado is None:
-        if st.button("Reordenar con Groq", key="tab2_rerank_manual"):
-            st.session_state.tab2_rerank_pendiente = True
+        if st.button("Analizar con Groq", key="tab2_rerank_manual"):
+            st.session_state.tab2_rerank_pendiente = "nuevo"
             st.rerun()
-        st.caption("Pulsa este botón para ejecutar el reranking con Groq (no se ejecuta solo para no gastar tu cuota gratuita).")
-        return
+        st.caption("Pulsa para analizar las candidatas con Groq (no se ejecuta solo, para no gastar tu cuota gratuita).")
+        return False
 
-    if estado is None or estado.get("firma") != firma:
-        return
     resultado = estado["resultado"]
     if not resultado["ok"]:
-        st.error(f"⚠️ No se pudo completar el reranking con Groq: {resultado['error']} "
-                 "Se conservan los dos rankings originales, que puedes consultar debajo.")
+        st.error(f"⚠️ No se pudo completar el análisis con Groq: {resultado['error']}")
         if resultado.get("detalle_error"):
             with st.expander("Detalle técnico del error"):
                 st.code(str(resultado["detalle_error"]))
-        for aviso in resultado.get("avisos", []):
-            st.caption(f"ℹ️ {aviso}")
-        if st.button("🔁 Reintentar reranking con Groq", key="tab2_rerank_reintentar"):
-            st.session_state.tab2_rerank_pendiente = True
+        if st.button("🔁 Reintentar (reutiliza lo ya evaluado)", key="tab2_rerank_reintentar"):
+            st.session_state.tab2_rerank_pendiente = "reintento"
             st.rerun()
-        return
-
-    filas = _rerank.construir_tabla(candidatas, {"empresas": ordenadas_actual, "detalle": detalle_actual}, nuevo, resultado)
-    n_top = len(resultado["ranking"])
-    msg = (f"Modelo **{resultado['modelo']}** · {len(resultado['enviadas'])} de {len(candidatas)} empresas enviadas · "
-           f"{n_top} en el ranking final.")
-    if resultado["no_procesadas"]:
-        msg += (f" **{len(resultado['no_procesadas'])} no se procesaron** por el límite de contexto/tokens: aparecen en la "
-                "tabla marcadas como no procesadas (no se han evaluado).")
-    if resultado.get("modo_compacto"):
-        msg += " Se usó el modo compacto."
-    st.caption(msg)
-    for aviso in resultado.get("avisos", []):
-        st.caption(f"ℹ️ {aviso}")
-    if resultado.get("comparacion_general"):
-        st.info(f"**Comparación general con los rankings originales.** {resultado['comparacion_general']}")
-
-    def cambio_txt(c):
-        return "" if c is None else ("▲ +%d" % c if c > 0 else ("▼ %d" % c if c < 0 else "="))
-
-    def entero(v):
-        return None if v is None else int(v)
-
-    tabla = pd.DataFrame([{
-        "Empresa": f["empresa"], "Nº": f["numero_interno"],
-        "Pos. actual": entero(f["pos_actual"]), "Pts. actual": _fmt_pts(f["pts_actual"]),
-        "Pos. nuevo": entero(f["pos_nuevo"]) if nuevo else None, "Pts. nuevo": _fmt_pts(f["pts_nuevo"]) if nuevo else "—",
-        "Pos. GPT": entero(f["pos_final"]), "Pts. GPT": _fmt_pts(f["pts_final"]),
-        "Cambio vs actual": cambio_txt(f["cambio_actual"]), "Cambio vs nuevo": cambio_txt(f["cambio_nuevo"]),
-        "Estado": f["estado"],
-    } for f in filas])
-    for col in ("Pos. actual", "Pos. nuevo", "Pos. GPT"):
-        tabla[col] = tabla[col].astype("Int64")
-    st.dataframe(tabla, hide_index=True, use_container_width=True)
-    st.caption("Las puntuaciones de los tres rankings usan criterios distintos y no son directamente comparables. "
-               "Pos. GPT vacía = la empresa no está en el top del reranking.")
+        return False
 
     por_id = {str(e.get("numero_interno")): e for e in candidatas}
-    pos_actual = {str(e.get("numero_interno")): i for i, e in enumerate(ordenadas_actual, start=1)}
-    pos_nuevo = {str(e.get("numero_interno")): i for i, e in enumerate(nuevo["empresas"], start=1)} if nuevo else {}
-    st.markdown("#### Explicación completa de cada empresa del ranking final")
-    for r in resultado["ranking"]:
-        empresa = por_id.get(r["numero_interno"], {})
-        titulo = (f"{r['posicion']}. {empresa.get('nombre_empresa', r['numero_interno'])} — {_fmt_pts(r['puntuacion'])}/100"
-                  f"  (actual #{pos_actual.get(r['numero_interno'], '—')} · nuevo #{pos_nuevo.get(r['numero_interno'], '—')})")
-        with st.expander(titulo):
-            st.markdown(f"**{r['resumen']}**")
-            st.markdown(r["explicacion"])
-            for etiqueta, clave in (("✅ Ventajas", "ventajas"), ("⚠️ Carencias", "carencias"), ("🚩 Riesgos", "riesgos")):
-                if r[clave]:
-                    st.markdown(f"**{etiqueta}**")
-                    for linea in r[clave]:
-                        st.markdown(f"- {linea}")
-            st.markdown(f"**🌍 Geografía.** {r['geografia']}")
-            st.markdown(f"**🔀 Frente a los rankings originales.** {r['comparacion']}")
-            clave_amp = r["numero_interno"]
-            amp = estado["ampliaciones"].get(clave_amp)
-            if amp:
-                st.markdown("---")
-                st.markdown(amp)
-            elif st.button("📄 Ampliar con un informe detallado (nueva petición a Groq)", key=f"tab2_rerank_amp_{clave_amp}"):
-                with st.spinner("Generando informe detallado..."):
-                    rk = _rerank.resumen_rankings(
-                        candidatas, {"empresas": ordenadas_actual, "detalle": detalle_actual}, nuevo,
-                    ).get(clave_amp, {})
-                    texto, error = _rerank.ampliar_explicacion(
-                        ctx["licitacion_ia"], empresa, ctx["referencias_por_empresa"].get(empresa.get("numero_interno"), []),
-                        rk, r, palabras_extra=palabras_extra,
-                    )
-                if error:
-                    st.error(f"No se pudo ampliar la explicación: {error}")
-                else:
-                    estado["ampliaciones"][clave_amp] = texto
-                    st.rerun()
-    if resultado["otras"]:
-        with st.expander(f"Otras {len(resultado['otras'])} empresas evaluadas por Groq fuera del top (motivo breve)"):
-            for clave, o in resultado["otras"].items():
-                nombre = por_id.get(clave, {}).get("nombre_empresa", clave)
-                st.markdown(f"- **{nombre}** (`{clave}`) — {_fmt_pts(o['puntuacion'])}/100. {o['motivo'] or 'Sin motivo indicado.'}")
-    if resultado["no_procesadas"]:
-        with st.expander(f"{len(resultado['no_procesadas'])} empresas NO procesadas por Groq"):
-            st.caption("No se enviaron al modelo por el presupuesto de contexto: no hay valoración de Groq para ellas. "
-                       "Puedes ampliar GROQ_RERANK_MAX_ENTRADA_TOKENS / GROQ_RERANK_MAX_EMPRESAS si tu plan lo permite.")
-            for clave in resultado["no_procesadas"]:
-                st.markdown(f"- {por_id.get(clave, {}).get('nombre_empresa', clave)} (`{clave}`) — actual #{pos_actual.get(clave, '—')}"
-                            + (f", nuevo #{pos_nuevo.get(clave)}" if pos_nuevo.get(clave) else ""))
+    nombres = {k: v.get("nombre_empresa") for k, v in por_id.items()}
+    n_an = len(resultado["analizadas"])
+    st.caption(
+        f"Modelo **{resultado['modelo']}** · **{n_an} de {len(candidatas)}** candidatas analizadas "
+        f"(las {resultado['max_empresas']} primeras de los rankings internos) · {len(resultado['recomendadas'])} recomendadas, "
+        f"{len(resultado['dudosas'])} dudosas, {len(resultado['descartadas'])} descartadas · {resultado['llamadas']} llamadas a Groq"
+        + (f" · {resultado['tokens']:,} tokens".replace(",", ".") if resultado["tokens"] else "")
+    )
+    if resultado.get("error_parcial"):
+        st.warning(f"⚠️ El análisis se interrumpió: {resultado['error_parcial']} Las empresas pendientes figuran como "
+                   "«no analizadas». Lo ya evaluado se conserva.")
+        if st.button("🔁 Continuar el análisis de las pendientes", key="tab2_rerank_reintentar"):
+            st.session_state.tab2_rerank_pendiente = "reintento"
+            st.rerun()
+    if resultado["avisos"] or resultado["duplicadas"]:
+        with st.expander(f"Avisos del proceso ({len(resultado['avisos']) + len(resultado['duplicadas'])})"):
+            for a in resultado["avisos"]:
+                st.caption(f"ℹ️ {a}")
+            for clave, motivo in resultado["duplicadas"]:
+                st.caption(f"ℹ️ Empresa duplicada omitida ({clave}): {motivo}.")
+    st.info("Las empresas recomendadas son una **recomendación fundamentada** en los datos disponibles: no implica que vayan "
+            "a presentar oferta.")
+
+    recomendadas = resultado["recomendadas"]
+    if not recomendadas:
+        st.warning("Groq no ha encontrado, entre las empresas analizadas, ninguna con evidencia suficiente para recomendarla. "
+                   "Revisa la lista de dudosas y descartadas más abajo.")
+    else:
+        if resultado.get("comparacion_general"):
+            st.markdown(f"**Comparación global.** {resultado['comparacion_general']}")
+        elif not resultado.get("orden_global") and len(recomendadas) > 1:
+            st.caption("Sin comparación global de Groq: las recomendadas se ordenan por la puntuación de su evaluación individual.")
+        filas = _rerank.construir_tabla(resultado, nombres)
+        st.dataframe(pd.DataFrame([{
+            "Pos.": f["posicion"], "Empresa": f["empresa"], "Nº": f["numero_interno"],
+            "Puntuación (0-100)": _fmt_pts(f["puntuacion"]), "Resumen": f["resumen"],
+        } for f in filas]), hide_index=True, use_container_width=True)
+
+        st.markdown("#### Explicación completa de cada empresa recomendada")
+        for r in recomendadas:
+            empresa = por_id.get(r["numero_interno"], {})
+            with st.expander(f"{r['posicion']}. {empresa.get('nombre_empresa', r['numero_interno'])} — {_fmt_pts(r['puntuacion'])}/100"):
+                st.markdown(f"**{r['resumen']}**")
+                st.markdown(r["explicacion"])
+                _lineas("✅ Ventajas", r["ventajas"])
+                _lineas("⚠️ Carencias", r["carencias"])
+                _lineas("🚩 Riesgos", r["riesgos"])
+                _lineas("❔ Información que falta", r["informacion_faltante"])
+                _lineas("🌫️ Incertidumbres", r["incertidumbres"])
+                st.markdown(f"**🌍 Geografía.** {r['geografia'] or '(el modelo no valoró la geografía)'}")
+                if r["comparacion"]:
+                    st.markdown(f"**🔀 Frente a los rankings automáticos previos.** {r['comparacion']}")
+                clave_amp = r["numero_interno"]
+                amp = estado["ampliaciones"].get(clave_amp)
+                if amp:
+                    st.markdown("---")
+                    st.markdown(amp)
+                elif st.button("📄 Ampliar con un informe detallado (nueva petición a Groq)", key=f"tab2_rerank_amp_{clave_amp}"):
+                    with st.spinner("Generando informe detallado..."):
+                        texto, error = _rerank.ampliar_explicacion(
+                            ctx["licitacion_ia"], empresa,
+                            ctx["referencias_por_empresa"].get(empresa.get("numero_interno"), []),
+                            estado["rankings"].get(clave_amp, {}), r, palabras_extra=palabras_extra,
+                        )
+                    if error:
+                        st.error(f"No se pudo ampliar la explicación: {error}")
+                    else:
+                        estado["ampliaciones"][clave_amp] = texto
+                        st.rerun()
     st.divider()
+    _lista_secundaria(resultado, por_id)
+    return True
 
 
 def _render_resultados(candidatas, ordenadas_actual, detalle_actual, ctx, palabras_extra, encoder, licitacion):
     """
-    Pinta los resultados. Con el modo A/B desactivado es exactamente la lista de siempre. Con él activado, el ranking
-    actual (izquierda) no cambia y el nuevo (derecha) se calcula aparte: si falla, solo la derecha muestra el error.
+    Pinta SOLO el ranking final de Groq y, debajo, las dudosas/descartadas. Los dos rankings originales se siguen
+    calculando (en render_tab2 y dentro de la fase de Groq) como fuente de candidatas, pero no se muestran. Solo si Groq no
+    está disponible o falla se ofrece, plegada, la lista de candidatas del ranking actual para no dejar la pestaña vacía.
     """
-    usar_rerank = st.checkbox(
-        "🤖 Reranking final con Groq (segunda fase)",
-        value=True,
-        key="tab2_usar_rerank",
-        help="Un modelo de Groq revisa los dos rankings y la información de las empresas y propone un ranking final. "
-             "No modifica los rankings originales; si falla, se conservan.",
-    )
-    modo_ab = st.checkbox(
-        "🧪 Modo de prueba A/B: comparar con el nuevo ranking «Relevancia real»",
-        value=True,
-        key="tab2_modo_ab",
-        help="Calcula un segundo ranking con otra lógica sobre las mismas empresas. No sustituye ni modifica el actual.",
-    )
-
-    # --- Nuevo ranking, aislado: un error aquí no afecta al ranking actual ---
-    nuevo, error_nuevo = None, None
-    if modo_ab or usar_rerank:
-        try:
-            nuevo = _calcular_nuevo_ranking(
-                encoder, licitacion, candidatas, palabras_extra, ctx["referencias_por_empresa"],
-            )
-        except Exception as error:  # noqa: BLE001 - se muestra al usuario, no se propaga
-            error_nuevo = f"{type(error).__name__}: {error}"
-
-    if usar_rerank:
-        try:
-            _seccion_rerank(licitacion, candidatas, ordenadas_actual, detalle_actual, nuevo, ctx, palabras_extra)
-        except Exception as error:  # noqa: BLE001 - la segunda fase nunca rompe la pestaña
-            st.error(f"El reranking con Groq falló de forma inesperada ({type(error).__name__}: {error}). "
-                     "Los rankings originales se muestran debajo sin cambios.")
-
-    if not modo_ab:
-        if usar_rerank:
-            st.markdown("### Ranking actual — Palabras clave")
-        for empresa, detalle in zip(ordenadas_actual, detalle_actual):
-            _tarjeta_ranking_actual(empresa, detalle, ctx)
-        return
-
-    pos_actual = {e["numero_interno"]: i for i, e in enumerate(ordenadas_actual, start=1)}
-    pos_nuevo = {e["numero_interno"]: i for i, e in enumerate(nuevo["empresas"], start=1)} if nuevo else {}
-
-    st.info(
-        "🧪 **Modo de prueba comparativa A/B.** Los dos rankings ordenan las mismas "
-        f"**{len(candidatas)}** empresas candidatas de la misma licitación. Las puntuaciones usan fórmulas distintas "
-        "y **no son comparables entre sí**."
-    )
-    if nuevo:
-        cambian = sum(1 for k, p in pos_actual.items() if pos_nuevo.get(k) != p)
-        top = 5
-        comunes = len({e["numero_interno"] for e in ordenadas_actual[:top]} & {e["numero_interno"] for e in nuevo["empresas"][:top]})
-        objeto = nuevo["objeto"]
-        nucleo = [c["texto"] for c in objeto["conceptos"] if c["nucleo"]][:6]
-        st.caption(
-            f"{cambian} de {len(candidatas)} empresas cambian de posición · {comunes} de {min(top, len(candidatas))} "
-            f"coinciden en el Top {top}. Objeto detectado ({objeto['tipo_contrato']}): "
-            + (", ".join(f"«{c}»" for c in nucleo) or "sin conceptos principales")
-            + (f" · se ignoran (genéricas, administrativas o lugar): {', '.join(objeto['instrumentales'][:6])}" if objeto["instrumentales"] else "")
-        )
-
-    vista = st.radio(
-        "Vista",
-        ["Lado a lado", "Solo ranking actual", "Solo nuevo ranking"],
-        horizontal=True,
-        key="tab2_vista_ab",
-        help="En pantallas pequeñas las columnas se apilan; con este selector puedes ver cada ranking por separado.",
-    )
-
-    def columna_actual():
-        st.markdown("#### Ranking actual — Palabras clave")
-        st.caption("Puntuación 0-100 (60 exactas + 40 similares). Lógica en uso, sin cambios.")
-        for empresa, detalle in zip(ordenadas_actual, detalle_actual):
-            cambio = None
-            if nuevo:
-                cambio = _insignia_cambio(pos_actual[empresa["numero_interno"]], pos_nuevo[empresa["numero_interno"]], "nuevo ranking")
-            _tarjeta_ranking_actual(empresa, detalle, ctx, cambio)
-
-    def columna_nueva():
-        st.markdown("#### Nuevo ranking — Relevancia real")
-        st.caption("Puntuación 0-100 por cobertura del objeto de la licitación. Fórmula distinta a la actual.")
-        if error_nuevo:
-            st.error(f"No se ha podido calcular el nuevo ranking. El ranking actual no se ve afectado. ({error_nuevo})")
-            return
-        for posicion, (empresa, detalle) in enumerate(zip(nuevo["empresas"], nuevo["detalle"]), start=1):
-            try:
-                cambio = _insignia_cambio(posicion, pos_actual[empresa["numero_interno"]], "ranking actual")
-                _tarjeta_nuevo_ranking(empresa, detalle, posicion, cambio, licitacion.get("pais"))
-            except Exception as error:  # noqa: BLE001
-                st.warning(f"No se pudo mostrar la tarjeta de {empresa.get('nombre_empresa')}: {error}")
-
-    if vista == "Lado a lado":
-        izquierda, derecha = st.columns(2)
-        with izquierda:
-            columna_actual()
-        with derecha:
-            columna_nueva()
-    elif vista == "Solo ranking actual":
-        columna_actual()
-    else:
-        columna_nueva()
+    try:
+        ok = _seccion_rerank(licitacion, candidatas, ordenadas_actual, detalle_actual, ctx, palabras_extra, encoder)
+    except Exception as error:  # noqa: BLE001 - la fase de Groq nunca rompe la pestaña
+        ok = False
+        st.error(f"El análisis con Groq falló de forma inesperada ({type(error).__name__}: {error}).")
+    if not ok:
+        with st.expander("Ver las candidatas por similitud (solo disponible porque el análisis con Groq no se ha completado)"):
+            for empresa, detalle in zip(ordenadas_actual, detalle_actual):
+                _tarjeta_ranking_actual(empresa, detalle, ctx)
 
 
 def render_tab2(supabase: Client, encoder: SentenceTransformer):
@@ -1771,8 +1717,9 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
             st.caption(f"Categoría: {licitacion['categoria']}")
 
         if st.button("Buscar empresas coincidentes", key="tab2_buscar_empresas", use_container_width=True):
-            st.session_state.tab2_rerank_pendiente = bool(st.session_state.get("tab2_usar_rerank", True))
+            st.session_state.tab2_rerank_pendiente = "nuevo"
             st.session_state.pop("tab2_rerank", None)
+            st.session_state.pop("tab2_rerank_parcial", None)
             with st.spinner("Cruzando con la base de datos de empresas..."):
                 if licitacion.get("codigo_unico"):
                     st.session_state.tab2_coincidencias = obtener_coincidencias(supabase, licitacion["codigo_unico"])
@@ -1787,7 +1734,7 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
             if not coincidencias:
                 st.warning("No se han encontrado empresas con un perfil afín a esta licitación.")
             else:
-                st.success(f"**{len(coincidencias)}** empresas encajan con esta licitación, de más a menos afín:")
+                st.success(f"**{len(coincidencias)}** empresas candidatas por similitud con esta licitación. Groq analiza a continuación las más prometedoras:")
                 # Título + descripción de la licitación (ver docstring del módulo,
                 # sección 2): antes solo se usaba el título.
                 categoria_licitacion = licitacion.get("categoria")
