@@ -1,0 +1,70 @@
+name: Keep Streamlit App Awake
+
+on:
+  schedule:
+    # Runs every 8 hours
+    - cron: '0 */8 * * *'
+  workflow_dispatch:
+
+jobs:
+  visit-app:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Install Playwright
+        run: npm install --no-save playwright
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Visit Streamlit App
+        run: |
+          node <<'EOF'
+          const { chromium } = require('playwright');
+
+          (async () => {
+            const browser = await chromium.launch({
+              headless: true
+            });
+
+            const page = await browser.newPage();
+
+            try {
+              const response = await page.goto(
+                'https://buscadorlicitacionesempresas.streamlit.app/',
+                {
+                  waitUntil: 'domcontentloaded',
+                  timeout: 120000
+                }
+              );
+
+              console.log('HTTP status:', response?.status());
+              console.log('Initial URL:', page.url());
+              console.log('Page title:', await page.title());
+
+              // Give Streamlit time to establish the session
+              // and finish loading the application.
+              await page.waitForTimeout(15000);
+
+              console.log('Final URL:', page.url());
+
+              // If Streamlit sent us back to the login flow,
+              // the browser session was not established correctly.
+              if (page.url().includes('/-/login')) {
+                throw new Error(
+                  'Streamlit session did not complete: still on /-/login'
+                );
+              }
+
+              console.log('Streamlit app successfully visited.');
+
+            } finally {
+              await browser.close();
+            }
+          })();
+          EOF
