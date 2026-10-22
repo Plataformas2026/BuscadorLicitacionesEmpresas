@@ -46,7 +46,7 @@ def _entero(clave: str, por_defecto: int) -> int:
 
 # Reranking con Groq (segunda fase de «Coincidencia Inteligente», app/reranking_groq.py).
 # Los límites del plan gratuito dependen del modelo y pueden cambiar: por eso son ajustables.
-GROQ_RERANK_MAX_EMPRESAS = _entero("GROQ_RERANK_MAX_EMPRESAS", 15)   # candidatas que se analizan (mejores de los rankings)
+GROQ_RERANK_MAX_EMPRESAS = _entero("GROQ_RERANK_MAX_EMPRESAS", 9)   # candidatas que se analizan (mejores de los rankings)
 GROQ_RERANK_LOTE = _entero("GROQ_RERANK_LOTE", 3)                       # empresas por llamada a Groq
 GROQ_RERANK_TPM = _entero("GROQ_RERANK_TPM", 8000)                      # tokens/minuto a respetar (0 = sin espera preventiva)
 GROQ_RERANK_MAX_ENTRADA_TOKENS = _entero("GROQ_RERANK_MAX_ENTRADA_TOKENS", 4000)
