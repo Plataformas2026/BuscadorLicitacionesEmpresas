@@ -32,7 +32,27 @@ SUPABASE_ANON_KEY = _config("SUPABASE_ANON_KEY")
 # hasta ahora (la Pestaña 2 no ofrece el botón de justificación con IA,
 # pero toda la lógica de coincidencias determinista sigue intacta).
 GROQ_API_KEY = _config("GROQ_API_KEY")
-GROQ_MODELO = _config("GROQ_MODELO", "openai/gpt-oss-20b")
+# GROQ_MODEL es el nombre recomendado; GROQ_MODELO se mantiene por compatibilidad.
+GROQ_MODEL = _config("GROQ_MODEL") or _config("GROQ_MODELO", "openai/gpt-oss-20b")
+GROQ_MODELO = GROQ_MODEL
+
+
+def _entero(clave: str, por_defecto: int) -> int:
+    try:
+        return int(str(_config(clave, str(por_defecto))).strip())
+    except ValueError:
+        return por_defecto
+
+
+# Reranking con Groq (segunda fase de «Coincidencia Inteligente», app/reranking_groq.py).
+# Los límites del plan gratuito dependen del modelo y pueden cambiar: por eso son ajustables.
+GROQ_RERANK_TOP = _entero("GROQ_RERANK_TOP", 10)
+GROQ_RERANK_MAX_EMPRESAS = _entero("GROQ_RERANK_MAX_EMPRESAS", 15)
+GROQ_RERANK_MAX_ENTRADA_TOKENS = _entero("GROQ_RERANK_MAX_ENTRADA_TOKENS", 4800)
+GROQ_RERANK_MAX_SALIDA_TOKENS = _entero("GROQ_RERANK_MAX_SALIDA_TOKENS", 3000)
+GROQ_RERANK_PALABRAS = _entero("GROQ_RERANK_PALABRAS", 140)
+GROQ_RERANK_TIMEOUT = _entero("GROQ_RERANK_TIMEOUT", 90)
+GROQ_RERANK_REASONING = _config("GROQ_RERANK_REASONING", "low")  # low | medium | high ("" = no enviar)
 
 MODELO_EMBEDDING = "intfloat/multilingual-e5-small"  # 384 dimensiones
 
