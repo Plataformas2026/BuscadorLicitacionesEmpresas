@@ -46,14 +46,12 @@ def _entero(clave: str, por_defecto: int) -> int:
 
 # Reranking con Groq (segunda fase de «Coincidencia Inteligente», app/reranking_groq.py).
 # Los límites del plan gratuito dependen del modelo y pueden cambiar: por eso son ajustables.
-GROQ_RERANK_MAX_EMPRESAS = _entero("GROQ_RERANK_MAX_EMPRESAS", 9)   # candidatas que se analizan (mejores de los rankings)
-GROQ_RERANK_LOTE = _entero("GROQ_RERANK_LOTE", 3)                       # empresas por llamada a Groq
-GROQ_RERANK_TPM = _entero("GROQ_RERANK_TPM", 8000)                      # tokens/minuto a respetar (0 = sin espera preventiva)
-GROQ_RERANK_MAX_ENTRADA_TOKENS = _entero("GROQ_RERANK_MAX_ENTRADA_TOKENS", 4000)
-GROQ_RERANK_MAX_SALIDA_TOKENS = _entero("GROQ_RERANK_MAX_SALIDA_TOKENS", 3600)
-GROQ_RERANK_PALABRAS = _entero("GROQ_RERANK_PALABRAS", 200)             # extensión orientativa de cada explicación
-GROQ_RERANK_MIN_RECOMENDADA = _entero("GROQ_RERANK_MIN_RECOMENDADA", 60)  # puntuación mínima para "recomendada"
-GROQ_RERANK_TIMEOUT = _entero("GROQ_RERANK_TIMEOUT", 120)
+GROQ_RERANK_MAX_EMPRESAS = _entero("GROQ_RERANK_MAX_EMPRESAS", 15)   # candidatas que se analizan (mejores de los rankings)
+GROQ_RERANK_TPM = _entero("GROQ_RERANK_TPM", 8000)                      # tokens/minuto del plan (entrada + salida de una petición)
+GROQ_RERANK_MAX_ENTRADA_TOKENS = _entero("GROQ_RERANK_MAX_ENTRADA_TOKENS", 4800)
+GROQ_RERANK_MAX_SALIDA_TOKENS = _entero("GROQ_RERANK_MAX_SALIDA_TOKENS", 3000)
+GROQ_RERANK_MIN_RECOMENDADA = _entero("GROQ_RERANK_MIN_RECOMENDADA", 50)  # puntuación mínima para "recomendada"
+GROQ_RERANK_TIMEOUT = _entero("GROQ_RERANK_TIMEOUT", 90)
 GROQ_RERANK_REASONING = _config("GROQ_RERANK_REASONING", "low")  # low | medium | high ("" = no enviar)
 
 MODELO_EMBEDDING = "intfloat/multilingual-e5-small"  # 384 dimensiones
