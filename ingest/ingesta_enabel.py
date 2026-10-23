@@ -54,7 +54,7 @@ from common import (
 )
 
 BASE_URL = "https://www.enabel.be"
-LISTADO_URL = BASE_URL + "/public-procurement/"
+LISTADO_URL = BASE_URL + "/list-public-procurement/"
 
 FUENTE = "Enabel"
 ORGANISMO = "Enabel - Belgian Agency for International Cooperation"
