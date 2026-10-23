@@ -1,300 +1,37 @@
 """
 matching.py
 -----------
-Lógica de la Pestaña 2 (Coincidencia Inteligente: Licitación -> Empresas).
+Pestaña 2 (Coincidencia Inteligente: Licitación -> Empresas), sobre la base de datos de empresas del Excel
+(leído de Google Drive, como antes; copia local `data/empresas.xlsx` si Drive no está configurado; ver empresas_excel.py), que es la única fuente de verdad.
 
-Flujo:
-  1. `localizar_licitacion()` -- el usuario escribe un título, un enlace o
-     un identificador; se intenta primero un match exacto (enlace o
-     codigo_unico) y, si no lo hay, una búsqueda semántica que devuelve
-     varios candidatos para que el usuario confirme cuál es.
-  2. `obtener_coincidencias()` -- con la licitación ya confirmada (existe
-     en nuestra tabla), se llama a la función RPC
-     `buscar_empresas_para_licitacion`, que resuelve TODO en SQL (nunca
-     hace falta mover un vector de 384 posiciones a través de Python).
-  3. Si la licitación NO está en nuestra tabla (el usuario la pega/escribe
-     directamente), `obtener_coincidencias_texto_libre()` calcula el
-     embedding al vuelo y usa `buscar_empresas_por_embedding`.
-  4. `obtener_referencias_por_empresas()` -- trae en UNA sola consulta
-     (nunca N+1) los títulos de licitaciones antiguas de todas las
-     empresas candidatas, desde `empresas_referencias`.
-  4b. `ordenar_por_coincidencia()` (ranking_coincidencias.py) -- sustituye la
-     similitud global de la RPC por una nota de 0 a 100: 60 puntos por palabras
-     clave de la empresa que aparecen en la licitación (más si están en el
-     título) y 40 por palabras clave de significado claramente afín a un término
-     de la licitación. Sin ninguna de las dos, la nota es 0. Solo cambia el ORDEN
-     y el número mostrado: `similarity` y los datos de las empresas o de la
-     licitación no se tocan, así que las explicaciones y la IA reciben lo mismo.
-  4c. `_bloque_ranking()` -- las tres líneas que se MUESTRAN en la explicación
-     (coincidencias exactas «A = B», similares «A ≈ B» y razón de la nota).
-     Sustituyen en pantalla al resumen genérico; la IA recibe los mismos motivos
-     de siempre.
-  4d. PRUEBA A/B (`_render_resultados`): el ranking actual y el nuevo «Relevancia
-     real» (ranking_relevancia.py, independiente) se muestran a la vez, en dos
-     columnas, sobre LAS MISMAS empresas candidatas. El de la izquierda es el
-     código de siempre (`_tarjeta_ranking_actual`); el de la derecha se calcula
-     aparte y, si falla, solo él muestra un error. La casilla «Modo de prueba
-     A/B» lo desactiva y deja la pantalla exactamente como antes.
-  5. `explicar_coincidencia()` -- construye la explicación de cada
-     coincidencia SIEMPRE con evidencia concreta, nunca "no hay datos",
-     en tres capas (nada de LLM ni API externa, para mantener la app
-     dentro de la arquitectura gratuita):
-       Capa 1 (literal multilingüe): proyectos tipo, descripción de
-       actividad, preferencias de licitación, país/zona, palabras clave
-       -- estas últimas ahora en los 4 idiomas que ya tiene cada empresa
-       (antes solo se comparaban las españolas contra licitaciones que a
-       menudo están en inglés o francés), y licitaciones antiguas del
-       Excel de referencias.
-       Capa 2 (puente temático multilingüe): cuando ninguna palabra
-       literal coincide -- típico cuando la licitación está en otro
-       idioma o usa sinónimos -- se comprueba si ambos textos comparten
-       algún tema del diccionario `TEMAS_MULTILINGUE` (agua y
-       saneamiento, energía, TIC, medio ambiente...), construido sobre
-       los 6 sectores reales del Excel más los temas transversales más
-       habituales en licitaciones de cooperación internacional.
-       Capa 3 (último recurso -- similitud semántica por campo): si
-       tampoco hay puente temático, se compara el embedding de la
-       licitación contra el de cada campo del perfil de la empresa por
-       separado (mismo modelo `intfloat/multilingual-e5-small` ya
-       cargado, sin llamada externa) para señalar qué aspecto concreto
-       del perfil está generando la afinidad, en vez de dejar la
-       recomendación sin ninguna explicación.
-  6. `obtener_lugares_empresa()` -- los 4 campos geográficos de la
-     empresa (los mismos del Directorio de Empresas) en texto plano,
-     sin tabla.
+Flujo al pulsar «Buscar» (dos fases separadas e independientes):
+  FASE 1 (ranking_embeddings.py): UN solo ranking por embeddings. La similitud usa EXCLUSIVAMENTE nombre de la empresa,
+          sector, palabras clave extraídas de su descripción y principales proyectos tipo. Se conservan las 15 mejores.
+  FASE 2 (reranking_groq.py): GPT (Groq) evalúa esas 15 y las reordena por adecuación real (técnica pesa mucho más que la
+          geografía). Solo se excluye una empresa si el país/zona de la licitación figura expresamente entre sus zonas
+          descartadas; la falta de información geográfica nunca penaliza ni excluye.
+Pantalla: primero las empresas por puntuación de GPT (con justificación); debajo, el ranking original por embeddings con sus
+posiciones y las palabras que puntuaron; y una tabla para comparar ambas posiciones. Las excluidas siguen apareciendo en el
+historial de embeddings (marcadas) pero no como recomendaciones. Si GPT falla, la fase 1 se sigue mostrando.
 
-Novedades de la v2 (categoría de la licitación + nuevos datos del Excel):
-  - La CATEGORÍA de la licitación entra en la comparación: se recupera
-    junto al resto de campos (localizar_licitacion), se añade al texto con
-    el que se compara y se contrasta con el sector/subsector, proyectos tipo
-    y palabras clave de la empresa. En el flujo de texto libre también va en
-    el embedding que se calcula al vuelo.
-  - Capa 1 (literal) aprovecha ahora: organismo/financiador de la licitación
-    frente a los clientes principales y a las referencias de la empresa;
-    país de la licitación frente al país de sus referencias; y
-    certificaciones citadas en la licitación (ISO, ENAC...).
-  - Capa 2 (puente temático) incluye también los tipos de proyecto y sectores
-    de las referencias de la empresa.
-  - Capa 3 (similitud por campo) compara además palabras clave, clientes
-    principales y el historial de títulos de la empresa, y cachea los
-    embeddings para no recalcular el de la licitación por cada empresa.
-  - Los títulos de las demás pestañas del Excel (tabla
-    `empresas_hojas_extra`, solo los que NO están ya en
-    `empresas_referencias`) se suman a las referencias de cada empresa.
-  - Los campos geográficos de la empresa son ahora texto libre (p. ej.
-    "España (Tenerife, La Gomera)"): se buscan por palabra completa y se
-    ignoran fragmentos demasiado cortos para dar falsas coincidencias.
-  - OBSERVACIONES IMPORTANTES (col. AI del Excel, `observaciones_importantes`):
-    avisos como "ESTÁ INACTIVA" o exclusiones sectoriales. Se muestran como
-    PRIMER motivo de la explicación (⚠️), íntegras y pidiendo revisarlas. Es
-    solo un aviso: no suma ni resta puntuación, no cuenta como coincidencia y
-    no entra en los embeddings (ver ingest/sync_empresas_drive.py).
+La búsqueda de la licitación (por enlace, código o texto) sigue usando Supabase, como antes.
 """
-
+import json
 import re
-import unicodedata
+from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 from sentence_transformers import SentenceTransformer
 from supabase import Client
 
+import ranking_embeddings
+import reranking_groq
+from config import EMPRESAS_XLSX, GOOGLE_DRIVE_FILE_ID, GOOGLE_SERVICE_ACCOUNT_JSON, RANKING_TOP_N
+from empresas_excel import cargar_empresas, descargar_de_drive, fecha_modificacion_drive, ruta_por_defecto
 from search import buscar_semantica
-from ranking_coincidencias import (
-    CAMPOS_PALABRAS_CLAVE,
-    normalizar as _normalizar_clave,
-    POCO_ESPECIFICA,
-    idioma_de,
-    ordenar_con_detalle,
-    terminos_de_licitacion,
-    textos_de_palabras_clave,
-)
-try:  # el nuevo ranking (prueba A/B) es opcional: si su módulo fallara, el ranking actual sigue funcionando
-    import ranking_relevancia as _ranking_relevancia
-except Exception as _error_import:  # pragma: no cover
-    _ranking_relevancia = None
-    _ERROR_IMPORT_RELEVANCIA = _error_import
-try:  # Segunda fase (reranking con Groq): si falla al importarse, la pestaña sigue igual que siempre
-    import reranking_groq as _rerank
-    _ERROR_IMPORT_RERANK = None
-except Exception as _error_rerank:  # noqa: BLE001
-    _rerank = None
-    _ERROR_IMPORT_RERANK = f"{type(_error_rerank).__name__}: {_error_rerank}"
-
-from ia_explicacion import (
-    generar_justificacion_ia,
-    groq_configurado,
-    justificacion_en_cache,
-    _clave_cache,  # Esta función privada ya existe al final de tu ia_explicacion.py
-)
 
 PATRON_URL = re.compile(r"^https?://", re.IGNORECASE)
-
-# Palabras demasiado comunes en español/francés/inglés como para aportar
-# señal en el solapamiento de texto libre (ver _hay_solapamiento). NO se
-# aplica al diccionario temático (_temas_presentes), que usa un
-# vocabulario propio y controlado.
-PALABRAS_VACIAS = {
-    "de", "la", "el", "los", "las", "en", "y", "a", "del", "para", "con", "por",
-    "un", "una", "unos", "unas", "que", "se", "su", "sus", "al", "o", "the", "of",
-    "and", "for", "to", "in", "on", "an", "des", "du", "les", "le", "au", "aux",
-}
-
-# Diccionario temático multilingüe: el puente semántico cuando las
-# palabras exactas no coinciden por diferencia de idioma o de
-# vocabulario (Capa 2 de explicar_coincidencia). Construido sobre los 6
-# sectores reales del Excel de empresas (ver ingest/sync_empresas_drive.py)
-# más los temas transversales más habituales en licitaciones de
-# cooperación internacional (medio ambiente, género, salud...). No
-# pretende ser exhaustivo -- es una heurística de texto, no un LLM --
-# pero cubre el vocabulario más frecuente en 4 idiomas.
-TEMAS_MULTILINGUE = {
-    "agua_saneamiento": {
-        "es": ["agua", "aguas", "saneamiento", "potable", "residuales", "alcantarillado",
-               "depuracion", "abastecimiento", "hidrico", "hidrica", "riego", "pozos", "pozo"],
-        "en": ["water", "sanitation", "sewage", "wastewater", "drainage", "irrigation",
-               "sludge", "drinking", "borehole", "boreholes"],
-        "fr": ["eau", "eaux", "assainissement", "egout", "egouts", "irrigation", "potable", "forage"],
-        "pt": ["agua", "aguas", "saneamento", "esgoto", "potavel"],
-    },
-    "energia": {
-        "es": ["energia", "energias", "renovable", "renovables", "solar", "eolica",
-               "fotovoltaica", "electrificacion", "electrica", "hidroelectrica"],
-        "en": ["energy", "renewable", "renewables", "solar", "wind", "photovoltaic",
-               "electrification", "power", "hydropower", "grid"],
-        "fr": ["energie", "energies", "renouvelable", "renouvelables", "solaire",
-               "eolienne", "electrification", "hydroelectrique"],
-        "pt": ["energia", "renovavel", "renovaveis", "solar", "eolica", "eletrificacao"],
-    },
-    "transporte_infraestructura": {
-        "es": ["transporte", "carretera", "carreteras", "puerto", "puertos", "aeropuerto",
-               "infraestructura", "infraestructuras", "vial", "ferrocarril", "puente", "puentes"],
-        "en": ["transport", "transportation", "road", "roads", "port", "ports", "airport",
-               "infrastructure", "railway", "bridge", "bridges", "highway"],
-        "fr": ["transport", "route", "routes", "port", "ports", "aeroport", "infrastructure",
-               "infrastructures", "chemin de fer", "pont", "ponts"],
-        "pt": ["transporte", "estrada", "estradas", "porto", "portos", "aeroporto",
-               "infraestrutura", "infraestruturas", "ponte", "pontes"],
-    },
-    "tic_digitalizacion": {
-        "es": ["tecnologia", "tecnologias", "digital", "software", "datos", "informatico",
-               "digitalizacion", "conectividad", "informatica"],
-        "en": ["technology", "digital", "software", "data", "ict", "connectivity",
-               "digitalization", "digitalisation", "it"],
-        "fr": ["technologie", "technologies", "numerique", "logiciel", "donnees", "connectivite"],
-        "pt": ["tecnologia", "tecnologias", "digital", "software", "dados", "conectividade"],
-    },
-    "medio_ambiente_clima": {
-        "es": ["ambiental", "ambientales", "clima", "climatico", "climatica", "biodiversidad",
-               "sostenibilidad", "sostenible", "emisiones", "conservacion", "forestal", "residuos"],
-        "en": ["environmental", "environment", "climate", "biodiversity", "sustainability",
-               "sustainable", "emissions", "conservation", "forestry", "waste"],
-        "fr": ["environnement", "environnemental", "climat", "biodiversite", "durabilite",
-               "durable", "emissions", "conservation", "forestier", "dechets"],
-        "pt": ["ambiental", "clima", "biodiversidade", "sustentabilidade", "sustentavel",
-               "emissoes", "residuos"],
-    },
-    "consultoria_formacion": {
-        "es": ["consultoria", "formacion", "capacitacion", "asesoramiento", "capacidades",
-               "asistencia tecnica", "consultor", "consultores"],
-        "en": ["consulting", "consultancy", "training", "capacity building", "advisory",
-               "technical assistance", "capacity", "consultant", "consultants"],
-        "fr": ["conseil", "formation", "renforcement des capacites", "assistance technique",
-               "consultant", "consultants"],
-        "pt": ["consultoria", "formacao", "capacitacao", "assistencia tecnica", "consultor"],
-    },
-    "genero_inclusion": {
-        "es": ["genero", "mujeres", "inclusion", "igualdad", "vulnerable", "vulnerables"],
-        "en": ["gender", "women", "inclusion", "equality", "vulnerable"],
-        "fr": ["genre", "femmes", "inclusion", "egalite", "vulnerable"],
-        "pt": ["genero", "mulheres", "inclusao", "igualdade", "vulneravel"],
-    },
-    "salud": {
-        "es": ["salud", "sanitario", "sanitaria", "hospital", "medico", "medica", "enfermedades"],
-        "en": ["health", "medical", "hospital", "healthcare", "disease", "diseases"],
-        "fr": ["sante", "medical", "hopital", "maladies"],
-        "pt": ["saude", "medico", "hospital", "doencas"],
-    },
-    "agropecuario": {
-        "es": ["agricola", "agropecuario", "agricultura", "ganaderia", "rural", "cultivos", "pesca"],
-        "en": ["agriculture", "agricultural", "livestock", "rural", "farming", "crops", "fisheries"],
-        "fr": ["agricole", "agriculture", "elevage", "rural", "cultures", "peche"],
-        "pt": ["agricola", "agricultura", "pecuaria", "rural", "pesca"],
-    },
-    "comercio_sector_privado": {
-        "es": ["comercio", "empresarial", "inversion", "pyme", "pymes", "sector privado", "financiero"],
-        "en": ["trade", "business", "investment", "sme", "smes", "private sector", "financial"],
-        "fr": ["commerce", "entreprise", "investissement", "pme", "secteur prive"],
-        "pt": ["comercio", "empresarial", "investimento", "setor privado"],
-    },
-    "turismo": {
-        "es": ["turismo", "turistico", "turistica", "promocion", "marketing"],
-        "en": ["tourism", "tourist", "promotion", "marketing"],
-        "fr": ["tourisme", "touristique", "promotion", "marketing"],
-        "pt": ["turismo", "turistico", "promocao", "marketing"],
-    },
-}
-ETIQUETAS_TEMA = {
-    "agua_saneamiento": "agua y saneamiento",
-    "energia": "energía",
-    "transporte_infraestructura": "transporte e infraestructuras",
-    "tic_digitalizacion": "TIC y digitalización",
-    "medio_ambiente_clima": "medio ambiente y cambio climático",
-    "consultoria_formacion": "consultoría y formación",
-    "genero_inclusion": "género e inclusión",
-    "salud": "salud",
-    "agropecuario": "sector agropecuario",
-    "comercio_sector_privado": "comercio y sector privado",
-    "turismo": "turismo",
-}
-_VOCABULARIO_POR_TEMA = {
-    tema: set().union(*idiomas.values()) for tema, idiomas in TEMAS_MULTILINGUE.items()
-}
-
-# Fragmentos geográficos de la empresa más cortos que esto ("de", "la", "ue"...)
-# darían falsas coincidencias de país al buscarlos como subcadena.
-MIN_LONGITUD_FRAGMENTO_GEOGRAFICO = 4
-
-# Organismos/financiadores habituales: nombre canónico -> variantes (ya sin
-# acentos y en minúsculas, ver _normalizar). Sirve para reconocer que "BID",
-# "IDB" y "Banco Interamericano de Desarrollo" son el mismo organismo, tanto
-# en la licitación como en las referencias y los clientes de la empresa.
-ORGANISMOS_ALIAS = {
-    "BID": {"bid", "idb", "iadb", "banco interamericano de desarrollo",
-            "inter american development bank", "interamerican development bank",
-            "banque interamericaine de developpement"},
-    "Banco Mundial": {"banco mundial", "world bank", "banque mondiale", "ibrd", "banco mundial"},
-    "Banco Africano de Desarrollo": {"afdb", "african development bank", "banco africano de desarrollo",
-                                     "banque africaine de developpement"},
-    "AFD": {"afd", "agence francaise de developpement", "agencia francesa de desarrollo"},
-    "CAF": {"caf", "corporacion andina de fomento", "banco de desarrollo de america latina"},
-    "BCIE": {"bcie", "cabei", "banco centroamericano de integracion economica"},
-    "PNUD/UNDP": {"undp", "pnud", "united nations development programme",
-                  "programa de las naciones unidas para el desarrollo"},
-    "Naciones Unidas": {"ungm", "naciones unidas", "united nations", "nations unies"},
-    "GIZ": {"giz", "deutsche gesellschaft fur internationale zusammenarbeit"},
-    "Unión Europea": {"union europea", "european union", "union europeenne", "comision europea",
-                      "european commission", "europeaid", "ted"},
-    "AECID": {"aecid", "agencia espanola de cooperacion internacional"},
-    "Banco Asiático de Desarrollo": {"asian development bank", "banco asiatico de desarrollo"},
-}
-
-# Palabras que NO identifican a un organismo concreto (todos los bancos
-# comparten "banco" y "desarrollo"): se excluyen al comparar organismos que
-# no están en ORGANISMOS_ALIAS por solapamiento de palabras.
-PALABRAS_ORGANISMO_GENERICAS = {
-    "banco", "bank", "banque", "desarrollo", "development", "developpement", "agencia", "agency",
-    "agence", "ministerio", "ministry", "ministere", "gobierno", "government", "programa", "program",
-    "programme", "naciones", "unidas", "nations", "united", "internacional", "international",
-    "fondo", "fund", "comision", "commission", "union", "republica", "republic", "direccion",
-    "secretaria", "unidad", "instituto", "institute", "servicio", "servicios", "cooperacion",
-    "cooperation", "regional", "nacional", "national", "empresa", "sociedad", "autoridad",
-}
-
-# Certificaciones: prefijos con número (ISO 9001, UNE 166002...) y siglas sueltas.
-PREFIJOS_CERTIFICACION = ("iso", "une", "ohsas", "enac")
-ACRONIMOS_CERTIFICACION = {"emas", "ens", "cmmi", "itil", "ecovadis", "prince2", "pmp"}
 
 
 def _completar_campos_licitacion(supabase: Client, candidatos: list) -> list:
@@ -373,886 +110,56 @@ def localizar_licitacion(supabase: Client, encoder: SentenceTransformer, entrada
     return _completar_campos_licitacion(supabase, candidatos[:8])
 
 
-def _completar_observaciones(supabase: Client, empresas: list) -> list:
-    """
-    Garantiza que cada empresa candidata lleve `observaciones_importantes`.
-    Las RPC actualizadas (sql/migracion_empresas_v3.sql) ya la devuelven; si
-    todavía no (código desplegado antes que el SQL, o RPC antigua), se pide
-    en UNA sola consulta por lote. Si la columna aún no existe en la base de
-    datos, la consulta falla y se sigue sin observaciones -- nunca se rompe la
-    pestaña por esto.
-    """
-    if not empresas or all("observaciones_importantes" in e for e in empresas):
-        return empresas
-
-    ids = [e["numero_interno"] for e in empresas if e.get("numero_interno")]
-    observaciones = {}
-    try:
-        respuesta = (
-            supabase.table("empresas")
-            .select("numero_interno, observaciones_importantes")
-            .in_("numero_interno", ids)
-            .execute()
-        )
-        observaciones = {f["numero_interno"]: f.get("observaciones_importantes") for f in (respuesta.data or [])}
-    except Exception:
-        pass
-
-    for empresa in empresas:
-        empresa.setdefault("observaciones_importantes", observaciones.get(empresa.get("numero_interno")))
-    return empresas
-
-
-def obtener_coincidencias(supabase: Client, codigo_unico: str, match_threshold: float = 0.15, match_count: int = 30) -> list:
-    respuesta = supabase.rpc(
-        "buscar_empresas_para_licitacion",
-        {
-            "codigo_unico_licitacion": codigo_unico,
-            "match_threshold": match_threshold,
-            "match_count": match_count,
-        },
-    ).execute()
-    return _completar_observaciones(supabase, respuesta.data or [])
-
-
-def obtener_coincidencias_texto_libre(
-    supabase: Client,
-    encoder: SentenceTransformer,
-    titulo: str,
-    descripcion: str = "",
-    match_threshold: float = 0.15,
-    match_count: int = 30,
-    categoria: str = "",
-    pais: str = "",
-) -> list:
-    """
-    Para licitaciones que el usuario pega/escribe y que NO están en nuestra
-    tabla. El texto que se convierte en embedding sigue el mismo formato que
-    el `texto_completo` de las licitaciones ya ingeridas (Titulo / Categoria /
-    Pais), de modo que la categoría y el país entran en la comparación igual
-    que en las licitaciones de la base de datos.
-    """
-    partes = [f"Titulo: {titulo}. {descripcion}".strip()]
-    if categoria:
-        partes.append(f"Categoria: {categoria}")
-    if pais:
-        partes.append(f"Pais: {pais}")
-    texto_completo = "\n".join(partes)
-    vector_query = encoder.encode(f"passage: {texto_completo}").tolist()
-    respuesta = supabase.rpc(
-        "buscar_empresas_por_embedding",
-        {
-            "query_embedding": vector_query,
-            "match_threshold": match_threshold,
-            "match_count": match_count,
-        },
-    ).execute()
-    return _completar_observaciones(supabase, respuesta.data or [])
-
-
-def _palabras_clave_para_ranking(supabase: Client, empresas: list) -> dict:
-    """
-    Palabras clave de las empresas que NO las traen en el resultado de la RPC, solo para ordenar (nunca se añaden a
-    los datos de la empresa, para que las explicaciones y la IA reciban exactamente lo de siempre). Si las RPC ya
-    devuelven las 4 columnas -- lo normal --, no hace ninguna consulta. Si algo falla, esas empresas se ordenan sin
-    coincidencias exactas en vez de romper la pestaña.
-    """
-    columnas = list(CAMPOS_PALABRAS_CLAVE.values())
-    faltan = [
-        e["numero_interno"] for e in empresas
-        if e.get("numero_interno") and not any(c in e for c in columnas)
-    ]
-    if not faltan:
-        return {}
-    try:
-        respuesta = (
-            supabase.table("empresas")
-            .select("numero_interno, " + ", ".join(columnas))
-            .in_("numero_interno", faltan)
-            .execute()
-        )
-    except Exception:
-        return {}
-    return {
-        fila["numero_interno"]: {idioma: fila.get(columna) or [] for idioma, columna in CAMPOS_PALABRAS_CLAVE.items()}
-        for fila in (respuesta.data or [])
-    }
-
-
-def _clave_titulo(titulo: str) -> str:
-    """Título normalizado para detectar duplicados: sin acentos, mayúsculas, puntuación, dobles espacios ni saltos de línea
-    (en el Excel hay títulos partidos en varias líneas). Mismo criterio que ingest/sync_empresas_drive.py."""
-    return " ".join(re.findall(r"[a-z0-9]+", _normalizar(titulo)))
-
-
-COLUMNAS_REFERENCIAS = (
-    "numero_interno, titulo, resultado_normalizado, pais, organismo_financiador, "
-    "agencia_ejecutora, tipo_proyecto, sector"
-)
-
-
-def _consulta_paginada(construir_consulta, tamano_pagina: int = 1000) -> list:
-    """
-    PostgREST devuelve como máximo 1000 filas por petición (límite por
-    defecto de Supabase): con ~30 empresas candidatas y cientos de
-    referencias se podía truncar el resultado sin avisar. Aquí se pagina
-    hasta traerlo todo. `construir_consulta` debe devolver una consulta NUEVA
-    (con su .order("id")) en cada llamada.
-    """
-    filas, inicio = [], 0
-    while True:
-        datos = construir_consulta().range(inicio, inicio + tamano_pagina - 1).execute().data or []
-        filas.extend(datos)
-        if len(datos) < tamano_pagina:
-            return filas
-        inicio += tamano_pagina
-
-
-def obtener_referencias_por_empresas(supabase: Client, numeros_internos: list) -> dict:
-    """
-    Trae, en UNA sola consulta por lote (nunca una por empresa), las
-    referencias de licitaciones antiguas de todas las empresas candidatas --
-    las hojas "REFERENCIAS P BÚSQUEDAS" y "HMS" del Excel, ya cargadas en
-    `empresas_referencias` (ver ingest/sync_empresas_drive.py) -- con título,
-    resultado, país, organismo financiador, agencia ejecutora, tipo de
-    proyecto y sector. A ellas se suman los títulos que aportan las demás
-    pestañas del Excel (`empresas_hojas_extra`, solo los que NO están ya en
-    `empresas_referencias`). Se agrupan por numero_interno para que
-    explicar_coincidencia() solo tenga que consultar un diccionario en memoria.
-    """
-    numeros_internos = [i for i in (numeros_internos or []) if i]
-    if not numeros_internos:
-        return {}
-
-    filas = _consulta_paginada(
-        lambda: supabase.table("empresas_referencias")
-        .select(COLUMNAS_REFERENCIAS)
-        .in_("numero_interno", numeros_internos)
-        .order("id")
-    )
-
-    agrupado = {}
-    for fila in filas:
-        if fila.get("titulo"):
-            agrupado.setdefault(fila["numero_interno"], []).append(fila)
-
-    # Títulos de las demás pestañas. Si la tabla aún no existe (migración sin
-    # aplicar) o falla la consulta, se sigue solo con empresas_referencias.
-    try:
-        filas_extra = _consulta_paginada(
-            lambda: supabase.table("empresas_hojas_extra")
-            .select("numero_interno, hoja, titulos_nuevos")
-            .in_("numero_interno", numeros_internos)
-            .eq("aporta_titulos", True)
-            .order("id")
-        )
-    except Exception:
-        filas_extra = []
-
-    for fila in filas_extra:
-        numero = fila["numero_interno"]
-        vistos = {_clave_titulo(r["titulo"]) for r in agrupado.get(numero, [])}
-        for titulo in fila.get("titulos_nuevos") or []:
-            clave = _clave_titulo(titulo)
-            if clave and clave not in vistos:
-                vistos.add(clave)
-                agrupado.setdefault(numero, []).append({
-                    "numero_interno": numero, "titulo": titulo,
-                    "resultado_normalizado": None, "hoja_origen": fila.get("hoja"),
-                })
-    return agrupado
-
-
-def _normalizar(texto: str) -> str:
-    """Minúsculas y sin acentos -- necesario para el diccionario temático
-    (p. ej. 'energía' debe reconocerse igual que 'energia') y, de paso,
-    hace más robustas las comparaciones de país que ya existían (p. ej.
-    'São Tomé' vs 'Sao Tome')."""
-    texto = (texto or "").casefold()
-    return "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
-
-
-def _palabras_significativas(texto: str) -> set:
-    texto_norm = _normalizar(texto)
-    palabras = re.findall(r"[a-z0-9]+", texto_norm)
-    return {p for p in palabras if len(p) > 3 and p not in PALABRAS_VACIAS}
-
-
-def _tokenizar(texto: str) -> set:
-    """Como _palabras_significativas pero SIN filtro de longitud ni de
-    palabras vacías -- para comparar contra el vocabulario controlado de
-    TEMAS_MULTILINGUE, donde hay palabras cortas legítimas (p. ej. 'eau', 'tic')."""
-    return set(re.findall(r"[a-z0-9]+", _normalizar(texto)))
-
-
-def _hay_solapamiento(texto_a: str, texto_b: str, minimo: int = 2) -> bool:
-    """Solapamiento de palabras significativas entre dos textos -- heurística de texto, nada de LLM."""
-    if not texto_a or not texto_b:
-        return False
-    return len(_palabras_significativas(texto_a) & _palabras_significativas(texto_b)) >= minimo
-
-
-def _terminos_comunes(texto_a: str, texto_b: str, maximo: int = 6) -> list:
-    """Palabras significativas presentes en ambos textos -- evidencia concreta de POR QUÉ solapan, no solo un sí/no."""
-    if not texto_a or not texto_b:
-        return []
-    comunes = _palabras_significativas(texto_a) & _palabras_significativas(texto_b)
-    return sorted(comunes)[:maximo]
-
-
-def _temas_presentes(texto: str) -> set:
-    """Temas del diccionario TEMAS_MULTILINGUE detectados en el texto, en cualquiera de los 4 idiomas."""
-    if not texto:
-        return set()
-    palabras = _tokenizar(texto)
-    return {tema for tema, vocabulario in _VOCABULARIO_POR_TEMA.items() if palabras & vocabulario}
-
-
-def _puente_tematico(texto_empresa: str, texto_licitacion: str) -> list:
-    """
-    Capa 2: temas presentes en AMBOS textos aunque no compartan ninguna
-    palabra exacta -- el puente semántico multilingüe para cuando la
-    licitación está en otro idioma o usa sinónimos distintos a los de la
-    empresa. Devuelve las etiquetas legibles, ordenadas.
-    """
-    comunes = _temas_presentes(texto_empresa) & _temas_presentes(texto_licitacion)
-    return sorted(ETIQUETAS_TEMA.get(t, t) for t in comunes)
-
-
-def _con_categoria(texto: str, categoria) -> str:
-    """Añade la categoría de la licitación al texto con el que se compara (si no está ya dentro)."""
-    texto = texto or ""
-    if not categoria or _normalizar(categoria) in _normalizar(texto):
-        return texto
-    return " ".join(filter(None, [texto, categoria]))
-
-
-def _contiene_palabra(texto_norm: str, palabra_norm: str) -> bool:
-    """`palabra_norm` como palabra o frase COMPLETA dentro de `texto_norm` (ambos ya normalizados)."""
-    if not palabra_norm or not texto_norm:
-        return False
-    return re.search(rf"(?<![a-z0-9]){re.escape(palabra_norm)}(?![a-z0-9])", texto_norm) is not None
-
-
-def _pais_mencionado(pais_norm: str, textos_norm: list) -> bool:
-    """
-    El país aparece como palabra completa en alguno de los textos de la
-    empresa. Los campos geográficos son texto libre ("España (Tenerife, La
-    Gomera)", "Canarias. Tienen presencia en República Dominicana"), así que
-    ya no vale la igualdad exacta; y con palabra completa se evita que
-    "Niger" coincida con "Nigeria".
-    """
-    if len(pais_norm or "") < 3:
-        return False
-    return any(_contiene_palabra(texto, pais_norm) for texto in textos_norm)
-
-
-def _referencias_en_pais(pais_licitacion: str, referencias: list) -> list:
-    pais_norm = _normalizar(pais_licitacion)
-    return [
-        r for r in (referencias or [])
-        if r.get("pais") and _pais_mencionado(pais_norm, [_normalizar(r["pais"])])
-    ]
-
-
-def _organismos_canonicos(texto: str) -> set:
-    """Organismos de ORGANISMOS_ALIAS que se mencionan en el texto (por nombre canónico)."""
-    texto_norm = _normalizar(texto)
-    if not texto_norm:
-        return set()
-    return {
-        canonico for canonico, variantes in ORGANISMOS_ALIAS.items()
-        if any(_contiene_palabra(texto_norm, variante) for variante in variantes)
-    }
-
-
-def _organismo_coincide(organismo_licitacion: str, texto_candidato: str) -> bool:
-    """
-    ¿Es `texto_candidato` (un cliente, un organismo financiador o una agencia
-    ejecutora) el mismo organismo que el de la licitación? Si la licitación
-    es de un organismo conocido (ORGANISMOS_ALIAS) se compara por nombre
-    canónico; si no, por solapamiento de >= 2 palabras DISTINTIVAS (sin
-    "banco", "desarrollo"... que comparten organismos distintos).
-    """
-    if not organismo_licitacion or not texto_candidato:
-        return False
-    canonicos_licitacion = _organismos_canonicos(organismo_licitacion)
-    if canonicos_licitacion:
-        return bool(canonicos_licitacion & _organismos_canonicos(texto_candidato))
-    distintivas = (
-        (_palabras_significativas(organismo_licitacion) - PALABRAS_ORGANISMO_GENERICAS)
-        & (_palabras_significativas(texto_candidato) - PALABRAS_ORGANISMO_GENERICAS)
-    )
-    return len(distintivas) >= 2
-
-
-def _etiqueta_organismo(organismo_licitacion: str) -> str:
-    canonicos = sorted(_organismos_canonicos(organismo_licitacion))
-    return ", ".join(canonicos) if canonicos else _recortar(organismo_licitacion, 60)
-
-
-MAX_CARACTERES_OBSERVACIONES = 1200
-
-
-def _aviso_observaciones(observaciones):
-    """
-    Frase de aviso a partir de OBSERVACIONES IMPORTANTES (col. AI del Excel),
-    o None si la empresa no tiene. Son notas libres ("ESTÁ INACTIVA", o
-    documentos largos con exclusiones sectoriales y geográficas, como el de HMS
-    INTELLIGENCE): se citan tal cual, compactadas a una línea, y se pide
-    revisarlas. NO se intenta deducir automáticamente si la empresa queda
-    excluida de ESTA licitación -- el texto mezcla exclusiones y ámbito
-    exclusivo, y una heurística de palabras daría avisos engañosos --, y
-    tampoco es una señal de coincidencia: nunca cambia el resumen ni
-    activa/desactiva las Capas 2 y 3.
-    """
-    texto = str(observaciones or "")
-    # Viñetas pegadas desde Word ("•<tab>", "o<tab>" al empezar línea) y saltos de línea -> una sola línea limpia.
-    texto = re.sub(r"(?m)^[ \t]*[•·▪◦o]\t", "", texto)
-    texto = re.sub(r"\s+", " ", texto).strip()
-    if not texto:
+# ------------------------------------------------------------------
+# Empresas (Excel) e índice de embeddings
+# ------------------------------------------------------------------
+def _credenciales_drive():
+    """El JSON de la cuenta de servicio como texto (los secretos de Streamlit pueden entregarlo como tabla TOML)."""
+    valor = GOOGLE_SERVICE_ACCOUNT_JSON
+    if not valor:
         return None
-    return (
-        "⚠️ Observación importante registrada en el Excel para esta empresa -- revísala antes de valorarla "
-        f"para esta licitación: «{_recortar(texto, MAX_CARACTERES_OBSERVACIONES)}»"
-        + ("" if texto.endswith((".", "!", "?")) else ".")
-    )
+    return json.dumps(dict(valor)) if hasattr(valor, "keys") else str(valor)
 
 
-def _certificaciones_relacionadas(texto_licitacion: str, certificaciones_empresa: str) -> list:
-    """Certificaciones de la empresa que la licitación también cita (p. ej. "ISO 9001", "ENS")."""
-    if not certificaciones_empresa or not texto_licitacion:
-        return []
-    texto_lic = _normalizar(texto_licitacion)
-    texto_emp = _normalizar(certificaciones_empresa)
-
-    patron = rf"\b({'|'.join(PREFIJOS_CERTIFICACION)})[\s\-:/]*(\d{{3,6}})\b"
-    codigos_licitacion = {f"{m.group(1)} {m.group(2)}" for m in re.finditer(patron, texto_lic)}
-    numeros_empresa = set(re.findall(r"\b\d{3,6}\b", texto_emp))  # "ISO 9001, 14001" -> {9001, 14001}
-
-    coincidencias = sorted(c.upper() for c in codigos_licitacion if c.split()[1] in numeros_empresa)
-    coincidencias += sorted(
-        a.upper() for a in ACRONIMOS_CERTIFICACION
-        if _contiene_palabra(texto_lic, a) and _contiene_palabra(texto_emp, a)
-    )
-    return coincidencias
-
-
-@st.cache_data(show_spinner=False, max_entries=4096)
-def _vector_cacheado(_encoder, prefijo: str, texto: str):
+@st.cache_resource(show_spinner="Cargando la base de datos de empresas...")
+def _cargar_base(origen: str, marca: str, _encoder):
     """
-    Embedding con el mismo modelo de la app, cacheado por texto: el de la
-    licitación es el mismo para las ~30 empresas candidatas (antes se
-    recalculaba para cada una) y el de cada campo del perfil no cambia entre
-    interacciones. `_encoder` no entra en la clave de la caché (guion bajo).
+    (empresas, índice de embeddings). `origen` + `marca` son la clave de caché: el ID del Excel en Drive y su fecha de
+    modificación (o la ruta local y su fecha), de modo que se vuelve a descargar y a calcular solo cuando el Excel cambia.
     """
-    return _encoder.encode(f"{prefijo}: {texto}")
-
-
-@st.cache_data(show_spinner=False, max_entries=64)
-def _vectores_textos(_encoder, prefijo: str, textos: tuple):
-    """Embeddings «prefijo: texto» de una lista de textos en UNA sola llamada al modelo, cacheados: al pulsar los botones
-    de la IA la página se vuelve a dibujar y no se recalcula nada."""
-    if not textos:
-        return np.zeros((0, 0))
-    return np.array(_encoder.encode([f"{prefijo}: {t}" for t in textos]))
-
-
-def _pares_afines(encoder, texto_licitacion: str, titulo: str, textos_palabras: list) -> dict:
-    """
-    {palabra clave normalizada: (término de la licitación más parecido, coseno)}. Dos llamadas al modelo (términos de
-    la licitación y palabras clave), cacheadas. Si el modelo falla, devuelve {} y solo puntúan las coincidencias exactas.
-    """
-    terminos = terminos_de_licitacion(texto_licitacion, titulo)
-    if not terminos or not textos_palabras:
-        return {}
-    try:
-        v_terminos = _vectores_textos(encoder, "query", tuple(terminos))
-        v_palabras = _vectores_textos(encoder, "query", tuple(textos_palabras))
-        a = v_palabras / np.maximum(np.linalg.norm(v_palabras, axis=1, keepdims=True), 1e-12)
-        b = v_terminos / np.maximum(np.linalg.norm(v_terminos, axis=1, keepdims=True), 1e-12)
-        coseno = a @ b.T
-        pares = {}
-        for i, texto in enumerate(textos_palabras):
-            clave = _normalizar_clave(" ".join(texto.split()))
-            # Nunca se empareja una palabra con el mismo término escrito igual (eso sería una coincidencia exacta).
-            candidatos = [j for j, t in enumerate(terminos) if _normalizar_clave(t) != clave]
-            if candidatos:
-                j = max(candidatos, key=lambda k: coseno[i, k])
-                pares[clave] = (terminos[j], float(coseno[i, j]))
-        return pares
-    except Exception:
-        return {}
-
-
-PREFIJO_MOTIVO_SEMANTICO = "El modelo de similitud semántica multilingüe relaciona"
-
-
-def _formatear_numero(valor: float) -> str:
-    return f"{valor:.1f}".replace(".", ",")
-
-
-def _zonas_licitacion(licitacion: dict) -> list:
-    """[(zona, texto)] de la licitación: título; objeto (categoría y primeras frases de la descripción); alcance y
-    requisitos (el resto de la descripción); información complementaria (descripción manual)."""
-    descripcion = " ".join(str(licitacion.get("descripcion") or "").split())
-    frases = re.split(r"(?<=[.;:!?])\s+", descripcion)
-    objeto = " ".join(frases[:2])
-    alcance = " ".join(frases[2:])
-    return [
-        ("titulo", str(licitacion.get("titulo") or "")),
-        ("objeto", " ".join(filter(None, [str(licitacion.get("categoria") or ""), objeto]))),
-        ("alcance", alcance),
-        ("complementaria", str(licitacion.get("descripcion_manual") or "")),
-    ]
-
-
-ETIQUETA_ZONA = {"titulo": "título", "objeto": "objeto", "alcance": "alcance", "complementaria": "información complementaria"}
-
-
-def _bloque_ranking(detalle: dict) -> list:
-    """
-    Líneas de la explicación (solo para mostrar), con los hallazgos reales y nada de teoría:
-    coincidencias exactas «palabra de la licitación = palabra clave», similares «… ≈ …» y la razón de la nota.
-    """
-    exactas, similares = detalle["exactas"], detalle["similares"]
-    if not exactas and not similares:
-        return ["Sin coincidencias directas ni semánticas encontradas en las palabras clave."]
-
-    def descripcion(e):
-        notas = [ETIQUETA_ZONA.get(e["zona"], e["zona"])]
-        if e.get("generica"):
-            notas.append("genérica")
-        elif e["especificidad"] < POCO_ESPECIFICA:
-            notas.append("poco específica")
-        return " (" + ", ".join(notas) + ")"
-
-    lineas = [
-        "**Coincidencias exactas:** "
-        + ("; ".join(f"{e['termino']} = {e['palabra']}{descripcion(e)}" for e in exactas[:8]) if exactas else "ninguna"),
-        "**Coincidencias similares:** "
-        + ("; ".join(f"{s['termino']} ≈ {s['palabra']}{descripcion(s)}" for s in similares[:5]) if similares else "ninguna"),
-    ]
-
-    partes = []
-    if exactas:
-        partes.append(
-            f"exactas {_formatear_numero(detalle['puntos_exactas'])} de 60"
-        )
+    if origen.startswith("drive:"):
+        archivo = descargar_de_drive(origen[6:], _credenciales_drive())
     else:
-        partes.append("sin exactas: 0 de 60")
-    if similares:
-        partes.append(f"similares {_formatear_numero(detalle['puntos_similares'])} de 40")
-    else:
-        partes.append("sin similares: 0 de 40")
-    lineas.append(f"**Razón del ranking:** {'; '.join(partes)}. Total {_formatear_numero(detalle['puntuacion'])} / 100.")
-    return lineas
+        archivo = Path(origen)
+    empresas = cargar_empresas(archivo)
+    return empresas, ranking_embeddings.construir_indice(_encoder, empresas)
 
 
-def _similitud_coseno(vector_a, vector_b) -> float:
-    a, b = np.array(vector_a), np.array(vector_b)
-    denominador = np.linalg.norm(a) * np.linalg.norm(b)
-    return float(np.dot(a, b) / denominador) if denominador else 0.0
+@st.cache_data(ttl=300, show_spinner=False)
+def _marca_drive(file_id: str) -> str:
+    return fecha_modificacion_drive(file_id, _credenciales_drive())
 
 
-def _bridge_semantico_por_campo(
-    encoder: SentenceTransformer, texto_licitacion: str, empresa: dict, referencias: list = None
-):
-    """
-    Capa 3 (último recurso): si ni las palabras literales (multilingües)
-    ni el diccionario temático encuentran ninguna relación, se compara el
-    embedding de la licitación contra el de cada campo del perfil de la
-    empresa POR SEPARADO, con el mismo modelo multilingüe que ya usa toda
-    la app (sin llamada externa ni LLM), para poder señalar qué aspecto
-    concreto del perfil es el que más se relaciona -- en vez de dejar la
-    recomendación sin ninguna explicación. Devuelve (etiqueta_campo,
-    similitud) del campo más afín, o (None, 0.0) si no hay ningún campo
-    con contenido.
-
-    Campos comparados: descripción de actividad, proyectos tipo,
-    preferencias de licitación (si las hay), sector y subsector, palabras
-    clave (los 4 idiomas), clientes principales y el historial de títulos
-    de licitaciones/proyectos anteriores (`referencias`).
-    """
-    palabras_clave = (
-        (empresa.get("palabras_clave") or []) + (empresa.get("palabras_clave_en") or [])
-        + (empresa.get("palabras_clave_fr") or []) + (empresa.get("palabras_clave_pt") or [])
-    )
-    titulos_historial = [r["titulo"] for r in (referencias or []) if r.get("titulo")][:12]
-
-    campos = {
-        "descripción de actividad": empresa.get("descripcion_actividad"),
-        "proyectos tipo declarados": "; ".join(empresa.get("proyectos_tipo") or []) or None,
-        "preferencias de licitación declaradas": empresa.get("preferencias_licitaciones"),
-        "sector y subsector declarados": ", ".join(filter(None, [empresa.get("sector"), empresa.get("subsector")])) or None,
-        "palabras clave declaradas": ", ".join(p for p in palabras_clave if p) or None,
-        "clientes principales declarados": empresa.get("clientes_principales"),
-        "licitaciones y proyectos anteriores": "; ".join(titulos_historial) or None,
-    }
-    campos_con_texto = {etiqueta: texto for etiqueta, texto in campos.items() if texto}
-    if not campos_con_texto:
-        return None, 0.0
-
-    vector_licitacion = _vector_cacheado(encoder, "query", texto_licitacion)
-
-    mejor_etiqueta, mejor_similitud = None, 0.0
-    for etiqueta, texto in campos_con_texto.items():
-        vector_campo = _vector_cacheado(encoder, "passage", texto)
-        similitud = _similitud_coseno(vector_licitacion, vector_campo)
-        if similitud > mejor_similitud:
-            mejor_etiqueta, mejor_similitud = etiqueta, similitud
-
-    return mejor_etiqueta, mejor_similitud
-
-
-def _recortar(texto: str, longitud: int = 140) -> str:
-    texto = texto or ""
-    return texto if len(texto) <= longitud else texto[:longitud].rstrip() + "…"
-
-
-def _construir_resumen(similarity, señales_literales: list, temas_puente: list, campo_semantico: tuple) -> str:
-    """
-    Primera frase de la explicación: sintetiza el nivel de encaje y, sobre
-    todo, DE QUÉ depende -- nunca se limita a decir que no hay datos.
-    Cuatro niveles, de más a menos concreto:
-      1. Coincidencias literales (Capa 1, incluye ahora las 4 variantes
-         de idioma de las palabras clave).
-      2. Puente temático multilingüe (Capa 2): mismo tema, aunque las
-         palabras exactas no coincidan por idioma o vocabulario.
-      3. Relación semántica por campo (Capa 3): el modelo de embeddings
-         multilingüe relaciona la licitación con un campo concreto del
-         perfil, aunque no haya ni palabras ni tema en común detectados.
-      4. Solo como última instancia, si ninguna de las tres capas
-         anteriores encuentra nada, se dice explícitamente.
-    """
-    pct = round(similarity * 100, 1) if similarity is not None else None
-    pct_texto = f" ({pct}% de afinidad semántica)" if pct is not None else ""
-
-    if señales_literales:
-        return f"Se recomienda esta empresa por coincidencias concretas en: {', '.join(señales_literales)}{pct_texto}."
-
-    if temas_puente:
-        return (
-            f"No hay coincidencias literales de palabras -- probablemente por diferencia de "
-            f"idioma o de vocabulario entre la licitación y el perfil de la empresa -- pero "
-            f"ambas están conceptualmente relacionadas por tema: {', '.join(temas_puente)}{pct_texto}."
+def _base_empresas(encoder):
+    """Excel de Google Drive (se detecta si ha cambiado, comprobándolo cada 5 min); si Drive no está configurado, el local."""
+    if GOOGLE_DRIVE_FILE_ID and GOOGLE_SERVICE_ACCOUNT_JSON:
+        try:
+            return _cargar_base("drive:" + GOOGLE_DRIVE_FILE_ID, _marca_drive(GOOGLE_DRIVE_FILE_ID), encoder)
+        except (FileNotFoundError, ValueError):
+            raise
+        except Exception as error:  # noqa: BLE001 - red, permisos, clave mal formada...
+            raise RuntimeError(
+                "No se pudo leer el Excel de empresas desde Google Drive "
+                f"({type(error).__name__}). Comprueba que el archivo está compartido con la cuenta de servicio y que "
+                "GOOGLE_DRIVE_FILE_ID y GOOGLE_SERVICE_ACCOUNT_JSON son correctos."
+            ) from None
+    ruta = ruta_por_defecto(EMPRESAS_XLSX)
+    if not ruta.exists():
+        raise FileNotFoundError(
+            "No hay Excel de empresas: configura GOOGLE_DRIVE_FILE_ID y GOOGLE_SERVICE_ACCOUNT_JSON (Google Drive) "
+            f"o copia la base de datos a «{ruta}»."
         )
-
-    if campo_semantico and campo_semantico[0]:
-        etiqueta, sim_campo = campo_semantico
-        pct_campo = round(sim_campo * 100, 1)
-        global_texto = f", con una afinidad semántica global del perfil del {pct}%" if pct is not None else ""
-        return (
-            f"No se han encontrado coincidencias literales ni temáticas explícitas, pero el "
-            f"modelo de similitud semántica multilingüe relaciona esta licitación especialmente "
-            f"con el campo «{etiqueta}» del perfil de la empresa ({pct_campo}% de afinidad en ese "
-            f"campo){global_texto} -- una conexión conceptual a valorar, aunque más débil que una "
-            f"coincidencia directa."
-        )
-
-    if pct is not None:
-        return (
-            f"No se han encontrado coincidencias literales, temáticas ni semánticas claras en "
-            f"ningún campo del perfil; la recomendación se apoya únicamente en la similitud "
-            f"semántica global del perfil completo{pct_texto} -- conviene revisarla manualmente "
-            f"antes de confiar en ella."
-        )
-    return "Coincidencia detectada por similitud semántica general del perfil de la empresa."
-
-
-def explicar_coincidencia(
-    texto_licitacion: str,
-    pais_licitacion: str,
-    empresa: dict,
-    referencias_empresa: list = None,
-    encoder: SentenceTransformer = None,
-    categoria_licitacion: str = None,
-    organismo_licitacion: str = None,
-) -> list:
-    """
-    Devuelve una lista de frases (bullets) que ARGUMENTAN por qué esta
-    empresa encaja con la licitación, con evidencia concreta en vez de
-    afirmaciones genéricas -- y NUNCA se limita a decir que no hay datos
-    (ver docstring del módulo para las 3 capas). El primer elemento es
-    siempre el resumen de _construir_resumen().
-
-    `categoria_licitacion` y `organismo_licitacion` son opcionales (las
-    llamadas antiguas siguen funcionando): la categoría se añade al texto
-    con el que se compara y se contrasta con el perfil de la empresa; el
-    organismo (conviene pasar organismo + fuente de origen) se compara con
-    sus clientes principales y con el organismo financiador de sus
-    referencias.
-    """
-    motivos_detalle = []
-    señales = []
-    referencias_empresa = referencias_empresa or []
-    texto_licitacion = _con_categoria(texto_licitacion, categoria_licitacion)
-    texto_norm = _normalizar(texto_licitacion)
-
-    # Avisos de la empresa (inactiva, exclusiones...): lo primero que se ve tras el resumen.
-    aviso_observaciones = _aviso_observaciones(empresa.get("observaciones_importantes"))
-    if aviso_observaciones:
-        motivos_detalle.append(aviso_observaciones)
-
-    # Las 4 variantes de idioma de las palabras clave que ya tiene cada
-    # empresa (antes solo se comparaba la española, aunque la licitación
-    # esté en inglés o francés -- el motivo más habitual por el que no
-    # aparecía ninguna coincidencia literal).
-    todas_las_palabras_clave = (
-        (empresa.get("palabras_clave") or [])
-        + (empresa.get("palabras_clave_en") or [])
-        + (empresa.get("palabras_clave_fr") or [])
-        + (empresa.get("palabras_clave_pt") or [])
-    )
-
-    # ------------------------------------------------------------ Capa 1: coincidencias literales
-    proyectos_coincidentes = [
-        p for p in (empresa.get("proyectos_tipo") or [])
-        if p and _hay_solapamiento(p, texto_licitacion, minimo=1)
-    ]
-    if proyectos_coincidentes:
-        motivos_detalle.append(
-            "Ha ejecutado proyectos del mismo tipo que el objeto de esta licitación: "
-            + "; ".join(proyectos_coincidentes[:3]) + "."
-        )
-        señales.append("proyectos tipo ya realizados")
-
-    if empresa.get("descripcion_actividad"):
-        comunes = _terminos_comunes(empresa["descripcion_actividad"], texto_licitacion)
-        if comunes:
-            motivos_detalle.append(
-                f"Su descripción de actividad («{_recortar(empresa['descripcion_actividad'])}») "
-                f"comparte términos concretos con la licitación: {', '.join(comunes)}."
-            )
-            señales.append("descripción de actividad")
-
-    if empresa.get("preferencias_licitaciones"):
-        comunes = _terminos_comunes(empresa["preferencias_licitaciones"], texto_licitacion)
-        if comunes:
-            motivos_detalle.append(
-                f"Sus preferencias de licitación declaradas («{empresa['preferencias_licitaciones']}») "
-                f"coinciden en: {', '.join(comunes)}."
-            )
-            señales.append("preferencias de licitación declaradas")
-
-    # Categoría de la licitación frente al perfil (sector, subsector, proyectos, palabras clave).
-    if categoria_licitacion:
-        perfil_categoria = " ".join(filter(None, [
-            empresa.get("sector"), empresa.get("subsector"),
-            "; ".join(empresa.get("proyectos_tipo") or []),
-            ", ".join(p for p in todas_las_palabras_clave if p),
-        ]))
-        comunes = _terminos_comunes(categoria_licitacion, perfil_categoria)
-        if comunes:
-            motivos_detalle.append(
-                f"La categoría de la licitación («{_recortar(categoria_licitacion, 100)}») coincide con "
-                f"el perfil de la empresa en: {', '.join(comunes)}."
-            )
-            señales.append("categoría de la licitación")
-
-    # Geografía. Los campos de la empresa son texto libre (ver
-    # _pais_mencionado): se busca el país como palabra completa, y los
-    # fragmentos de zona demasiado cortos se ignoran.
-    paises_empresa = [_normalizar(p) for p in (empresa.get("experiencia_paises") or [])]
-    paises_interes_empresa = [_normalizar(p) for p in (empresa.get("paises_interes") or [])]
-    zonas_empresa = [_normalizar(z) for z in (empresa.get("zona_geografica_interes") or [])]
-    ambito_geografico_norm = _normalizar(empresa.get("ambito_geografico") or "")
-    if pais_licitacion:
-        pais_norm = _normalizar(pais_licitacion)
-        if _pais_mencionado(pais_norm, paises_empresa):
-            motivos_detalle.append(f"Experiencia previa acreditada en {pais_licitacion}.")
-            señales.append("ubicación geográfica")
-        elif _pais_mencionado(pais_norm, paises_interes_empresa):
-            motivos_detalle.append(f"La empresa tiene interés declarado en {pais_licitacion}.")
-            señales.append("ubicación geográfica")
-        elif any(
-            _pais_mencionado(pais_norm, [z])
-            or (len(z) >= MIN_LONGITUD_FRAGMENTO_GEOGRAFICO and z in pais_norm)
-            for z in zonas_empresa
-        ):
-            # La columna del Excel unifica "zona geográfica" y "países de interés".
-            motivos_detalle.append(f"La empresa declara interés en la zona o países de {pais_licitacion}.")
-            señales.append("ubicación geográfica")
-        elif _pais_mencionado(pais_norm, [ambito_geografico_norm]):
-            motivos_detalle.append(f"El ámbito geográfico de operación de la empresa menciona {pais_licitacion}.")
-            señales.append("ubicación geográfica")
-
-        # Referencias de proyectos en ese país (historial real, no solo lo declarado).
-        referencias_pais = _referencias_en_pais(pais_licitacion, referencias_empresa)
-        if referencias_pais:
-            n = len(referencias_pais)
-            motivos_detalle.append(
-                f"Tiene {n} referencia{'s' if n != 1 else ''} de proyectos en {pais_licitacion} en su historial."
-            )
-            if "ubicación geográfica" not in señales:
-                señales.append("ubicación geográfica")
-
-    # Organismo/financiador de la licitación frente a las referencias y a los clientes de la empresa.
-    if organismo_licitacion:
-        referencias_organismo = [
-            r for r in referencias_empresa
-            if _organismo_coincide(
-                organismo_licitacion,
-                " ".join(filter(None, [r.get("organismo_financiador"), r.get("agencia_ejecutora")])),
-            )
-        ]
-        etiqueta_organismo = _etiqueta_organismo(organismo_licitacion)
-        if referencias_organismo:
-            n = len(referencias_organismo)
-            ejemplo = _recortar(referencias_organismo[0].get("titulo") or "", 90)
-            motivos_detalle.append(
-                f"Ya ha trabajado con el mismo organismo o financiador de esta licitación ({etiqueta_organismo}): "
-                f"{n} referencia{'s' if n != 1 else ''} en su historial (p. ej. «{ejemplo}»)."
-            )
-            señales.append("organismo financiador")
-        elif _organismo_coincide(organismo_licitacion, empresa.get("clientes_principales")):
-            motivos_detalle.append(
-                f"El organismo de la licitación ({etiqueta_organismo}) figura entre sus clientes principales: "
-                f"«{_recortar(empresa['clientes_principales'], 120)}»."
-            )
-            señales.append("clientes principales")
-
-    palabras_coincidentes = sorted({
-        palabra for palabra in todas_las_palabras_clave
-        if palabra and _normalizar(palabra) in texto_norm
-    })
-    if palabras_coincidentes:
-        motivos_detalle.append("Palabras clave de la empresa (en su idioma original) presentes en la licitación: " + ", ".join(palabras_coincidentes) + ".")
-        señales.append("palabras clave")
-
-    for referencia in referencias_empresa:
-        titulo_referencia = referencia.get("titulo")
-        if titulo_referencia and _hay_solapamiento(titulo_referencia, texto_licitacion, minimo=2):
-            resultado = referencia.get("resultado_normalizado")
-            if resultado == "adjudicada":
-                sufijo = " (adjudicada)"
-            elif resultado == "no_adjudicada":
-                sufijo = " (no adjudicada)"
-            else:
-                sufijo = ""
-            motivos_detalle.append(f"Ya se presentó a una licitación similar: \"{_recortar(titulo_referencia, 100)}\"{sufijo}.")
-            señales.append("historial de licitaciones similares")
-            break  # una sola referencia antigua basta como señal; evita repetir el mismo motivo
-
-    certificaciones_coincidentes = _certificaciones_relacionadas(texto_licitacion, empresa.get("certificaciones"))
-    if certificaciones_coincidentes:
-        motivos_detalle.append(
-            "Cuenta con certificaciones que la licitación también cita: "
-            + ", ".join(certificaciones_coincidentes) + f" (certificaciones de la empresa: {_recortar(empresa['certificaciones'], 100)})."
-        )
-        señales.append("certificaciones")
-
-    if empresa.get("sector"):
-        detalle_sector = empresa["sector"]
-        # Evita el "Sector X (Sector X)" cuando subsector y sector son literalmente el mismo texto.
-        if empresa.get("subsector") and _normalizar(empresa["subsector"]) != _normalizar(empresa["sector"]):
-            detalle_sector += f" ({empresa['subsector']})"
-        if _hay_solapamiento(empresa["sector"], texto_licitacion, minimo=1):
-            motivos_detalle.append(f"Su sector de actividad ({detalle_sector}) coincide temáticamente con el objeto de la licitación.")
-            señales.append("sector de actividad")
-        else:
-            motivos_detalle.append(f"Sector de actividad de la empresa: {detalle_sector}.")
-
-    # Contexto adicional (tamaño, facturación, rango de importes preferido,
-    # clientes, certificaciones): no son señales de "coincidencia" en sí
-    # mismas -- no hay un requisito de tamaño/presupuesto de la licitación
-    # con el que compararlas --, pero es información relevante que el
-    # usuario (y la capa de IA, ver ia_explicacion.py, que recibe estos
-    # motivos como base) debe tener a la vista siempre que exista.
-    if empresa.get("tamano"):
-        motivos_detalle.append(f"Tamaño de la empresa: {empresa['tamano']}.")
-    if empresa.get("facturacion_anual"):
-        motivos_detalle.append(f"Facturación anual declarada: {empresa['facturacion_anual']}.")
-    if empresa.get("notas_libres"):
-        motivos_detalle.append(f"Rango de importe de proyecto preferido por la empresa: {empresa['notas_libres']}.")
-    if empresa.get("clientes_principales") and "clientes principales" not in señales:
-        motivos_detalle.append(f"Clientes principales: {_recortar(empresa['clientes_principales'], 160)}.")
-    if empresa.get("certificaciones") and not certificaciones_coincidentes:
-        motivos_detalle.append(f"Certificaciones: {_recortar(empresa['certificaciones'], 120)}.")
-
-    # ------------------------------------------------------------ Capa 2 -- puente temático multilingüe:
-    # solo se activa si la Capa 1 no ha encontrado NINGUNA coincidencia
-    # literal, para no repetir lo mismo con otras palabras. Se guarda en
-    # `temas_puente`, NO en `señales` (que se reserva para las
-    # coincidencias literales de la Capa 1): así el resumen puede
-    # distinguir con qué capa se ha encontrado la relación, y la Capa 3
-    # solo se intenta si esta tampoco encuentra nada.
-    temas_puente = []
-    if not señales:
-        # Tipos de proyecto y sectores de las referencias de la empresa: etiquetas
-        # cortas y declaradas, no los títulos completos (que meterían demasiado ruido).
-        etiquetas_referencias = sorted({
-            valor for r in referencias_empresa for valor in (r.get("tipo_proyecto"), r.get("sector")) if valor
-        })[:10]
-        texto_perfil_empresa = " ".join(filter(None, [
-            empresa.get("descripcion_actividad"),
-            "; ".join(empresa.get("proyectos_tipo") or []),
-            empresa.get("preferencias_licitaciones"),
-            empresa.get("sector"), empresa.get("subsector"),
-            " ".join(todas_las_palabras_clave),
-            " ".join(etiquetas_referencias),
-        ]))
-        temas_puente = _puente_tematico(texto_perfil_empresa, texto_licitacion)
-        if temas_puente:
-            motivos_detalle.append(
-                "Puente temático: aunque no comparten palabras exactas, el perfil de la empresa "
-                f"y la licitación tratan sobre {', '.join(temas_puente)}."
-            )
-
-    # ------------------------------------------------------------ Capa 3 -- último recurso, similitud
-    # semántica por campo: solo si tampoco hay coincidencia literal NI puente
-    # temático, y solo si se ha pasado un encoder (siempre disponible desde render_tab2).
-    campo_semantico = (None, 0.0)
-    if not señales and not temas_puente and encoder is not None:
-        campo_semantico = _bridge_semantico_por_campo(encoder, texto_licitacion, empresa, referencias_empresa)
-        if campo_semantico[0] and campo_semantico[1] >= 0.20:
-            pct_campo = round(campo_semantico[1] * 100, 1)
-            motivos_detalle.append(
-                f"El modelo de similitud semántica multilingüe relaciona especialmente esta "
-                f"licitación con «{campo_semantico[0]}» del perfil de la empresa ({pct_campo}% "
-                f"de afinidad en ese campo), lo que sugiere una conexión conceptual aunque no "
-                f"compartan palabras ni tema detectado."
-            )
-        else:
-            campo_semantico = (None, 0.0)  # por debajo del umbral: no se cuenta como señal
-
-    resumen = _construir_resumen(empresa.get("similarity"), señales, temas_puente, campo_semantico)
-    return [resumen] + motivos_detalle
-
-
-def obtener_lugares_empresa(empresa: dict) -> list:
-    """
-    Los 4 campos geográficos de la empresa, ya definidos en el Directorio
-    de Empresas (Experiencia países, Zona geográfica de interés, Países
-    de interés, Ámbito geográfico), como pares (etiqueta, texto) listos
-    para mostrarse en texto plano -- sin tabla ni columna de
-    coincidencia: esa valoración ya la dan los bullets de
-    explicar_coincidencia() de forma más específica.
-    """
-    def _texto(valor):
-        if isinstance(valor, list):
-            return ", ".join(v for v in valor if v) or "No especificado"
-        return valor or "No especificado"
-
-    return [
-        ("Experiencia países", _texto(empresa.get("experiencia_paises"))),
-        ("Zona geográfica de interés", _texto(empresa.get("zona_geografica_interes"))),
-        ("Países de interés", _texto(empresa.get("paises_interes"))),
-        ("Ámbito geográfico", _texto(empresa.get("ambito_geografico"))),
-    ]
-
-
-def formatear_tabla_coincidencias(coincidencias: list) -> pd.DataFrame:
-    if not coincidencias:
-        return pd.DataFrame()
-    df = pd.DataFrame(coincidencias)
-    return pd.DataFrame({
-        "Relevancia (%)": (df["similarity"] * 100).round(1),
-        "Empresa": df["nombre_empresa"],
-        "Nº interno": df["numero_interno"],
-        "Sector": df["sector"].fillna("No especificado"),
-        "Tipo": df["tipo_empresa"].fillna("No especificado"),
-    })
+    return _cargar_base(str(ruta), str(ruta.stat().st_mtime), encoder)
 
 
 # ------------------------------------------------------------------
@@ -1264,340 +171,173 @@ def _resetear_seleccion():
     st.session_state.tab2_coincidencias = None
 
 
-def _licitacion_para_ia(licitacion: dict) -> dict:
-    """
-    ia_explicacion.py (que no se modifica) construye el prompt de Groq con
-    título, descripción, país, organismo, tipo de aviso y fecha límite. Para
-    que la categoría también llegue a la justificación con IA se añade a la
-    descripción en una COPIA de la licitación (la original no se toca).
-    """
-    categoria = licitacion.get("categoria")
-    if not categoria:
-        return licitacion
-    copia = dict(licitacion)
-    base = copia.get("descripcion") or copia.get("descripcion_manual") or ""
-    copia["descripcion"] = f"{base} (Categoría: {categoria})".strip()
-    return copia
+def _firma(licitacion: dict) -> str:
+    return "|".join(str(licitacion.get(k) or "") for k in ("codigo_unico", "titulo", "descripcion_manual", "categoria", "pais")) \
+        + f"|{RANKING_TOP_N}"
 
 
-def _tarjeta_ranking_actual(empresa: dict, detalle: dict, ctx: dict, cambio: str = None):
-    """
-    Tarjeta de una empresa en el ranking ACTUAL («Palabras clave»). Es el cuerpo, sin cambios, del bucle que antes estaba
-    dentro de render_tab2; `ctx` trae las variables que usaba. `cambio` (opcional, solo en el modo A/B) es una línea que
-    indica cómo cambia su posición en el nuevo ranking.
-    """
-    encoder = ctx["encoder"]
-    texto_licitacion = ctx["texto_licitacion"]
-    pais_licitacion = ctx["pais_licitacion"]
-    categoria_licitacion = ctx["categoria_licitacion"]
-    organismo_licitacion = ctx["organismo_licitacion"]
-    referencias_por_empresa = ctx["referencias_por_empresa"]
-    licitacion = ctx["licitacion"]
-    licitacion_ia = ctx["licitacion_ia"]
-    with st.container(border=True):
-        col_nombre, col_score = st.columns([4, 1])
-        with col_nombre:
-            st.markdown(f"**{empresa['nombre_empresa']}**  ·  `{empresa['numero_interno']}`")
-        with col_score:
-            st.markdown(f"**{_formatear_numero(detalle['puntuacion'])} pts**")
-        if cambio:
-            st.markdown(cambio)
-
-        referencias_empresa = referencias_por_empresa.get(empresa["numero_interno"], [])
-        motivos = explicar_coincidencia(
-            texto_licitacion, pais_licitacion, empresa, referencias_empresa, encoder,
-            categoria_licitacion=categoria_licitacion,
-            organismo_licitacion=organismo_licitacion,
-        )
-        # En pantalla, las líneas de ranking sustituyen al resumen genérico (que citaba la
-        # similitud global) y al texto del modelo por campo; la IA recibe `motivos` sin tocar.
-        motivos_visibles = _bloque_ranking(detalle) + [
-            m for m in list(motivos)[1:] if not str(m).startswith(PREFIJO_MOTIVO_SEMANTICO)
-        ]
-        for motivo in motivos_visibles:
-            st.markdown(f"- {motivo}")
-
-        # Justificación en lenguaje natural
-        if groq_configurado():
-            ya_en_cache, texto_en_cache = justificacion_en_cache(licitacion, empresa)
-            if ya_en_cache:
-                if texto_en_cache:
-                    st.info(f"**Justificación con IA:** {texto_en_cache}")
-                else:
-                    st.caption(
-                        "No se ha podido generar la justificación con IA "
-                        "(límite de peticiones gratuitas o problema temporal del servicio)."
-                    )
-
-                # Botón para reintentar / regenerar
-                if st.button(
-                    "🔄 Reintentar / Regenerar respuesta IA",
-                    key=f"tab2_btn_reintentar_ia_{empresa['numero_interno']}",
-                    use_container_width=True,
-                ):
-                    # Modificamos temporalmente el valor en la sesión
-                    # para que generar_justificacion_ia() no devuelva el valor guardado
-                    clave = _clave_cache(licitacion, empresa)
-                    if "cache_justificacion_ia" in st.session_state and clave in st.session_state.cache_justificacion_ia:
-                        # Asignamos None momentáneamente
-                        st.session_state.cache_justificacion_ia[clave] = None
-
-                    with st.spinner("Enviando petición a GROQ..."):
-                        generar_justificacion_ia(licitacion_ia, empresa, motivos)
-                    st.rerun()
-
-            elif st.button(
-                "Generar justificación con IA",
-                key=f"tab2_btn_ia_{empresa['numero_interno']}",
-            ):
-                with st.spinner("Generando justificación con IA..."):
-                    texto_ia = generar_justificacion_ia(licitacion_ia, empresa, motivos)
-                st.rerun()
-
-        st.caption(f"Lugar de la licitación: {pais_licitacion or 'No especificado'}")
-        for etiqueta, valor in obtener_lugares_empresa(empresa):
-            st.caption(f"{etiqueta}: {valor}")
+def _fmt(valor) -> str:
+    return f"{valor:.1f}".rstrip("0").rstrip(".") if isinstance(valor, float) else str(valor)
 
 
-# ------------------------------------------------------------------
-# Prueba A/B: ranking actual («Palabras clave») frente al nuevo («Relevancia real»)
-# ------------------------------------------------------------------
-_CACHE_VECTORES = {}
+def _cambio(pos_gpt: int, pos_emb: int) -> str:
+    if pos_gpt < pos_emb:
+        return f"▲ sube {pos_emb - pos_gpt}"
+    if pos_gpt > pos_emb:
+        return f"▼ baja {pos_gpt - pos_emb}"
+    return "= igual"
 
 
-def _vectores_por_texto(encoder, prefijo: str, textos: list) -> dict:
-    """
-    {texto normalizado: embedding «prefijo: texto»} calculando en UNA llamada solo los textos que faltan. Caché de
-    proceso (el modelo es siempre el mismo); se vacía si crece demasiado.
-    """
-    if len(_CACHE_VECTORES) > 20000:
-        _CACHE_VECTORES.clear()
-    pendientes = {}
-    for texto in textos:
-        clave = (prefijo, _normalizar_clave(" ".join(str(texto).split())))
-        if clave not in _CACHE_VECTORES:
-            pendientes.setdefault(clave, " ".join(str(texto).split()))
-    if pendientes:
-        matriz = np.array(encoder.encode([f"{prefijo}: {t}" for t in pendientes.values()]))
-        for clave, vector in zip(pendientes, matriz):
-            _CACHE_VECTORES[clave] = vector
-    return {
-        _normalizar_clave(" ".join(str(t).split())): _CACHE_VECTORES[(prefijo, _normalizar_clave(" ".join(str(t).split())))]
-        for t in textos
-    }
+def _fase1(encoder, licitacion: dict) -> dict:
+    """Ranking por embeddings de las `RANKING_TOP_N` mejores + explicación de palabras. Sin GPT."""
+    empresas, indice = _base_empresas(encoder)
+    por_id = {e["numero_interno"]: e for e in empresas}
+    filas, vector = ranking_embeddings.ranking(encoder, indice, licitacion, top=RANKING_TOP_N)
+    for f in filas:
+        f["explicacion"] = ranking_embeddings.explicar(encoder, por_id[f["numero_interno"]], licitacion, vector)
+    return {"firma": _firma(licitacion), "filas": filas, "total_empresas": len(empresas)}
 
 
-def _calcular_nuevo_ranking(encoder, licitacion: dict, candidatas: list, palabras_extra: dict, referencias: dict) -> dict:
-    """
-    Ranking «Relevancia real» (ranking_relevancia.py) sobre LAS MISMAS candidatas que el ranking actual. No toca las
-    empresas ni la licitación. Devuelve {empresas, detalle, objeto}; cualquier excepción la captura quien lo llama.
-    """
-    if _ranking_relevancia is None:
-        raise RuntimeError(f"no se pudo cargar ranking_relevancia.py: {_ERROR_IMPORT_RELEVANCIA}")
-    objeto = _ranking_relevancia.analizar_objeto(licitacion)
-    textos_conceptos, textos_palabras = _ranking_relevancia.textos_necesarios(objeto, candidatas, palabras_extra)
-    try:
-        vectores_conceptos = _vectores_por_texto(encoder, "query", textos_conceptos)
-        vectores_palabras = _vectores_por_texto(encoder, "query", textos_palabras)
-    except Exception:
-        vectores_conceptos, vectores_palabras = {}, {}  # sin modelo: solo coincidencias literales (se avisa en la tarjeta)
-    empresas, detalle = _ranking_relevancia.ordenar_relevancia(
-        objeto, candidatas, licitacion, palabras_extra, referencias, vectores_conceptos, vectores_palabras,
-    )
-    ids_in = sorted(str(e.get("numero_interno")) for e in candidatas)
-    ids_out = sorted(str(e.get("numero_interno")) for e in empresas)
-    if ids_in != ids_out:
-        raise RuntimeError("el nuevo ranking no ordena exactamente las mismas candidatas que el ranking actual")
-    return {"empresas": empresas, "detalle": detalle, "objeto": objeto}
+def _fase2(licitacion: dict, fase1: dict, encoder) -> dict:
+    empresas, _ = _base_empresas(encoder)
+    por_id = {e["numero_interno"]: e for e in empresas}
+    return reranking_groq.reordenar(licitacion, [por_id[f["numero_interno"]] for f in fase1["filas"]])
 
 
-def _insignia_cambio(posicion_propia: int, posicion_otra: int, otro: str) -> str:
-    """Línea Markdown con el cambio de posición respecto al otro ranking (positivo = sube en este)."""
-    delta = posicion_otra - posicion_propia
-    if delta == 0:
-        return f"↔️ Misma posición que en el {otro} (#{posicion_otra})"
-    flecha = "🔺" if delta > 0 else "🔻"
-    color = "green" if delta > 0 else "red"
-    palabra = "sube" if delta > 0 else "baja"
-    texto = f"{flecha} {palabra} {abs(delta)} puesto{'' if abs(delta) == 1 else 's'} (en el {otro}: #{posicion_otra})"
-    return f":{color}[**{texto}**]" if abs(delta) >= 3 else f":{color}[{texto}]"
-
-
-def _tarjeta_nuevo_ranking(empresa: dict, detalle: dict, posicion: int, cambio: str, pais_licitacion):
-    """Tarjeta de una empresa en el NUEVO ranking: nota propia, explicación propia e información empresarial."""
-    with st.container(border=True):
-        col_nombre, col_score = st.columns([4, 1])
-        with col_nombre:
-            st.markdown(f"**{posicion}. {empresa['nombre_empresa']}**  ·  `{empresa['numero_interno']}`")
-        with col_score:
-            st.markdown(f"**{_formatear_numero(detalle['puntuacion'])} / 100**")
-        if cambio:
-            st.markdown(cambio)
-        aviso = _aviso_observaciones(empresa.get("observaciones_importantes"))
-        if aviso:
-            st.markdown(f"- {aviso}")
-        for linea in _ranking_relevancia.explicar(detalle):
-            st.markdown(f"- {linea}")
-        st.caption(f"Lugar de la licitación: {pais_licitacion or 'No especificado'}")
-        for etiqueta, valor in obtener_lugares_empresa(empresa):
-            st.caption(f"{etiqueta}: {valor}")
-
-
-def _firma_rerank(licitacion: dict, candidatas: list) -> str:
-    ids = ",".join(sorted(str(e.get("numero_interno")) for e in candidatas))
-    return f"{licitacion.get('codigo_unico') or ''}|{licitacion.get('titulo') or ''}|{ids}"
-
-
-def _fmt_pts(valor) -> str:
-    return "—" if valor is None else _formatear_numero(float(valor))
-
-
-def _informe_completo(clave: str, empresa: dict, evaluacion: dict, estado: dict, licitacion, ctx, palabras_extra):
-    """Botón «Generar informe más completo»: análisis profundo de UNA empresa (otra petición a Groq, solo bajo demanda)."""
-    amp = estado["ampliaciones"].get(clave)
-    if amp:
-        st.markdown("---")
-        st.markdown(amp)
-    elif st.button("📄 Generar informe más completo", key=f"tab2_rerank_amp_{clave}"):
-        with st.spinner("Generando el informe completo con toda la información de la licitación y de la empresa..."):
-            texto, error = _rerank.ampliar_explicacion(
-                ctx["licitacion_ia"], empresa, ctx["referencias_por_empresa"].get(empresa.get("numero_interno"), []),
-                estado["rankings"].get(clave, {}),
-                {k: evaluacion.get(k) for k in ("categoria", "puntuacion", "justificacion")}, palabras_extra=palabras_extra,
-            )
+def _informe(clave: str, licitacion: dict, empresa: dict, fila: dict, evaluacion: dict, encoder):
+    """Botón «Generar informe más completo» de una empresa (otra petición a GPT, solo bajo demanda)."""
+    informes = st.session_state.setdefault("tab2_informes", {})
+    firma = _firma(licitacion) + "|" + clave
+    if st.button("📄 Generar informe más completo", key=f"tab2_rerank_amp_{clave}"):
+        with st.spinner("GPT está redactando el informe completo..."):
+            posicion = {"posicion": fila["posicion"], "puntuacion_embeddings": fila["puntuacion"]}
+            informes[firma] = reranking_groq.ampliar_explicacion(
+                licitacion, empresa, posicion,
+                {"puntuacion": evaluacion["puntuacion"], "tecnica": evaluacion["tecnica"], "bonus_geo": evaluacion["bonus_geo"],
+                 "justificacion": evaluacion["justificacion"]})
+    if firma in informes:
+        texto, error = informes[firma]
         if error:
             st.error(f"No se pudo generar el informe: {error}")
         else:
-            estado["ampliaciones"][clave] = texto
+            st.markdown(texto)
+
+
+def _seccion_gpt(licitacion, fase1, res, por_id, filas_por_id, encoder):
+    st.markdown("### 🤖 Empresas recomendadas (ordenadas por GPT)")
+    if res is None:
+        return
+    if not res["ok"]:
+        st.error(f"No se pudo reordenar con GPT: {res['error']}")
+        if res.get("detalle_error"):
+            with st.expander("Detalle técnico"):
+                st.code(res["detalle_error"])
+        if st.button("🔄 Reintentar la reordenación con GPT", key="tab2_rerank_reintentar"):
+            st.session_state.tab2_rerank_pendiente = True
             st.rerun()
-
-
-def _lista_secundaria(resultado: dict, por_id: dict, estado, licitacion, ctx, palabras_extra):
-    """Empresas dudosas, descartadas y no analizadas: lista independiente, sin posiciones de ranking."""
-    st.markdown("### Empresas dudosas o descartadas")
-    st.caption("No forman parte del ranking principal ni tienen posición en él.")
-    if not resultado["dudosas"] and not resultado["descartadas"]:
-        st.caption("Groq no ha clasificado ninguna de las empresas analizadas como dudosa o descartada.")
-    for etiqueta, clave in (("🟠 Dudosa", "dudosas"), ("🔴 Descartada", "descartadas")):
-        for e in resultado[clave]:
-            empresa = por_id.get(e["numero_interno"], {})
-            with st.container(border=True):
-                st.markdown(f"**{empresa.get('nombre_empresa', e['numero_interno'])}**  ·  `{e['numero_interno']}`  ·  {etiqueta}")
-                st.markdown(e["justificacion"])
-                for nota in e.get("notas", []):
-                    st.caption(f"ℹ️ {nota}")
-                _informe_completo(e["numero_interno"], empresa, e, estado, licitacion, ctx, palabras_extra)
-    if resultado["no_analizadas"]:
-        st.markdown("#### Candidatas no analizadas por Groq")
-        st.caption("No se han evaluado: no hay valoración de Groq para ellas, ni a favor ni en contra.")
-        for clave, motivo in resultado["no_analizadas"]:
-            st.markdown(f"- **{por_id.get(clave, {}).get('nombre_empresa', clave)}** (`{clave}`) — {motivo}")
-
-
-def _seccion_rerank(licitacion, candidatas, ordenadas_actual, detalle_actual, ctx, palabras_extra, encoder) -> bool:
-    """
-    Reranking rápido con Groq (reranking_groq.py): UNA petición al pulsar «Buscar empresas coincidentes». El resultado se
-    guarda en session_state, así que abrir un informe o cambiar de widget no vuelve a llamar a Groq. Los dos rankings
-    originales se calculan aquí solo como fuente de candidatas y no se muestran. Devuelve True si hay resultado utilizable.
-    """
-    st.markdown("### 🤖 Ranking de empresas — análisis rápido con Groq")
-    if _rerank is None:
-        st.error(f"El análisis con Groq no está disponible: no se pudo cargar reranking_groq.py ({_ERROR_IMPORT_RERANK}).")
-        return False
-    cfg = _rerank.configuracion()
-    firma = _firma_rerank(licitacion, candidatas)
-    estado = st.session_state.get("tab2_rerank")
-    if estado is not None and estado.get("firma") != firma:
-        estado = None
-    pendiente = st.session_state.pop("tab2_rerank_pendiente", None)
-    if not cfg["api_key"]:
-        st.info("Para activar el ranking con Groq define `GROQ_API_KEY` (y opcionalmente `GROQ_MODEL`) en los secretos o en "
-                "el entorno.")
-        return False
-
-    if pendiente:
-        with st.spinner(f"Ordenando las {min(len(candidatas), cfg['max_empresas'])} primeras candidatas con Groq ({cfg['modelo']})..."):
-            try:
-                nuevo = _calcular_nuevo_ranking(encoder, licitacion, candidatas, palabras_extra, ctx["referencias_por_empresa"])
-            except Exception:  # noqa: BLE001 - sin el nuevo ranking se usa solo el actual para elegir candidatas
-                nuevo = None
-            actual = {"empresas": ordenadas_actual, "detalle": detalle_actual}
-            resultado = _rerank.reordenar(ctx["licitacion_ia"], candidatas, actual, nuevo, palabras_extra)
-        estado = {"firma": firma, "resultado": resultado, "ampliaciones": {},
-                  "rankings": _rerank.resumen_rankings(candidatas, actual, nuevo)}
-        st.session_state.tab2_rerank = estado
-    elif estado is None:
-        if st.button("Analizar con Groq", key="tab2_rerank_manual"):
-            st.session_state.tab2_rerank_pendiente = "nuevo"
-            st.rerun()
-        st.caption("Pulsa para analizar las candidatas con Groq (no se ejecuta solo, para no gastar tu cuota gratuita).")
-        return False
-
-    resultado = estado["resultado"]
-    if not resultado["ok"]:
-        st.error(f"⚠️ No se pudo completar el análisis con Groq: {resultado['error']}")
-        if resultado.get("detalle_error"):
-            with st.expander("Detalle técnico del error"):
-                st.code(str(resultado["detalle_error"]))
-        if st.button("🔁 Reintentar", key="tab2_rerank_reintentar"):
-            st.session_state.tab2_rerank_pendiente = "nuevo"
-            st.rerun()
-        return False
-
-    por_id = {str(e.get("numero_interno")): e for e in candidatas}
-    nombres = {k: v.get("nombre_empresa") for k, v in por_id.items()}
+        st.info("El ranking por embeddings (más abajo) sigue siendo válido.")
+        return
     st.caption(
-        f"Modelo **{resultado['modelo']}** · **{len(resultado['analizadas'])} de {len(candidatas)}** candidatas evaluadas en "
-        f"**{resultado['llamadas']} petición** · {len(resultado['recomendadas'])} recomendadas, {len(resultado['dudosas'])} dudosas, "
-        f"{len(resultado['descartadas'])} descartadas"
-        + (f" · {resultado['tokens']:,} tokens".replace(",", ".") if resultado["tokens"] else "")
+        f"Puntuación = adecuación técnica (actividad y proyectos tipo) + una ventaja geográfica mínima (máx. {reranking_groq.BONUS_GEO_MAXIMO}). "
+        f"Modelo: {res['modelo']}."
     )
-    if resultado["avisos"] or resultado["duplicadas"]:
-        with st.expander(f"Avisos del proceso ({len(resultado['avisos']) + len(resultado['duplicadas'])})"):
-            for a in resultado["avisos"]:
-                st.caption(f"ℹ️ {a}")
-            for clave, motivo in resultado["duplicadas"]:
-                st.caption(f"ℹ️ Empresa duplicada omitida ({clave}): {motivo}.")
-    st.info("Valoración rápida: es una **recomendación fundamentada** en el título de la licitación y en la actividad y palabras "
-            "clave de cada empresa, no una certeza de que vayan a presentar oferta. Para un análisis profundo de una empresa, "
-            "pulsa «Generar informe más completo».")
+    for aviso in res["avisos"]:
+        st.warning(aviso)
+    if not res["ranking"]:
+        st.warning("Ninguna de las empresas candidatas es una recomendación válida.")
+    for e in res["ranking"]:
+        fila = filas_por_id[e["numero_interno"]]
+        empresa = por_id[e["numero_interno"]]
+        with st.container(border=True):
+            st.markdown(
+                f"**{e['posicion']}. {empresa['nombre_empresa']}** · **{_fmt(e['puntuacion'])} pts** "
+                f"(técnica {_fmt(e['tecnica'])}" + (f" + geografía {e['bonus_geo']}" if e["bonus_geo"] else "") + ")"
+            )
+            st.caption(f"Embeddings: nº {fila['posicion']} ({_fmt(fila['puntuacion'])} pts) · {_cambio(e['posicion'], fila['posicion'])}")
+            st.write(e["justificacion"])
+            for aviso in e["avisos"]:
+                st.caption("⚠️ " + aviso)
+            _informe(e["numero_interno"], licitacion, empresa, fila, e, encoder)
+    if res["excluidas"]:
+        st.markdown("#### ⛔ Excluidas geográficamente (no son recomendaciones válidas)")
+        for e in res["excluidas"]:
+            fila = filas_por_id[e["numero_interno"]]
+            st.error(f"**{por_id[e['numero_interno']]['nombre_empresa']}** (nº {fila['posicion']} en embeddings): {e['motivo_exclusion']}")
+    for clave, motivo in res["no_evaluadas"]:
+        st.caption(f"Sin evaluar: {por_id[clave]['nombre_empresa']} — {motivo}")
 
-    recomendadas = resultado["recomendadas"]
-    if not recomendadas:
-        st.warning("Groq no ha encontrado, entre las empresas analizadas, ninguna con encaje suficiente para recomendarla. "
-                   "Revisa la lista de dudosas y descartadas más abajo.")
-    else:
-        filas = _rerank.construir_tabla(resultado, nombres)
-        st.dataframe(pd.DataFrame([{
-            "Pos.": f["posicion"], "Empresa": f["empresa"], "Nº": f["numero_interno"],
-            "Puntuación (0-100)": _fmt_pts(f["puntuacion"]), "Justificación": f["justificacion"],
-        } for f in filas]), hide_index=True, use_container_width=True)
-        st.markdown("#### Informe completo (bajo demanda)")
-        for r in recomendadas:
-            empresa = por_id.get(r["numero_interno"], {})
-            with st.expander(f"{r['posicion']}. {empresa.get('nombre_empresa', r['numero_interno'])} — {_fmt_pts(r['puntuacion'])}/100"):
-                st.markdown(r["justificacion"])
-                _informe_completo(r["numero_interno"], empresa, r, estado, licitacion, ctx, palabras_extra)
+
+def _tabla_comparativa(fase1, res, por_id) -> pd.DataFrame:
+    gpt = {e["numero_interno"]: e for e in (res["ranking"] if res and res["ok"] else [])}
+    excl = {e["numero_interno"]: e for e in (res["excluidas"] if res and res["ok"] else [])}
+    filas = []
+    for f in fase1["filas"]:
+        i = f["numero_interno"]
+        fila = {"Empresa": por_id[i]["nombre_empresa"], "Pos. embeddings": f["posicion"], "Puntuación embeddings": f["puntuacion"]}
+        if res and res["ok"]:
+            if i in gpt:
+                fila.update({"Pos. GPT": gpt[i]["posicion"], "Puntuación GPT": gpt[i]["puntuacion"],
+                             "Cambio": _cambio(gpt[i]["posicion"], f["posicion"])})
+            elif i in excl:
+                fila.update({"Pos. GPT": None, "Puntuación GPT": None, "Cambio": "⛔ excluida"})
+            else:
+                fila.update({"Pos. GPT": None, "Puntuación GPT": None, "Cambio": "sin evaluar"})
+        filas.append(fila)
+    return pd.DataFrame(filas)
+
+
+def _seccion_embeddings(fase1, res, por_id):
+    st.markdown("### 🔢 Ranking original por embeddings")
+    st.caption(
+        "Similitud (×100) entre la licitación y cada empresa, usando solo su nombre, sector, palabras clave extraídas de la "
+        "descripción y principales proyectos tipo. La lista de palabras es una aproximación para entender el resultado; "
+        "no modifica la puntuación."
+    )
+    st.dataframe(_tabla_comparativa(fase1, res, por_id), hide_index=True, use_container_width=True)
+    excl = {e["numero_interno"]: e for e in (res["excluidas"] if res and res["ok"] else [])}
+    gpt = {e["numero_interno"]: e for e in (res["ranking"] if res and res["ok"] else [])}
+    for f in fase1["filas"]:
+        i = f["numero_interno"]
+        marca = " · ⛔ excluida geográficamente" if i in excl else (f" · GPT: nº {gpt[i]['posicion']}" if i in gpt else "")
+        with st.expander(f"{f['posicion']}. {por_id[i]['nombre_empresa']} — {_fmt(f['puntuacion'])} pts{marca}"):
+            if i in excl:
+                st.error(excl[i]["motivo_exclusion"])
+            ex = f["explicacion"]
+            hay = False
+            for campo, palabras in ex["literales"].items():
+                st.markdown(f"**{ranking_embeddings.ETIQUETAS_CAMPO[campo]}** — palabras en común con la licitación: " + ", ".join(palabras))
+                hay = True
+            if ex["frases_literales"]:
+                st.markdown("**Palabras clave que aparecen en la licitación:** " + "; ".join(ex["frases_literales"]))
+                hay = True
+            if ex["frases"]:
+                st.markdown("**Palabras clave más afines por significado:** " + "; ".join(f"{p} ({_fmt(s)})" for p, s in ex["frases"]))
+                hay = True
+            if not hay:
+                st.caption("Sin palabras en común; la similitud viene del significado global del texto.")
+
+
+def _resultados(licitacion, encoder):
+    fase1 = st.session_state.get("tab2_fase1")
+    if not fase1 or fase1["firma"] != _firma(licitacion):
+        return
+    empresas, _ = _base_empresas(encoder)
+    por_id = {e["numero_interno"]: e for e in empresas}
+    filas_por_id = {f["numero_interno"]: f for f in fase1["filas"]}
+
+    if st.session_state.pop("tab2_rerank_pendiente", False):
+        if reranking_groq.disponible():
+            with st.spinner(f"GPT está evaluando las {len(fase1['filas'])} empresas..."):
+                st.session_state.tab2_rerank = {"firma": fase1["firma"], "res": _fase2(licitacion, fase1, encoder)}
+        else:
+            st.session_state.tab2_rerank = {"firma": fase1["firma"], "res": reranking_groq.reordenar(licitacion, [])}
+    rr = st.session_state.get("tab2_rerank")
+    res = rr["res"] if rr and rr["firma"] == fase1["firma"] else None
+
+    st.success(f"Fase 1: {len(fase1['filas'])} empresas más parecidas de {fase1['total_empresas']} en la base de datos.")
+    _seccion_gpt(licitacion, fase1, res, por_id, filas_por_id, encoder)
     st.divider()
-    _lista_secundaria(resultado, por_id, estado, licitacion, ctx, palabras_extra)
-    return True
-
-
-def _render_resultados(candidatas, ordenadas_actual, detalle_actual, ctx, palabras_extra, encoder, licitacion):
-    """
-    Pinta SOLO el ranking final de Groq y, debajo, las dudosas/descartadas. Los dos rankings originales se siguen
-    calculando (en render_tab2 y dentro de la fase de Groq) como fuente de candidatas, pero no se muestran. Solo si Groq no
-    está disponible o falla se ofrece, plegada, la lista de candidatas del ranking actual para no dejar la pestaña vacía.
-    """
-    try:
-        ok = _seccion_rerank(licitacion, candidatas, ordenadas_actual, detalle_actual, ctx, palabras_extra, encoder)
-    except Exception as error:  # noqa: BLE001 - la fase de Groq nunca rompe la pestaña
-        ok = False
-        st.error(f"El análisis con Groq falló de forma inesperada ({type(error).__name__}: {error}).")
-    if not ok:
-        with st.expander("Ver las candidatas por similitud (solo disponible porque el análisis con Groq no se ha completado)"):
-            for empresa, detalle in zip(ordenadas_actual, detalle_actual):
-                _tarjeta_ranking_actual(empresa, detalle, ctx)
+    _seccion_embeddings(fase1, res, por_id)
 
 
 def render_tab2(supabase: Client, encoder: SentenceTransformer):
@@ -1630,7 +370,6 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
 
     candidatos = st.session_state.tab2_candidatos
 
-    # --- Selección de la licitación entre los candidatos encontrados ---
     if candidatos:
         if len(candidatos) == 1:
             st.session_state.tab2_licitacion_elegida = candidatos[0]
@@ -1644,19 +383,19 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
             )
             st.session_state.tab2_licitacion_elegida = opciones[etiqueta_elegida]
 
-    elif candidatos is not None:  # se buscó y no hubo NINGÚN resultado
+    elif candidatos is not None:
         st.warning("No se ha encontrado ninguna licitación parecida en nuestra base de datos.")
 
-    # --- Fallback: introducir la licitación directamente ---
     with st.expander("¿No está en la base de datos? Descríbela directamente"):
         titulo_manual = st.text_input("Título de la licitación", key="tab2_titulo_manual")
         descripcion_manual = st.text_area("Descripción / objeto del contrato", key="tab2_descripcion_manual", height=80)
         categoria_manual = st.text_input("Categoría (opcional)", key="tab2_categoria_manual")
+        pais_manual = st.text_input("País (opcional; permite valorar la geografía y las exclusiones)", key="tab2_pais_manual")
         if st.button("Usar esta descripción", key="tab2_usar_manual"):
             if titulo_manual.strip():
                 st.session_state.tab2_licitacion_elegida = {
                     "titulo": titulo_manual,
-                    "pais": None,
+                    "pais": pais_manual.strip() or None,
                     "codigo_unico": None,
                     "descripcion_manual": descripcion_manual,
                     "categoria": categoria_manual.strip() or None,
@@ -1671,71 +410,19 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
         st.markdown(f"**Licitación seleccionada:** {licitacion['titulo']}")
         if licitacion.get("categoria"):
             st.caption(f"Categoría: {licitacion['categoria']}")
+        if licitacion.get("pais"):
+            st.caption(f"País: {licitacion['pais']}")
 
-        if st.button("Buscar empresas coincidentes", key="tab2_buscar_empresas", use_container_width=True):
-            st.session_state.tab2_rerank_pendiente = "nuevo"
+        if st.button("🔎 Buscar", key="tab2_buscar_empresas", use_container_width=True):
             st.session_state.pop("tab2_rerank", None)
-            with st.spinner("Cruzando con la base de datos de empresas..."):
-                if licitacion.get("codigo_unico"):
-                    st.session_state.tab2_coincidencias = obtener_coincidencias(supabase, licitacion["codigo_unico"])
-                else:
-                    st.session_state.tab2_coincidencias = obtener_coincidencias_texto_libre(
-                        supabase, encoder, licitacion["titulo"], licitacion.get("descripcion_manual", ""),
-                        categoria=licitacion.get("categoria") or "", pais=licitacion.get("pais") or "",
-                    )
-
-        coincidencias = st.session_state.tab2_coincidencias
-        if coincidencias is not None:
-            if not coincidencias:
-                st.warning("No se han encontrado empresas con un perfil afín a esta licitación.")
-            else:
-                st.success(f"**{len(coincidencias)}** empresas candidatas por similitud con esta licitación. Groq ordena a continuación las más prometedoras:")
-                # Título + descripción de la licitación (ver docstring del módulo,
-                # sección 2): antes solo se usaba el título.
-                categoria_licitacion = licitacion.get("categoria")
-                # Organismo + fuente de origen (BID, AfDB, TED...): la fuente identifica
-                # al financiador cuando el campo `organismo` viene vacío o genérico.
-                organismo_licitacion = " ".join(filter(None, [licitacion.get("organismo"), licitacion.get("fuente_origen")]))
-                texto_licitacion = " ".join(filter(None, [
-                    licitacion.get("titulo"),
-                    licitacion.get("descripcion"),
-                    licitacion.get("descripcion_manual"),
-                    categoria_licitacion,
-                ]))
-                pais_licitacion = licitacion.get("pais")
-                licitacion_ia = _licitacion_para_ia(licitacion)
-
-                candidatas = list(coincidencias)  # las MISMAS empresas para los dos rankings (prueba A/B)
-
-                # Orden y nota: 60 puntos por palabras clave exactas + 40 por palabras clave claramente afines
-                # (ver ranking_coincidencias.py). Solo reordena la lista; los datos de cada empresa no cambian.
-                palabras_extra = _palabras_clave_para_ranking(supabase, coincidencias)
-                pares_afines = _pares_afines(
-                    encoder,
-                    texto_licitacion,
-                    licitacion.get("titulo") or "",
-                    textos_de_palabras_clave(coincidencias, idioma_de(texto_licitacion), palabras_extra),
-                )
-                coincidencias, detalle_ranking = ordenar_con_detalle(
-                    coincidencias,
-                    texto_licitacion,
-                    licitacion.get("titulo") or "",
-                    palabras_extra,
-                    pares_afines,
-                    _zonas_licitacion(licitacion),
-                )
-
-                # Una sola consulta por lote para el historial de referencias de
-                # TODAS las empresas candidatas (nunca N+1).
-                ids_empresa = [e["numero_interno"] for e in coincidencias if e.get("numero_interno")]
-                referencias_por_empresa = obtener_referencias_por_empresas(supabase, ids_empresa)
-
-                ctx = {
-                    "encoder": encoder, "texto_licitacion": texto_licitacion, "pais_licitacion": pais_licitacion,
-                    "categoria_licitacion": categoria_licitacion, "organismo_licitacion": organismo_licitacion,
-                    "referencias_por_empresa": referencias_por_empresa, "licitacion": licitacion,
-                    "licitacion_ia": licitacion_ia,
-                }
-                _render_resultados(
-                    candidatas, coincidencias, detalle_ranking, ctx, palabras_extra, encoder, licitacion,
-                )
+            st.session_state.pop("tab2_fase1", None)
+            try:
+                with st.spinner("Calculando el ranking por embeddings..."):
+                    st.session_state.tab2_fase1 = _fase1(encoder, licitacion)
+                st.session_state.tab2_rerank_pendiente = True
+            except (FileNotFoundError, ValueError, RuntimeError) as error:
+                st.error(str(error))
+        try:
+            _resultados(licitacion, encoder)
+        except (FileNotFoundError, ValueError, RuntimeError) as error:
+            st.error(str(error))

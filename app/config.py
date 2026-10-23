@@ -44,13 +44,20 @@ def _entero(clave: str, por_defecto: int) -> int:
         return por_defecto
 
 
+# Excel de empresas en Google Drive (los mismos secretos que usaba la sincronización anterior). Si faltan, la Pestaña 2 usa la
+# copia local EMPRESAS_XLSX. Hay que compartir el Excel con el email de la cuenta de servicio (permiso de lector).
+GOOGLE_SERVICE_ACCOUNT_JSON = _config("GOOGLE_SERVICE_ACCOUNT_JSON")   # JSON completo (texto) o tabla TOML en st.secrets
+GOOGLE_DRIVE_FILE_ID = _config("GOOGLE_DRIVE_FILE_ID")
+
+# Base de datos de empresas (única fuente de verdad de la Pestaña 2) y tamaño del ranking por embeddings.
+EMPRESAS_XLSX = _config("EMPRESAS_XLSX", "data/empresas.xlsx")   # ruta absoluta o relativa a la raíz del proyecto
+RANKING_TOP_N = _entero("RANKING_TOP_N", 15)                      # empresas que pasan de la fase 1 (embeddings) a la fase 2 (GPT)
+
 # Reranking con Groq (segunda fase de «Coincidencia Inteligente», app/reranking_groq.py).
 # Los límites del plan gratuito dependen del modelo y pueden cambiar: por eso son ajustables.
-GROQ_RERANK_MAX_EMPRESAS = _entero("GROQ_RERANK_MAX_EMPRESAS", 15)   # candidatas que se analizan (mejores de los rankings)
 GROQ_RERANK_TPM = _entero("GROQ_RERANK_TPM", 8000)                      # tokens/minuto del plan (entrada + salida de una petición)
 GROQ_RERANK_MAX_ENTRADA_TOKENS = _entero("GROQ_RERANK_MAX_ENTRADA_TOKENS", 4800)
 GROQ_RERANK_MAX_SALIDA_TOKENS = _entero("GROQ_RERANK_MAX_SALIDA_TOKENS", 3000)
-GROQ_RERANK_MIN_RECOMENDADA = _entero("GROQ_RERANK_MIN_RECOMENDADA", 50)  # puntuación mínima para "recomendada"
 GROQ_RERANK_TIMEOUT = _entero("GROQ_RERANK_TIMEOUT", 90)
 GROQ_RERANK_REASONING = _config("GROQ_RERANK_REASONING", "low")  # low | medium | high ("" = no enviar)
 
