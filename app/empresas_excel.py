@@ -144,6 +144,51 @@ def descargar_de_drive(file_id: str, credenciales) -> io.BytesIO:
     return io.BytesIO(contenido)
 
 
+def _coincide(clave: str, cabecera_norm: str) -> bool:
+    prefijo = CABECERAS[clave][0]
+    # la 1ª columna "EMPRESA" es el nombre; "SECTOR" exacto (no «DESCRIPCIÓN DEL SECTOR»)
+    return cabecera_norm == prefijo if clave in ("nombre_empresa", "sector") else cabecera_norm.startswith(prefijo)
+
+
+def _cabeceras_que_faltan(cabeceras) -> list:
+    normales = [_norm(h) for h in cabeceras]
+    return [CABECERAS[k][0].upper() for k, (_, req) in CABECERAS.items()
+            if req and not any(_coincide(k, h) for h in normales)]
+
+
+def empresa_desde_datos_excel(datos: dict, numero_interno: str) -> dict:
+    """
+    Empresa (con las claves internas que usa toda la app) a partir de {cabecera del Excel: valor}. Es el MISMO formato que
+    la sincronización guarda en la columna `datos_excel` de Supabase, así que sirve tanto para leer el Excel como para leer
+    la tabla `empresas`. Los campos que no vienen quedan en None (nunca se inventa nada).
+    """
+    normal = {_norm(h): v for h, v in reversed(list(datos.items()))}      # la 1ª aparición de cada cabecera gana
+    empresa = {}
+    for clave in CABECERAS:
+        empresa[clave] = next((limpiar(v) for h, v in normal.items() if _coincide(clave, h)), None)
+    empresa["nombre_empresa"] = " ".join((empresa["nombre_empresa"] or "").split()) or None
+    empresa["numero_interno"] = numero_interno
+    empresa["fila_excel"] = None
+    # Alias con los nombres de campo que ya usan los informes y la ficha (sin duplicar datos nuevos)
+    empresa["paises_interes"] = empresa["zona_geografica_interes"]
+    empresa["notas_libres"] = empresa["importes"]
+    empresa["observaciones_importantes"] = None
+    empresa["datos_excel"] = dict(datos)
+    return empresa
+
+
+def empresa_desde_supabase(fila: dict) -> dict:
+    """Fila de la tabla `empresas` -> empresa. Lee `datos_excel` (cabecera -> valor). ValueError si es de la estructura antigua."""
+    datos = fila.get("datos_excel")
+    if isinstance(datos, str):
+        datos = json.loads(datos)
+    datos = dict(datos or {})
+    if _cabeceras_que_faltan(datos):
+        raise ValueError(f"La empresa «{fila.get('nombre_empresa')}» en Supabase tiene la estructura antigua del Excel: "
+                         "ejecuta la sincronización de empresas (forzar) para cargar la nueva.")
+    return empresa_desde_datos_excel(datos, str(fila["numero_interno"]))
+
+
 def cargar_empresas(ruta=None, hoja: str = HOJA) -> list:
     """
     Lista de empresas (dict) del Excel. `ruta` puede ser una ruta, un Path o un archivo en memoria (BytesIO, p. ej. el
@@ -170,37 +215,30 @@ def cargar_empresas(ruta=None, hoja: str = HOJA) -> list:
                      if {"empresa", "sector"} <= {_norm(c) for c in f if c is not None}), None)
     if fila_cab is None:
         raise ValueError("No se encontró la fila de cabecera (con las columnas EMPRESA y SECTOR) en la hoja «%s»." % hoja)
-    cabecera = [_norm(c) for c in filas[fila_cab]]
-    columnas, faltan = {}, []
-    for clave, (prefijo, requerida) in CABECERAS.items():
-        # la 1ª columna "EMPRESA" es el nombre; "SECTOR" exacto (no «DESCRIPCIÓN DEL SECTOR»)
-        exacta = clave in ("nombre_empresa", "sector")
-        pos = next((i for i, h in enumerate(cabecera) if (h == prefijo if exacta else h.startswith(prefijo))), None)
-        if pos is None:
-            if requerida:
-                faltan.append(prefijo.upper())
-        else:
-            columnas[clave] = pos
+    # Cabeceras tal cual vienen en el Excel (las repetidas llevan « (2)», « (3)»...; las columnas sin cabecera se ignoran)
+    cabeceras, vistas = {}, {}
+    for i, c in enumerate(filas[fila_cab]):
+        texto = " ".join(str(c).split()) if c is not None else ""
+        if not texto:
+            continue
+        vistas[texto] = vistas.get(texto, 0) + 1
+        cabeceras[i] = texto if vistas[texto] == 1 else f"{texto} ({vistas[texto]})"
+    faltan = _cabeceras_que_faltan(cabeceras.values())
     if faltan:
         raise ValueError("Faltan columnas imprescindibles en el Excel de empresas: " + "; ".join(faltan))
 
     empresas, usados = [], set()
     for n, fila in enumerate(filas[fila_cab + 1:], start=fila_cab + 2):
-        valores = {k: limpiar(fila[i]) if i < len(fila) else None for k, i in columnas.items()}
-        nombre = valores.get("nombre_empresa")
+        datos = {h: limpiar(fila[i]) if i < len(fila) else None for i, h in cabeceras.items()}
+        nombre = next((v for h, v in datos.items() if _norm(h) == "empresa"), None)
         if not nombre:
             continue
-        nombre = " ".join(nombre.split())
         identificador = _slug(nombre)
         if identificador in usados:
             identificador = f"{identificador}-{n}"
         usados.add(identificador)
-        empresa = {k: valores.get(k) for k in CABECERAS}
-        empresa.update(nombre_empresa=nombre, numero_interno=identificador, fila_excel=n)
-        # Alias con los nombres de campo que ya usan los informes y la ficha (sin duplicar datos nuevos)
-        empresa["paises_interes"] = empresa["zona_geografica_interes"]
-        empresa["notas_libres"] = empresa["importes"]
-        empresa["observaciones_importantes"] = None
+        empresa = empresa_desde_datos_excel(datos, identificador)
+        empresa["fila_excel"] = n
         empresas.append(empresa)
     if not empresas:
         raise ValueError("El Excel de empresas no contiene ninguna empresa.")
