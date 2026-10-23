@@ -13,13 +13,15 @@ lógica de ingesta tampoco (ver VERSION_INGESTA) --, no hace nada.
 DOS FORMATOS DE EXCEL
 ---------------------
   - NUEVO (base de datos actual, única fuente de verdad): hoja «Hoja1» con una empresa por fila y las columnas localizadas
-    por el TEXTO de su cabecera (la lógica está en app/empresas_excel.py, la misma que usa la app). Solo alimenta la tabla
-    `empresas` (la que lee el Directorio); sus campos que no tienen columna propia en Supabase (zonas descartadas,
-    descripción del sector, palabras clave de referencias/bbdd/unificadas...) van a `datos_excel`. Este formato no trae
-    referencias ni pestañas auxiliares: `empresas_referencias` y `empresas_hojas_extra` no se tocan. El identificador
-    `numero_interno` se genera a partir del nombre de la empresa (el Excel no trae ID).
+    por el TEXTO de su cabecera (la lógica está en app/empresas_excel.py, la misma que usa la app). Alimenta la tabla
+    `empresas`: los campos que ya existían (nombre, sector, palabras clave, proyectos tipo, geografía...) en sus columnas, los
+    nuevos (descripcion_sector, especialidad_referencias, palabras_clave_referencias/_bbdd/_unificadas, zonas_descartadas) en
+    columnas creadas por sql/migracion_empresas_excel_nuevo.sql (EJECÚTALA ANTES; si falta, la sincronización se detiene sin
+    tocar nada), y la fila completa (cabecera real del Excel -> valor) en `datos_excel`: de ahí lee la app (pestaña 2) las
+    empresas y de ahí sale la ficha del Directorio. Este formato no trae referencias ni pestañas auxiliares:
+    `empresas_referencias` y `empresas_hojas_extra` no se tocan. `numero_interno` se genera a partir del nombre de la empresa
+    (el Excel no trae ID).
   - ANTIGUO: si el libro tiene la hoja «DOSSIER COMPLETO» se sigue el procedimiento de siempre, descrito a continuación.
-La app (pestaña 2) NO depende de esta sincronización: lee el Excel directamente de Drive.
 
 HOJAS DEL EXCEL ANTIGUO Y TABLAS DESTINO
 ----------------------------------------
@@ -491,10 +493,30 @@ def _es_formato_antiguo(buffer_excel: io.BytesIO) -> bool:
         buffer_excel.seek(0)
 
 
+# Columnas NUEVAS de `empresas` que crea sql/migracion_empresas_excel_nuevo.sql (clave de la tabla -> clave del lector)
+COLUMNAS_NUEVAS_EMPRESAS = (
+    "descripcion_sector", "especialidad_referencias", "palabras_clave_referencias",
+    "palabras_clave_bbdd", "palabras_clave_unificadas", "zonas_descartadas",
+)
+
+
+def comprobar_migracion_empresas(supabase):
+    """Si falta la migración SQL, se detiene ANTES de tocar nada con un mensaje que dice qué ejecutar."""
+    try:
+        supabase.table("empresas").select(", ".join(COLUMNAS_NUEVAS_EMPRESAS)).limit(1).execute()
+    except Exception as error:  # noqa: BLE001
+        raise RuntimeError(
+            "La tabla `empresas` de Supabase no tiene las columnas del Excel nuevo "
+            f"({', '.join(COLUMNAS_NUEVAS_EMPRESAS)}). Ejecuta sql/migracion_empresas_excel_nuevo.sql en el SQL Editor de "
+            f"Supabase y vuelve a lanzar la sincronización. No se ha modificado nada. Detalle: {error}"
+        ) from None
+
+
 def leer_empresas_nuevo(buffer_excel: io.BytesIO) -> list:
     """
     Excel NUEVO (hoja «Hoja1», columnas por cabecera) -> filas de la tabla `empresas`. Reutiliza el lector de la app
-    (app/empresas_excel.py) para que app y sincronización interpreten el Excel exactamente igual.
+    (app/empresas_excel.py) para que app y sincronización interpreten el Excel exactamente igual. `datos_excel` guarda la fila
+    completa (cabecera real del Excel -> valor): de ahí lee la app las empresas y de ahí sale la ficha del Directorio.
     """
     from pathlib import Path
     import sys
@@ -520,9 +542,10 @@ def leer_empresas_nuevo(buffer_excel: io.BytesIO) -> list:
             "notas_libres": f["importes"], "contacto_nombre": None, "contacto_cargo": None, "contacto_email": None,
             "palabras_clave_en": [], "palabras_clave_fr": [], "palabras_clave_pt": [],
             "observaciones_importantes": None,
-            # todo lo que el Excel trae y `empresas` no tiene como columna (incluidas las zonas descartadas)
-            "datos_excel": {k: v for k, v in f.items() if k not in ("numero_interno",) and v is not None},
+            "datos_excel": f["datos_excel"],
         }
+        for campo in COLUMNAS_NUEVAS_EMPRESAS:
+            empresa[campo] = f[campo]
         for campo in CAMPOS_EMPRESA_SIN_ORIGEN:
             empresa[campo] = None
         empresas.append(empresa)
@@ -1114,6 +1137,8 @@ def ejecutar_sincronizacion():
     buffer_excel = descargar_excel(servicio_drive, file_id, metadata.get("mimeType", ""))
 
     # ---- 1) LEER todo antes de tocar Supabase: si el Excel no se puede leer, la base queda intacta ----
+    if not _es_formato_antiguo(buffer_excel):
+        comprobar_migracion_empresas(supabase)
     empresas = leer_empresas(buffer_excel)
     formato_antiguo = _es_formato_antiguo(buffer_excel)
     print(f"Formato del Excel: {'antiguo (DOSSIER COMPLETO)' if formato_antiguo else 'nuevo (Hoja1)'}", flush=True)
