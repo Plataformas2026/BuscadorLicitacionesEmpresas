@@ -2,29 +2,16 @@
 """
 sync_empresas_drive.py
 --------------------------
-Sincroniza el Excel de empresas (BBDD_Empresas_YYMMDD.xlsx o como se
-llame en cada momento) almacenado en Google Drive contra Supabase.
+Sincroniza el Excel BBDD_Empresas.xlsx (el «dossier» de empresas y sus referencias; tiene
+SU PROPIA sincronización, separada de Palabras_clave.xlsx y de Seguimiento_Empresas.xlsx: ver ingest/archivos_drive.py) almacenado en Google Drive contra Supabase.
 Pensado para ejecutarse periódicamente (ver
 .github/workflows/sincronizar_empresas_drive.yml): en cada ejecución
 comprueba la fecha de modificación del fichero en Drive contra la última
 que tenemos guardada (tabla `sync_estado`); si no ha cambiado -- y la
 lógica de ingesta tampoco (ver VERSION_INGESTA) --, no hace nada.
 
-DOS FORMATOS DE EXCEL
----------------------
-  - NUEVO (base de datos actual, única fuente de verdad): hoja «Hoja1» con una empresa por fila y las columnas localizadas
-    por el TEXTO de su cabecera (la lógica está en app/empresas_excel.py, la misma que usa la app). Alimenta la tabla
-    `empresas`: los campos que ya existían (nombre, sector, palabras clave, proyectos tipo, geografía...) en sus columnas, los
-    nuevos (descripcion_sector, especialidad_referencias, palabras_clave_referencias/_bbdd/_unificadas, zonas_descartadas) en
-    columnas creadas por sql/migracion_empresas_excel_nuevo.sql (EJECÚTALA ANTES; si falta, la sincronización se detiene sin
-    tocar nada), y la fila completa (cabecera real del Excel -> valor) en `datos_excel`: de ahí lee la app (pestaña 2) las
-    empresas y de ahí sale la ficha del Directorio. Este formato no trae referencias ni pestañas auxiliares:
-    `empresas_referencias` y `empresas_hojas_extra` no se tocan. `numero_interno` se genera a partir del nombre de la empresa
-    (el Excel no trae ID).
-  - ANTIGUO: si el libro tiene la hoja «DOSSIER COMPLETO» se sigue el procedimiento de siempre, descrito a continuación.
-
-HOJAS DEL EXCEL ANTIGUO Y TABLAS DESTINO
-----------------------------------------
+HOJAS DEL EXCEL Y TABLAS DESTINO
+-----------------------------------
 - "DOSSIER COMPLETO"          -> tabla `empresas`. Solo se extraen las
                                 columnas indicadas por LETRA en
                                 COLUMNAS_DOSSIER (A, C, D, G, H, I, J, K,
@@ -96,6 +83,7 @@ import numpy as np
 import openpyxl
 import pandas as pd
 
+from archivos_drive import FILE_ID_BBDD_EMPRESAS, file_id_de
 from common import (
     generar_embedding,
     obtener_cliente_supabase,
@@ -108,7 +96,7 @@ CLAVE_VERSION_INGESTA = "empresas_ingesta_version"
 # Súbela cada vez que cambie la LÓGICA de ingesta (columnas extraídas, texto de
 # los embeddings, tablas destino): fuerza una resincronización completa aunque
 # el Excel de Drive no haya cambiado.
-VERSION_INGESTA = "2026-10-23.v4-excel-nuevo"
+VERSION_INGESTA = "2026-10-26.v4"   # v4: se retira el soporte del Excel de palabras clave (ahora tiene su propia sincronización)
 TAMANO_LOTE_SUPABASE = 20
 TAMANO_LOTE_INSERCION = 200
 
@@ -484,77 +472,7 @@ def _validar_cabeceras_ancla(df: pd.DataFrame):
         )
 
 
-def _es_formato_antiguo(buffer_excel: io.BytesIO) -> bool:
-    libro = openpyxl.load_workbook(buffer_excel, read_only=True)
-    try:
-        return HOJA_EMPRESAS in libro.sheetnames
-    finally:
-        libro.close()
-        buffer_excel.seek(0)
-
-
-# Columnas NUEVAS de `empresas` que crea sql/migracion_empresas_excel_nuevo.sql (clave de la tabla -> clave del lector)
-COLUMNAS_NUEVAS_EMPRESAS = (
-    "descripcion_sector", "especialidad_referencias", "palabras_clave_referencias",
-    "palabras_clave_bbdd", "palabras_clave_unificadas", "zonas_descartadas",
-)
-
-
-def comprobar_migracion_empresas(supabase):
-    """Si falta la migración SQL, se detiene ANTES de tocar nada con un mensaje que dice qué ejecutar."""
-    try:
-        supabase.table("empresas").select(", ".join(COLUMNAS_NUEVAS_EMPRESAS)).limit(1).execute()
-    except Exception as error:  # noqa: BLE001
-        raise RuntimeError(
-            "La tabla `empresas` de Supabase no tiene las columnas del Excel nuevo "
-            f"({', '.join(COLUMNAS_NUEVAS_EMPRESAS)}). Ejecuta sql/migracion_empresas_excel_nuevo.sql en el SQL Editor de "
-            f"Supabase y vuelve a lanzar la sincronización. No se ha modificado nada. Detalle: {error}"
-        ) from None
-
-
-def leer_empresas_nuevo(buffer_excel: io.BytesIO) -> list:
-    """
-    Excel NUEVO (hoja «Hoja1», columnas por cabecera) -> filas de la tabla `empresas`. Reutiliza el lector de la app
-    (app/empresas_excel.py) para que app y sincronización interpreten el Excel exactamente igual. `datos_excel` guarda la fila
-    completa (cabecera real del Excel -> valor): de ahí lee la app las empresas y de ahí sale la ficha del Directorio.
-    """
-    from pathlib import Path
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
-    from empresas_excel import cargar_empresas
-
-    filas = cargar_empresas(buffer_excel)
-    buffer_excel.seek(0)
-    empresas = []
-    for f in filas:
-        empresa = {
-            "numero_interno": f["numero_interno"], "nombre_empresa": f["nombre_empresa"], "sector": f["sector"],
-            "subsector": None, "cif": None, "cnae": None, "web": None,
-            "descripcion_actividad": f["descripcion_actividad"],
-            "palabras_clave": _dividir_lista(f["palabras_clave"]),
-            "proyectos_tipo": _dividir_lista(f["proyectos_tipo"]),
-            "experiencia_paises": _dividir_lista(f["experiencia_paises"], respetar_parentesis=True),
-            "zona_geografica_interes": _dividir_lista(f["zona_geografica_interes"], respetar_parentesis=True),
-            "paises_interes": [],
-            "tamano": f["tamano"], "certificaciones": f["certificaciones"], "facturacion_anual": f["facturacion_anual"],
-            "clientes_principales": f["clientes_principales"], "ambito_geografico": f["ambito_geografico"],
-            "notas_libres": f["importes"], "contacto_nombre": None, "contacto_cargo": None, "contacto_email": None,
-            "palabras_clave_en": [], "palabras_clave_fr": [], "palabras_clave_pt": [],
-            "observaciones_importantes": None,
-            "datos_excel": f["datos_excel"],
-        }
-        for campo in COLUMNAS_NUEVAS_EMPRESAS:
-            empresa[campo] = f[campo]
-        for campo in CAMPOS_EMPRESA_SIN_ORIGEN:
-            empresa[campo] = None
-        empresas.append(empresa)
-    return empresas
-
-
 def leer_empresas(buffer_excel: io.BytesIO) -> list:
-    if not _es_formato_antiguo(buffer_excel):
-        return leer_empresas_nuevo(buffer_excel)
     # Columnas ocultas: NO se excluyen aquí (la selección es por letra, y quitar
     # columnas desplazaría las posiciones). Las filas ocultas sí se ignoran, como antes.
     df = _leer_hoja(
@@ -1106,9 +1024,9 @@ def ejecutar_sincronizacion():
     print("SINCRONIZACIÓN DE EMPRESAS — Google Drive -> Supabase", flush=True)
     print("=" * 100, flush=True)
 
-    file_id = os.environ.get("GOOGLE_DRIVE_FILE_ID")
+    file_id = file_id_de("GOOGLE_DRIVE_FILE_ID", FILE_ID_BBDD_EMPRESAS)
     if not file_id:
-        raise RuntimeError("Falta la variable de entorno GOOGLE_DRIVE_FILE_ID.")
+        raise RuntimeError("Falta el File ID de BBDD_Empresas.xlsx: define GOOGLE_DRIVE_FILE_ID o FILE_ID_BBDD_EMPRESAS (ingest/archivos_drive.py).")
 
     supabase = obtener_cliente_supabase()
     servicio_drive = obtener_servicio_drive()
@@ -1137,12 +1055,8 @@ def ejecutar_sincronizacion():
     buffer_excel = descargar_excel(servicio_drive, file_id, metadata.get("mimeType", ""))
 
     # ---- 1) LEER todo antes de tocar Supabase: si el Excel no se puede leer, la base queda intacta ----
-    if not _es_formato_antiguo(buffer_excel):
-        comprobar_migracion_empresas(supabase)
     empresas = leer_empresas(buffer_excel)
-    formato_antiguo = _es_formato_antiguo(buffer_excel)
-    print(f"Formato del Excel: {'antiguo (DOSSIER COMPLETO)' if formato_antiguo else 'nuevo (Hoja1)'}", flush=True)
-    print(f"Empresas leídas: {len(empresas)}", flush=True)
+    print(f"Empresas leídas de '{HOJA_EMPRESAS}': {len(empresas)}", flush=True)
     if not empresas:
         raise RuntimeError("No se ha podido leer ninguna empresa del Excel. Se aborta sin tocar Supabase.")
 
@@ -1151,23 +1065,18 @@ def ejecutar_sincronizacion():
         for e in empresas if e.get("nombre_empresa")
     }
 
-    referencias, hojas_extra = [], []
-    if formato_antiguo:
-        referencias = leer_referencias(buffer_excel, indice_nombres, HOJA_REFERENCIAS, FILA_CABECERA_REFERENCIAS)
-        print(f"Referencias leídas de '{HOJA_REFERENCIAS}': {len(referencias)}", flush=True)
-        referencias_hms = leer_referencias(buffer_excel, indice_nombres, HOJA_HMS, FILA_CABECERA_HMS)
-        print(f"Referencias leídas de '{HOJA_HMS}': {len(referencias_hms)}", flush=True)
-        referencias += referencias_hms
+    referencias = leer_referencias(buffer_excel, indice_nombres, HOJA_REFERENCIAS, FILA_CABECERA_REFERENCIAS)
+    print(f"Referencias leídas de '{HOJA_REFERENCIAS}': {len(referencias)}", flush=True)
+    referencias_hms = leer_referencias(buffer_excel, indice_nombres, HOJA_HMS, FILA_CABECERA_HMS)
+    print(f"Referencias leídas de '{HOJA_HMS}': {len(referencias_hms)}", flush=True)
+    referencias += referencias_hms
 
-        titulos_principales = {
-            _normalizar_nombre_empresa(r["titulo"]) for r in referencias if r.get("titulo")
-        }
-        print("Leyendo el resto de pestañas (todas sus columnas)...", flush=True)
-        hojas_extra = leer_hojas_extra(buffer_excel, indice_nombres, titulos_principales)
-        print(f"Filas leídas del resto de pestañas: {len(hojas_extra)}", flush=True)
-    else:
-        print("Excel nuevo: no contiene referencias ni pestañas auxiliares; 'empresas_referencias' y "
-              "'empresas_hojas_extra' no se modifican.", flush=True)
+    titulos_principales = {
+        _normalizar_nombre_empresa(r["titulo"]) for r in referencias if r.get("titulo")
+    }
+    print("Leyendo el resto de pestañas (todas sus columnas)...", flush=True)
+    hojas_extra = leer_hojas_extra(buffer_excel, indice_nombres, titulos_principales)
+    print(f"Filas leídas del resto de pestañas: {len(hojas_extra)}", flush=True)
 
     # ---- 2) Embeddings ----
     print("Generando embeddings (español siempre; en/fr/pt solo si hay palabras clave propias)...", flush=True)
