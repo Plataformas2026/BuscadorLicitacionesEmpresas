@@ -44,13 +44,8 @@ def _entero(clave: str, por_defecto: int) -> int:
         return por_defecto
 
 
-# Excel de empresas en Google Drive (los mismos secretos que usaba la sincronización anterior). Si faltan, la Pestaña 2 usa la
-# copia local EMPRESAS_XLSX. Hay que compartir el Excel con el email de la cuenta de servicio (permiso de lector).
-GOOGLE_SERVICE_ACCOUNT_JSON = _config("GOOGLE_SERVICE_ACCOUNT_JSON")   # JSON completo (texto) o tabla TOML en st.secrets
-GOOGLE_DRIVE_FILE_ID = _config("GOOGLE_DRIVE_FILE_ID")
-
-# Base de datos de empresas (única fuente de verdad de la Pestaña 2) y tamaño del ranking por embeddings.
-EMPRESAS_XLSX = _config("EMPRESAS_XLSX", "data/empresas.xlsx")   # ruta absoluta o relativa a la raíz del proyecto
+# Coincidencia Inteligente (app/matching.py): empresas = tabla `empresas_palabras_clave` (Palabras_clave.xlsx, vía workflow).
+# Nº de empresas que pasan del ranking por embeddings (fase 1) a la reordenación con GPT (fase 2).
 RANKING_TOP_N = _entero("RANKING_TOP_N", 15)                      # empresas que pasan de la fase 1 (embeddings) a la fase 2 (GPT)
 
 # Reranking con Groq (segunda fase de «Coincidencia Inteligente», app/reranking_groq.py).

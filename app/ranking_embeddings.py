@@ -32,7 +32,7 @@ import unicodedata
 
 import numpy as np
 
-from empresas_excel import a_linea, trocear
+from palabras_clave_datos import a_linea, trocear
 
 PREFIJO = "passage"
 CAMPOS_EMBEDDING = ("nombre_empresa", "sector", "palabras_clave", "proyectos_tipo")

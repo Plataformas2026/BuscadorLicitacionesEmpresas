@@ -2,7 +2,7 @@
 matching.py
 -----------
 Pestaña 2 (Coincidencia Inteligente: Licitación -> Empresas), sobre la base de datos de empresas del Excel
-(Google Drive -> sincronización -> tabla `empresas` de Supabase; si Supabase aún no tiene la estructura nueva, se lee el Excel directamente de Drive o la copia local; ver empresas_excel.py), que es la única fuente de verdad.
+(Palabras_clave.xlsx en Google Drive -> workflow «Sincronizar palabras clave» -> tabla `empresas_palabras_clave` de Supabase; ver palabras_clave_datos.py), que es la única fuente de empresas de esta pestaña. No usa `empresas` (BBDD_Empresas.xlsx) ni `licitaciones_informadas`.
 
 Flujo al pulsar «Buscar» (dos fases separadas e independientes):
   FASE 1 (ranking_embeddings.py): UN solo ranking por embeddings. La similitud usa EXCLUSIVAMENTE nombre de la empresa,
@@ -19,17 +19,16 @@ La búsqueda de la licitación (por enlace, código o texto) sigue usando Supaba
 import hashlib
 import json
 import re
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 from sentence_transformers import SentenceTransformer
 from supabase import Client
 
+import palabras_clave_datos
 import ranking_embeddings
 import reranking_groq
-from config import EMPRESAS_XLSX, GOOGLE_DRIVE_FILE_ID, GOOGLE_SERVICE_ACCOUNT_JSON, RANKING_TOP_N
-from empresas_excel import cargar_empresas, descargar_de_drive, empresa_desde_supabase, fecha_modificacion_drive, ruta_por_defecto
+from config import RANKING_TOP_N
 from search import buscar_semantica
 
 PATRON_URL = re.compile(r"^https?://", re.IGNORECASE)
@@ -112,97 +111,24 @@ def localizar_licitacion(supabase: Client, encoder: SentenceTransformer, entrada
 
 
 # ------------------------------------------------------------------
-# Empresas (Excel) e índice de embeddings
+# Empresas (tabla empresas_palabras_clave <- Palabras_clave.xlsx) e índice de embeddings
 # ------------------------------------------------------------------
-def _credenciales_drive():
-    """El JSON de la cuenta de servicio como texto (los secretos de Streamlit pueden entregarlo como tabla TOML)."""
-    valor = GOOGLE_SERVICE_ACCOUNT_JSON
-    if not valor:
-        return None
-    return json.dumps(dict(valor)) if hasattr(valor, "keys") else str(valor)
-
-
-@st.cache_resource(show_spinner="Cargando la base de datos de empresas...")
-def _cargar_base(origen: str, marca: str, _encoder):
-    """
-    (empresas, índice de embeddings). `origen` + `marca` son la clave de caché: el ID del Excel en Drive y su fecha de
-    modificación (o la ruta local y su fecha), de modo que se vuelve a descargar y a calcular solo cuando el Excel cambia.
-    """
-    if origen.startswith("drive:"):
-        archivo = descargar_de_drive(origen[6:], _credenciales_drive())
-    else:
-        archivo = Path(origen)
-    empresas = cargar_empresas(archivo)
-    return empresas, ranking_embeddings.construir_indice(_encoder, empresas)
-
-
 @st.cache_data(ttl=300, show_spinner=False)
-def _marca_drive(file_id: str) -> str:
-    return fecha_modificacion_drive(file_id, _credenciales_drive())
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _filas_supabase(_supabase: Client) -> list:
-    """Tabla `empresas` (cargada desde el Excel de Drive por la sincronización): id, nombre y la fila completa del Excel."""
-    filas, inicio = [], 0
-    while True:
-        lote = (_supabase.table("empresas").select("numero_interno, nombre_empresa, datos_excel")
-                .order("numero_interno").range(inicio, inicio + 999).execute().data or [])
-        filas.extend(lote)
-        if len(lote) < 1000:
-            return filas
-        inicio += 1000
+def _empresas_cacheadas(_supabase: Client) -> list:
+    """Lee la tabla (como mucho cada 5 min): así una actualización del Excel se refleja sola tras la sincronización."""
+    return palabras_clave_datos.cargar_empresas(_supabase)
 
 
 @st.cache_resource(show_spinner="Calculando los embeddings de las empresas...")
-def _indice_supabase(huella: str, _empresas: list, _encoder):
+def _indice(huella: str, _empresas: list, _encoder):
     return ranking_embeddings.construir_indice(_encoder, _empresas)
 
 
 def _base_empresas(supabase, encoder):
-    """
-    (empresas, índice de embeddings). Fuente principal: la tabla `empresas` de Supabase, que la sincronización llena desde el
-    Excel de Google Drive. Si Supabase aún no tiene la estructura nueva (hay que lanzar la sincronización) se lee el Excel
-    directamente de Drive (o la copia local) y se avisa en pantalla. Origen usado: st.session_state["tab2_origen_empresas"].
-    """
-    aviso = None
-    try:
-        filas = _filas_supabase(supabase)
-        empresas = [empresa_desde_supabase(f) for f in filas]
-        if not empresas:
-            raise ValueError("La tabla `empresas` de Supabase está vacía.")
-        huella = hashlib.sha1(json.dumps([(f["numero_interno"], f["datos_excel"]) for f in filas],
-                                         sort_keys=True, default=str).encode()).hexdigest()
-        st.session_state["tab2_origen_empresas"] = (f"Supabase (sincronizada desde el Excel de Drive): {len(empresas)} empresas", None)
-        return empresas, _indice_supabase(huella, empresas, encoder)
-    except Exception as error:  # noqa: BLE001 - Supabase caído o con la estructura antigua: se intenta el Excel directo
-        aviso = (f"No se pudieron leer las empresas de Supabase ({type(error).__name__}: {error}). Se lee el Excel "
-                 "directamente; lanza la sincronización de empresas (GitHub Actions) para cargarlas en Supabase.")
-    empresas, indice = _base_excel(encoder)
-    st.session_state["tab2_origen_empresas"] = (f"Excel leído directamente (Drive o copia local): {len(empresas)} empresas", aviso)
-    return empresas, indice
-
-
-def _base_excel(encoder):
-    """Lectura directa del Excel: Google Drive (se detecta si ha cambiado, cada 5 min) o, si no está configurado, la copia local."""
-    if GOOGLE_DRIVE_FILE_ID and GOOGLE_SERVICE_ACCOUNT_JSON:
-        try:
-            return _cargar_base("drive:" + GOOGLE_DRIVE_FILE_ID, _marca_drive(GOOGLE_DRIVE_FILE_ID), encoder)
-        except (FileNotFoundError, ValueError):
-            raise
-        except Exception as error:  # noqa: BLE001 - red, permisos, clave mal formada...
-            raise RuntimeError(
-                "No se pudo leer el Excel de empresas desde Google Drive "
-                f"({type(error).__name__}). Comprueba que el archivo está compartido con la cuenta de servicio y que "
-                "GOOGLE_DRIVE_FILE_ID y GOOGLE_SERVICE_ACCOUNT_JSON son correctos."
-            ) from None
-    ruta = ruta_por_defecto(EMPRESAS_XLSX)
-    if not ruta.exists():
-        raise FileNotFoundError(
-            "No hay Excel de empresas: configura GOOGLE_DRIVE_FILE_ID y GOOGLE_SERVICE_ACCOUNT_JSON (Google Drive) "
-            f"o copia la base de datos a «{ruta}»."
-        )
-    return _cargar_base(str(ruta), str(ruta.stat().st_mtime), encoder)
+    """(empresas, índice de embeddings). El índice se recalcula solo cuando cambian los datos (huella del contenido)."""
+    empresas = _empresas_cacheadas(supabase)
+    huella = hashlib.sha1(json.dumps([[e["clave_empresa"], e["fecha_actualizacion"]] for e in empresas]).encode()).hexdigest()
+    return empresas, _indice(huella, empresas, encoder)
 
 
 # ------------------------------------------------------------------
@@ -377,12 +303,8 @@ def _resultados(supabase, licitacion, encoder):
     rr = st.session_state.get("tab2_rerank")
     res = rr["res"] if rr and rr["firma"] == fase1["firma"] else None
 
-    origen, aviso_origen = st.session_state.get("tab2_origen_empresas", (None, None))
-    if aviso_origen:
-        st.warning(aviso_origen)
     st.success(f"Fase 1: {len(fase1['filas'])} empresas más parecidas de {fase1['total_empresas']} en la base de datos.")
-    if origen:
-        st.caption("Origen de las empresas: " + origen)
+    st.caption("Origen de las empresas: Palabras_clave.xlsx (tabla `empresas_palabras_clave` de Supabase).")
     _seccion_gpt(licitacion, fase1, res, por_id, filas_por_id, encoder)
     st.divider()
     _seccion_embeddings(fase1, res, por_id)
@@ -468,9 +390,9 @@ def render_tab2(supabase: Client, encoder: SentenceTransformer):
                 with st.spinner("Calculando el ranking por embeddings..."):
                     st.session_state.tab2_fase1 = _fase1(supabase, encoder, licitacion)
                 st.session_state.tab2_rerank_pendiente = True
-            except (FileNotFoundError, ValueError, RuntimeError) as error:
+            except ValueError as error:
                 st.error(str(error))
         try:
             _resultados(supabase, licitacion, encoder)
-        except (FileNotFoundError, ValueError, RuntimeError) as error:
+        except ValueError as error:
             st.error(str(error))
