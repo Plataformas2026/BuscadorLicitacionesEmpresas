@@ -193,7 +193,7 @@ def _informe(clave: str, licitacion: dict, empresa: dict, fila: dict, evaluacion
 
 
 def _seccion_gpt(licitacion, fase1, res, por_id, filas_por_id, encoder):
-    st.markdown("### 🤖 Empresas recomendadas (ordenadas por GPT)")
+    st.markdown("### Empresas recomendadas (ordenadas por GPT)")
     if res is None:
         return
     if not res["ok"]:
@@ -206,10 +206,10 @@ def _seccion_gpt(licitacion, fase1, res, por_id, filas_por_id, encoder):
             st.rerun()
         st.info("El ranking por embeddings (más abajo) sigue siendo válido.")
         return
-    st.caption(
-        f"Puntuación = adecuación técnica (actividad y proyectos tipo) + una ventaja geográfica mínima (máx. {reranking_groq.BONUS_GEO_MAXIMO}). "
-        f"Modelo: {res['modelo']}."
-    )
+    #st.caption(
+     #   f"Puntuación = adecuación técnica (actividad y proyectos tipo) + una ventaja geográfica mínima (máx. {reranking_groq.BONUS_GEO_MAXIMO}). "
+      #  f"Modelo: {res['modelo']}."
+    #)
     for aviso in res["avisos"]:
         st.warning(aviso)
     if not res["ranking"]:
@@ -303,8 +303,8 @@ def _resultados(supabase, licitacion, encoder):
     rr = st.session_state.get("tab2_rerank")
     res = rr["res"] if rr and rr["firma"] == fase1["firma"] else None
 
-    st.success(f"Fase 1: {len(fase1['filas'])} empresas más parecidas de {fase1['total_empresas']} en la base de datos.")
-    st.caption("Origen de las empresas: Palabras_clave.xlsx (tabla `empresas_palabras_clave` de Supabase).")
+    # st.success(f"Fase 1: {len(fase1['filas'])} empresas más parecidas de {fase1['total_empresas']} en la base de datos.")
+    # st.caption("Origen de las empresas: Palabras_clave.xlsx (tabla `empresas_palabras_clave` de Supabase).")
     _seccion_gpt(licitacion, fase1, res, por_id, filas_por_id, encoder)
     st.divider()
     _seccion_embeddings(fase1, res, por_id)
