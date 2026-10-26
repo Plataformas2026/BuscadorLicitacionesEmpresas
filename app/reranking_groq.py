@@ -607,9 +607,9 @@ def reordenar(licitacion: dict, empresas: list, cliente=None, dormir=time.sleep,
                 f"Las {len(empresas)} empresas no caben en una sola petición ni con el mínimo detalle (≈{entrada} tokens de entrada; "
                 f"el presupuesto es {limite}). No se ha recortado ninguna empresa. Sube GROQ_RERANK_MAX_ENTRADA_TOKENS (y "
                 "GROQ_RERANK_TPM si tu plan lo permite).")
-        if res["nivel_detalle"] > 0:
-            res["avisos"].append(f"Para que las {len(empresas)} empresas cupieran en una petición se acortaron los textos de sus campos "
-                                 f"(nivel de detalle {res['nivel_detalle'] + 1} de {len(NIVELES_DETALLE)}); el número de empresas no se ha reducido.")
+        #if res["nivel_detalle"] > 0:
+        #    res["avisos"].append(f"Para que las {len(empresas)} empresas cupieran en una petición se acortaron los textos de sus campos "
+        #                         f"(nivel de detalle {res['nivel_detalle'] + 1} de {len(NIVELES_DETALLE)}); el número de empresas no se ha reducido.")
 
         respuesta = llamar_groq(mensajes, cfg, cfg["max_salida"], cliente, dormir, json_estricto=True)
         res["llamadas"] = 1
