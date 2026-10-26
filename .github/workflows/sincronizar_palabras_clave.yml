@@ -1,0 +1,53 @@
+name: Sincronizar palabras clave (Google Drive)
+
+on:
+  schedule:
+    # Una vez al día (01:30 UTC). El script solo carga datos si el Excel ha
+    # cambiado en Drive desde la última vez (o si cambió su lógica); si no, la
+    # ejecución dura unos segundos.
+    - cron: '30 1 * * *'
+  workflow_dispatch:   # sincronización inmediata a mano (pestaña Actions > Run workflow)
+    inputs:
+      forzar:
+        description: 'Forzar resincronización completa aunque el Excel no haya cambiado'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Nunca dos sincronizaciones a la vez: dos ejecuciones simultáneas escribirían la misma tabla.
+concurrency:
+  group: sincronizar-palabras-clave
+  cancel-in-progress: false
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Solo lo imprescindible (no hace falta el modelo de embeddings ni el resto de requirements.txt).
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install supabase openpyxl google-api-python-client google-auth
+
+      - name: Ejecutar sincronización de palabras clave
+        working-directory: ingest
+        env:
+          PYTHONUNBUFFERED: "1"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_DRIVE_FILE_ID_PALABRAS_CLAVE: ${{ secrets.GOOGLE_DRIVE_FILE_ID_PALABRAS_CLAVE }}
+          FORZAR_SINCRONIZACION: ${{ github.event.inputs.forzar }}
+        run: python sync_palabras_clave_drive.py
