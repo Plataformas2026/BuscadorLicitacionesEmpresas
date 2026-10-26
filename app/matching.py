@@ -193,7 +193,7 @@ def _informe(clave: str, licitacion: dict, empresa: dict, fila: dict, evaluacion
 
 
 def _seccion_gpt(licitacion, fase1, res, por_id, filas_por_id, encoder):
-    st.markdown("### Empresas recomendadas (ordenadas por GPT)")
+    st.markdown("### Empresas recomendadas")
     if res is None:
         return
     if not res["ok"]:
