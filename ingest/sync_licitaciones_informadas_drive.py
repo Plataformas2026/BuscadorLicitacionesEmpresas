@@ -273,7 +273,9 @@ def ejecutar_sincronizacion():
     print("SINCRONIZACIÓN DE LICITACIONES INFORMADAS — Google Drive -> Supabase", flush=True)
     print("=" * 100, flush=True)
 
-    file_id = os.environ.get("GOOGLE_DRIVE_FILE_ID_INFORMADAS")
+    from archivos_drive import FILE_ID_SEGUIMIENTO_EMPRESAS, file_id_de
+
+    file_id = file_id_de("GOOGLE_DRIVE_FILE_ID_INFORMADAS", FILE_ID_SEGUIMIENTO_EMPRESAS)
     if not file_id:
         raise RuntimeError("Falta la variable de entorno GOOGLE_DRIVE_FILE_ID_INFORMADAS.")
 
