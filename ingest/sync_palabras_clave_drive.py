@@ -16,22 +16,33 @@ Si CUALQUIER carga falla, termina con error y no guarda el estado: la siguiente 
 
 QUÉ LEE
 -------
-Hoja «Hoja1» (las hojas ocultas «Hoja2» y «Hoja3» se ignoran), una empresa por fila. La fila de cabecera se busca en las
+Hoja «DOSSIER» (formato actual; si el libro aún tuviera la antigua «Hoja1» se usa esa; las demás hojas se ignoran), una empresa por fila. La fila de cabecera se busca en las
 primeras filas (la que tiene EMPRESA y SECTOR) y las columnas se localizan por el TEXTO de su cabecera, no por su letra:
 añadir o mover columnas no rompe nada; si falta una columna imprescindible (EMPRESA, SECTOR, palabras clave extraídas de la
 descripción, PRINCIPALES PROYECTOS TIPO) se detiene SIN tocar Supabase. Hay dos columnas llamadas «EMPRESA»: la primera es el
 nombre; la segunda (un texto largo) solo se conserva en `datos_excel`.
 
+CABECERAS DEL EXCEL ACTUAL («DOSSIER») Y SU EQUIVALENCIA CON EL FORMATO ANTERIOR
+  PALABRAS CLAVE                         = «palabras clave extraidas de LA DESCRIPCIÓN...»   -> palabras_clave
+  DESCRIPCIÓN BREVE DE LA ACTIVIDAD      = «DESCRIPCIÓN BREVE DE LA ACTIVIDAD QUE DESARROLLA...» -> descripcion_actividad
+  OFICINAS O SOCIOS TERCEROS PAÍSES      = «ÁMBITO GEOGRÁFICO DE OPERACIÓN...»              -> ambito_geografico
+  importe mínimo / máximo para proyectos = «importe mínimo / máximo»                         -> importes
+  Sin cambios: EMPRESA, SECTOR, DESCRIPCIÓN DEL SECTOR, PRINCIPALES PROYECTOS TIPO, EXPERIENCIA PAÍSES, ZONA GEOGRÁFICA y PAÍSES DE
+  INTERÉS, ZONAS Y PAISES DESCARTADOS, TAMAÑO, CERTIFICACIONES, FACTURACIÓN ANUAL, CLIENTES PRINCIPALES.
+  Ya no existen (quedan a NULL): ESPECIALIDAD EXTRAIDA DE LAS REFERENCIAS y las palabras clave de referencias / de la bbdd / unificadas.
+  Nuevas (EP CLÚSTER, Nº consecutivo, Observaciones, CIF, CNAE, WEB): no tienen columna en la tabla; solo viajan en `datos_excel`.
+Se siguen aceptando también las cabeceras del formato anterior.
+
 CABECERA DEL EXCEL                                       -> COLUMNA DE `empresas_palabras_clave`
   EMPRESA (1ª)                                           -> nombre_empresa          [campo 1 del ranking por embeddings]
   SECTOR                                                 -> sector                  [campo 2]
-  palabras clave extraidas de LA DESCRIPCIÓN...          -> palabras_clave          [campo 3]
+  PALABRAS CLAVE (antes: palabras clave extraidas de LA DESCRIPCIÓN...) -> palabras_clave [campo 3]
   PRINCIPALES PROYECTOS TIPO                             -> proyectos_tipo          [campo 4]
   DESCRIPCIÓN DEL SECTOR / ESPECIALIDAD EXTRAIDA DE LAS REFERENCIAS / DESCRIPCIÓN BREVE DE LA ACTIVIDAD ->
                                                             descripcion_sector / especialidad_referencias / descripcion_actividad
   PALABRAS CLAVE DE LAS REFERENCIAS / DE LA BBDD / palabras clave unificadas ->
                                                             palabras_clave_referencias / palabras_clave_bbdd / palabras_clave_unificadas
-  EXPERIENCIA PAÍSES / ZONA GEOGRÁFICA y PAÍSES DE INTERÉS / ZONAS Y PAISES DESCARTADOS / ÁMBITO GEOGRÁFICO DE OPERACIÓN ->
+  EXPERIENCIA PAÍSES / ZONA GEOGRÁFICA y PAÍSES DE INTERÉS / ZONAS Y PAISES DESCARTADOS / OFICINAS O SOCIOS TERCEROS PAÍSES (antes: ÁMBITO GEOGRÁFICO DE OPERACIÓN) ->
                                                             experiencia_paises / zona_geografica_interes / zonas_descartadas / ambito_geografico
   TAMAÑO / CERTIFICACIONES / FACTURACIÓN ANUAL / CLIENTES PRINCIPALES / importe mínimo-máximo ->
                                                             tamano / certificaciones / facturacion_anual / clientes_principales / importes
@@ -68,33 +79,36 @@ CLAVE_VERSION_INGESTA = "palabras_clave_ingesta_version"
 VERSION_INGESTA = "2026-10-26.v1"
 
 TABLA = "empresas_palabras_clave"
-HOJA = "Hoja1"
+HOJAS = ("DOSSIER", "Hoja1")      # hoja de datos: la actual y, por compatibilidad, la del formato anterior
 FILAS_BUSCANDO_CABECERA = 20
 TAMANO_LOTE = 25
 
-# columna de la tabla -> (texto normalizado con el que empieza la cabecera del Excel, imprescindible)
+# columna de la tabla -> (cabeceras aceptadas por orden de preferencia, imprescindible).
+# Cada cabecera es (texto normalizado: minúsculas y sin tildes, exacta). Exacta = la cabecera debe ser ese texto; si no, basta
+# con que EMPIECE por él. Se usa la primera cabecera aceptada que exista en el Excel (la 1ª columna que la cumpla).
 CABECERAS = {
-    "nombre_empresa": ("empresa", True),                       # exacta; la 1ª columna con ese nombre
-    "sector": ("sector", True),                                # exacta (no «DESCRIPCIÓN DEL SECTOR»)
-    "descripcion_sector": ("descripcion del sector", False),
-    "especialidad_referencias": ("especialidad extraida de las referencias", False),
-    "descripcion_actividad": ("descripcion breve de la actividad", False),
-    "palabras_clave_referencias": ("palabras clave de las referencias", False),
-    "palabras_clave_bbdd": ("palabras clave de la bbdd", False),
-    "palabras_clave_unificadas": ("palabras clave unificadas", False),
-    "palabras_clave": ("palabras clave extraidas de la descripcion", True),
-    "proyectos_tipo": ("principales proyectos tipo", True),
-    "experiencia_paises": ("experiencia paises", False),
-    "zona_geografica_interes": ("zona geografica y paises de interes", False),
-    "zonas_descartadas": ("zonas y paises descartados", False),
-    "tamano": ("tamano", False),
-    "certificaciones": ("certificaciones", False),
-    "facturacion_anual": ("facturacion anual", False),
-    "clientes_principales": ("clientes principales", False),
-    "ambito_geografico": ("ambito geografico de operacion", False),
-    "importes": ("importe minimo", False),
+    "nombre_empresa": ([("empresa", True)], True),             # la 1ª columna llamada EMPRESA (la 2ª es un texto largo)
+    "sector": ([("sector", True)], True),                      # exacta (no «DESCRIPCIÓN DEL SECTOR»)
+    "descripcion_sector": ([("descripcion del sector", False)], False),
+    "especialidad_referencias": ([("especialidad extraida de las referencias", False)], False),
+    "descripcion_actividad": ([("descripcion breve de la actividad", False)], False),
+    "palabras_clave_referencias": ([("palabras clave de las referencias", False)], False),
+    "palabras_clave_bbdd": ([("palabras clave de la bbdd", False)], False),
+    "palabras_clave_unificadas": ([("palabras clave unificadas", False)], False),
+    "palabras_clave": ([("palabras clave", True),                                           # formato actual
+                        ("palabras clave extraidas de la descripcion", False)], True),     # formato anterior
+    "proyectos_tipo": ([("principales proyectos tipo", False)], True),
+    "experiencia_paises": ([("experiencia paises", False)], False),
+    "zona_geografica_interes": ([("zona geografica y paises de interes", False)], False),
+    "zonas_descartadas": ([("zonas y paises descartados", False)], False),
+    "tamano": ([("tamano", False)], False),
+    "certificaciones": ([("certificaciones", False)], False),
+    "facturacion_anual": ([("facturacion anual", False)], False),
+    "clientes_principales": ([("clientes principales", False)], False),
+    "ambito_geografico": ([("oficinas o socios terceros paises", False),                    # formato actual
+                           ("ambito geografico de operacion", False)], False),              # formato anterior
+    "importes": ([("importe minimo", False)], False),
 }
-EXACTAS = ("nombre_empresa", "sector")
 VACIOS = {"", "-", "--", "—", "n/a", "na", "ninguno", "ninguna", "no consta", "s/d"}
 
 
@@ -116,9 +130,14 @@ def _slug(nombre: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", _norm(nombre)).strip("-")[:60] or "empresa"
 
 
-def _coincide(columna: str, cabecera_norm: str) -> bool:
-    prefijo = CABECERAS[columna][0]
-    return cabecera_norm == prefijo if columna in EXACTAS else cabecera_norm.startswith(prefijo)
+def _posicion_columna(columna: str, cabeceras: dict):
+    """Posición (en la fila) de la columna del Excel que corresponde a `columna` de la tabla, o None si no existe."""
+    for texto, exacta in CABECERAS[columna][0]:
+        for i, h in cabeceras.items():
+            h_norm = _norm(h)
+            if h_norm == texto or (not exacta and h_norm.startswith(texto)):
+                return i
+    return None
 
 
 # ------------------------------------------------------------------
@@ -128,16 +147,17 @@ def leer_registros(origen) -> list:
     """Filas de `empresas_palabras_clave` a partir del Excel (ruta o BytesIO). Lanza RuntimeError si la estructura no es válida."""
     libro = openpyxl.load_workbook(origen, read_only=True, data_only=True)
     try:
-        if HOJA not in libro.sheetnames:
-            raise RuntimeError(f"El Excel no tiene la hoja «{HOJA}» (hojas: {', '.join(libro.sheetnames)}). No se ha tocado Supabase.")
-        filas = list(libro[HOJA].iter_rows(values_only=True))
+        hoja = next((h for h in HOJAS if h in libro.sheetnames), None)
+        if hoja is None:
+            raise RuntimeError(f"El Excel no tiene la hoja «{HOJAS[0]}» (hojas: {', '.join(libro.sheetnames)}). No se ha tocado Supabase.")
+        filas = list(libro[hoja].iter_rows(values_only=True))
     finally:
         libro.close()
 
     fila_cab = next((i for i, f in enumerate(filas[:FILAS_BUSCANDO_CABECERA])
                      if {"empresa", "sector"} <= {_norm(c) for c in f if c is not None}), None)
     if fila_cab is None:
-        raise RuntimeError(f"No se encontró la fila de cabecera (con EMPRESA y SECTOR) en «{HOJA}». No se ha tocado Supabase.")
+        raise RuntimeError(f"No se encontró la fila de cabecera (con EMPRESA y SECTOR) en «{hoja}». No se ha tocado Supabase.")
 
     cabeceras, vistas = {}, {}                     # posición -> cabecera tal cual (las repetidas llevan « (2)»)
     for i, c in enumerate(filas[fila_cab]):
@@ -148,10 +168,10 @@ def leer_registros(origen) -> list:
 
     posicion = {}                                   # columna de la tabla -> posición en la fila (la 1ª que coincida)
     for columna in CABECERAS:
-        posicion[columna] = next((i for i, h in cabeceras.items() if _coincide(columna, _norm(h))), None)
-    faltan = [CABECERAS[c][0].upper() for c, (_, req) in CABECERAS.items() if req and posicion[c] is None]
+        posicion[columna] = _posicion_columna(columna, cabeceras)
+    faltan = [CABECERAS[c][0][0][0].upper() for c, (_, req) in CABECERAS.items() if req and posicion[c] is None]
     if faltan:
-        raise RuntimeError("Faltan columnas imprescindibles en «%s»: %s. No se ha tocado Supabase." % (HOJA, "; ".join(faltan)))
+        raise RuntimeError("Faltan columnas imprescindibles en «%s»: %s. No se ha tocado Supabase." % (hoja, "; ".join(faltan)))
 
     registros, usados = [], set()
     for n, fila in enumerate(filas[fila_cab + 1:], start=fila_cab + 2):
