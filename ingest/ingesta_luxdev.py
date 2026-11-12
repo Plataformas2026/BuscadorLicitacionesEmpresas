@@ -2,48 +2,51 @@
 """
 ingesta_luxdev.py
 -----------------
-Sincroniza los PROYECTOS de cooperación de LuxDev (Agencia luxemburguesa de
-cooperación al desarrollo) contra la tabla `licitaciones_internacionales`
+Sincroniza las LICITACIONES (Call for tenders) de LuxDev (Agencia luxemburguesa
+de cooperación al desarrollo) contra la tabla `licitaciones_internacionales`
 de Supabase, mediante scraping directo del HTML (requests + BeautifulSoup,
 sin Playwright).
 
-    Listado:  https://luxdev.lu/en/projects            (?page=N, base 0)
-    Ficha:    https://luxdev.lu/en/projects/<slug>
+    Listado:  https://luxdev.lu/en/tenders/call-tenders         (?page=N, base 0)
+    Ficha:    https://luxdev.lu/en/tenders/call-tenders/<slug>
 
-IMPORTANTE -- QUÉ SON ESTOS REGISTROS:
+QUÉ SON ESTOS REGISTROS:
 --------------------------------------------------------------------------
-/en/projects NO es un portal de licitaciones: lista proyectos y programas de
-cooperación que LuxDev ejecuta o formula. No tienen fecha de cierre ni
-referencia de contratación. Por eso:
-- `tipo_aviso` = "Project - <estado>" (In execution / In formulation).
-- `fecha_limite` = NULL. La app trata los registros sin fecha de cierre como
-  siempre vigentes (ver filtro de cierre en app/search.py), así que NO
-  caducan solos: los proyectos que pasan a "Closed" dejan de leerse en el
-  listado, pero su fila anterior queda en Supabase.
-- `categoria` = sector del proyecto (Health, Governance...).
-- Los proyectos "Closed" se omiten (ver ESTADOS_EXCLUIDOS).
-- `fecha_publicacion` = fecha de primera detección (el listado no publica
-  ninguna; con NULL, el orden DESC de la app los pondría los primeros). Se
-  conserva en ejecuciones posteriores.
+Cada tarjeta del listado (`li.views-row`) es un anuncio de licitación con:
+estado (Open / Forecast / Closed), región, título (TRUNCADO con "..." en el
+listado), referencia (p. ej. A-LAO037-2026-0386), tipo de contrato
+(Works / Goods / Services) y fecha límite ("Deadline: dd.mm.aaaa").
+- `codigo_unico` = "LUXDEV-<referencia>" (si no hubiera referencia, el slug).
+- `tipo_aviso` = "Call for tenders - <estado>" (Open / Forecast).
+- `categoria` = tipo de contrato (Works / Goods / Services).
+- `fecha_limite` = fecha "Deadline" real del anuncio (ISO). Si no la hay, NULL
+  (la app trata NULL como siempre vigente, ver app/search.py).
+- Las licitaciones "Closed" se omiten (ver ESTADOS_EXCLUIDOS).
+- `fecha_publicacion` = fecha de primera detección: ni el listado ni la ficha
+  publican fecha de publicación (con NULL, el orden DESC de la app los pondría
+  los primeros). Se conserva en ejecuciones posteriores.
 
-Estrategia (similar a AFD/Enabel): se recorre el listado completo y, para cada
-proyecto, se descarga su ficha de detalle (~130 peticiones pequeñas, con
-pausa) de donde salen la descripción completa y los datos estructurados
-(donantes, periodo, presupuesto, ODS). Se compara con lo ya existente y solo se
-calcula el embedding y se sube lo NUEVO o lo que ha CAMBIADO (estado, título,
-sector, región, descripción o documento). Si la ficha de un proyecto ya
+Estrategia (igual que antes): se recorre el listado completo y, para cada
+licitación, se descarga su ficha (peticiones pequeñas, con pausa) de donde salen
+el título completo, la región, el estado, la fecha límite, la referencia, el
+tipo de contrato, el procedimiento, el documento (aviso de licitación en PDF)
+y el proyecto relacionado. Se compara con lo ya existente y solo se calcula el
+embedding y se sube lo NUEVO o lo que ha CAMBIADO (estado, título, tipo,
+región, descripción, documento o fecha límite). Si la ficha de una licitación ya
 existente no se puede descargar en una ejecución, se conservan sus datos
-guardados y no se marca como cambiado.
+guardados (título, descripción y documento) y no se marca como cambiada.
 
-La ficha aporta, y se guarda en `descripcion`: contexto, objetivos,
-beneficiarios, zona geográfica y actores (texto libre de la ficha), más
-donantes, periodo de implementación, duración, presupuesto total y por
-contribuyente, y ODS. `url_documento` = primer PDF de la sección
-"Documentation" (se prefiere la versión en inglés).
+La ficha no contiene texto libre descriptivo: `descripcion` se compone solo con
+los datos estructurados reales de la ficha (referencia, tipo de contrato,
+procedimiento, estado, fecha límite, nombre del aviso y proyecto relacionado).
+`url_documento` = PDF del aviso de licitación.
 
-VALIDACIÓN: tanto el parser del listado como el de la ficha se han probado
-contra HTML real de luxdev.lu (listado de /en/projects y ficha
-/en/projects/support-civil-society-benin).
+Los registros "LUXDEV-<slug>" de proyectos cargados por la versión anterior de
+este script no se tocan (códigos distintos).
+
+VALIDACIÓN: el parser del listado y el de la ficha se han probado contra el HTML
+real de https://luxdev.lu/en/tenders/call-tenders y de la ficha
+/en/tenders/call-tenders/renovation-works-faculty-law-and-political-science-national-university-lao
 
 Variables de entorno requeridas: SUPABASE_URL, SUPABASE_SERVICE_KEY.
 Ejecución local o programada: python ingesta_luxdev.py
@@ -66,7 +69,7 @@ from common import (
 )
 
 BASE_URL = "https://luxdev.lu"
-LISTADO_URL = BASE_URL + "/en/projects"
+LISTADO_URL = BASE_URL + "/en/tenders/call-tenders"
 
 FUENTE = "LuxDev"
 ORGANISMO = "LuxDev - Luxembourg Development Cooperation Agency"
@@ -93,7 +96,7 @@ CABECERAS_PETICION = {
     "Connection": "keep-alive",
 }
 
-# Campos que, si cambian en un proyecto ya existente, lo marcan como actualizado.
+# Campos que, si cambian en una licitación ya existente, la marcan como actualizada.
 CAMPOS_COMPARABLES = (
     "titulo",
     "tipo_aviso",
@@ -101,6 +104,7 @@ CAMPOS_COMPARABLES = (
     "categoria",
     "descripcion",
     "url_documento",
+    "fecha_limite",
 )
 
 
@@ -173,15 +177,30 @@ def _slug_de_url(url: str) -> str:
 # PARSER DEL LISTADO
 # ============================================================
 
+def _parsear_fecha(texto: str):
+    """'dd.mm.aaaa' (formato de LuxDev) -> 'aaaa-mm-dd'. None si no hay fecha válida."""
+    if not texto:
+        return None
+    m = re.search(r"\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b", texto)
+    if not m:
+        return None
+    try:
+        return date(int(m.group(3)), int(m.group(2)), int(m.group(1))).isoformat()
+    except ValueError:
+        return None
+
+
 def extraer_proyectos_de_pagina(html: str) -> list:
     """
-    Cada proyecto es un `li.views-row` con un único <a> que contiene:
-      - <p> 1: <span>Estado</span><span punto/><span>Región</span>
-      - <h3>:  título
-      - <p> 2: sector
+    Cada licitación es un `li.views-row` con un único <a> que contiene:
+      - <header>: <span>Estado</span><span punto/><span>Región</span>
+      - <h3>:     título (truncado con "..." si es largo)
+      - <footer>: <span>Referencia</span> . <span>Tipo de contrato</span> .
+                  <span>Deadline: dd.mm.aaaa</span>
+    (Se mantiene el nombre de la función por compatibilidad; devuelve licitaciones.)
     """
     soup = BeautifulSoup(html, "html.parser")
-    proyectos = []
+    licitaciones = []
 
     for li in soup.select("li.views-row"):
         enlace = li.find("a", href=True)
@@ -193,34 +212,44 @@ def extraer_proyectos_de_pagina(html: str) -> list:
         if not titulo:
             continue
 
-        parrafos = enlace.find_all("p")
-        estado = region = sector = None
+        estado = region = referencia = tipo_contrato = fecha_limite = None
 
-        if parrafos:
-            textos_span = [
-                _limpiar_texto(s.get_text(" ", strip=True))
-                for s in parrafos[0].find_all("span")
-            ]
-            textos_span = [t for t in textos_span if t]
-            if textos_span:
-                estado = textos_span[0]
-            if len(textos_span) > 1:
-                region = textos_span[1]
-        if len(parrafos) > 1:
-            sector = _limpiar_texto(parrafos[-1].get_text(" ", strip=True))
+        cabecera = enlace.find("header")
+        if cabecera is not None:
+            textos = [_limpiar_texto(s.get_text(" ", strip=True)) for s in cabecera.find_all("span")]
+            textos = [t for t in textos if t]
+            if textos:
+                estado = textos[0]
+            if len(textos) > 1:
+                region = textos[1]
+
+        pie = enlace.find("footer")
+        if pie is not None:
+            textos = [_limpiar_texto(s.get_text(" ", strip=True)) for s in pie.find_all("span")]
+            textos = [t for t in textos if t]
+            for t in textos:
+                if t.lower().startswith("deadline"):
+                    fecha_limite = _parsear_fecha(t)
+                elif referencia is None and re.match(r"^[A-Z]-[A-Z0-9]+(-[A-Z0-9]+)+$", t):
+                    referencia = t
+                elif tipo_contrato is None:
+                    tipo_contrato = t
 
         url = urljoin(BASE_URL + "/", enlace["href"]).split("#")[0]
+        clave = _slug_de_url(url) if not referencia else re.sub(r"[^A-Za-z0-9\-_]+", "-", referencia)
 
-        proyectos.append({
+        licitaciones.append({
             "titulo": titulo,
             "estado": estado,
             "region": region,
-            "sector": sector,
+            "referencia": referencia,
+            "tipo_contrato": tipo_contrato,
+            "fecha_limite": fecha_limite,
             "url_oficial": url,
-            "codigo_unico": f"LUXDEV-{_slug_de_url(url)}"[:150],
+            "codigo_unico": f"LUXDEV-{clave}"[:150],
         })
 
-    return proyectos
+    return licitaciones
 
 
 def extraer_proyectos_listado() -> list:
@@ -241,9 +270,9 @@ def extraer_proyectos_listado() -> list:
                 pass
 
         proyectos = extraer_proyectos_de_pagina(respuesta.text)
-        print(f"    Proyectos en la página: {len(proyectos)}", flush=True)
+        print(f"    Licitaciones en la página: {len(proyectos)}", flush=True)
         if not proyectos:
-            print("    No se encontraron más proyectos. Fin del listado.", flush=True)
+            print("    No se encontraron más licitaciones. Fin del listado.", flush=True)
             break
 
         nuevos = 0
@@ -253,7 +282,7 @@ def extraer_proyectos_listado() -> list:
                 nuevos += 1
 
         if nuevos == 0:
-            print("    La página no aporta proyectos nuevos (paginación repetida). Fin del listado.", flush=True)
+            print("    La página no aporta licitaciones nuevas (paginación repetida). Fin del listado.", flush=True)
             break
 
         time.sleep(PAUSA_ENTRE_PAGINAS_SEGUNDOS)
@@ -263,7 +292,7 @@ def extraer_proyectos_listado() -> list:
         p for p in todos
         if (p.get("estado") or "").strip().lower() not in ESTADOS_EXCLUIDOS
     ]
-    print(f"\nProyectos en el listado: {len(todos)} | no cerrados: {len(vigentes)}", flush=True)
+    print(f"\nLicitaciones en el listado: {len(todos)} | no cerradas: {len(vigentes)}", flush=True)
     return vigentes
 
 
@@ -271,119 +300,102 @@ def extraer_proyectos_listado() -> list:
 # FICHA DE DETALLE
 # ============================================================
 
-def _valor_tras_titulo(contenedor, titulo: str, etiqueta_valor: str):
-    """Busca el <h3> cuyo texto es `titulo` y devuelve la primera etiqueta
-    `etiqueta_valor` que le sigue en el documento (o None)."""
+def _valor_etiqueta(contenedor, etiqueta: str):
+    """Texto del bloque cuyo <h3> es `etiqueta` (sin el propio <h3>), o None.
+    Cada dato de la ficha es un <div> con <h3>etiqueta</h3> + valor."""
     if contenedor is None:
         return None
     for h3 in contenedor.find_all("h3"):
-        if (_limpiar_texto(h3.get_text(" ", strip=True)) or "").lower() == titulo.lower():
-            return h3.find_next(etiqueta_valor)
+        if (_limpiar_texto(h3.get_text(" ", strip=True)) or "").lower() == etiqueta.lower():
+            bloque = h3.parent
+            if bloque is None:
+                return None
+            partes = []
+            for hijo in bloque.children:
+                if hijo is h3:
+                    continue
+                texto = hijo.get_text(" ", strip=True) if hasattr(hijo, "get_text") else str(hijo)
+                texto = _limpiar_texto(texto)
+                if texto:
+                    partes.append(texto)
+            return " ".join(partes) or None
     return None
 
 
-def _texto_prose(contenedor) -> list:
-    """Texto libre de la ficha: pares 'Encabezado: párrafo'."""
-    if contenedor is None:
-        return []
-    lineas = []
-    pendiente = None
-    for el in contenedor.find_all(["h3", "h4", "h5", "p", "li"]):
-        if el.name == "p" and el.find_parent("li") is not None:
-            continue
-        texto = _limpiar_texto(el.get_text(" ", strip=True))
-        if not texto:
-            continue
-        if el.name in ("h3", "h4", "h5"):
-            pendiente = texto
-        elif pendiente:
-            lineas.append(f"{pendiente}: {texto}")
-            pendiente = None
-        else:
-            lineas.append(texto)
-    return lineas
-
-
 def parsear_ficha(html: str) -> dict:
-    """Extrae de la ficha: descripcion, url_documento y regiones."""
+    """Extrae de la ficha: titulo, estado, region(es), fecha_limite, referencia,
+    tipo_contrato, procedimiento, documento y proyecto relacionado, y compone
+    `descripcion` solo con esos datos reales."""
     soup = BeautifulSoup(html, "html.parser")
-    lineas = []
+    articulo = soup.select_one("article.node--type-tender") or soup.find("article") or soup
+    preview = articulo.select_one("section#preview")
 
-    # Texto libre (Context, Objectives, Beneficiaries...)
-    preview = soup.select_one("section#preview")
-    prose = soup.select_one("section#preview .prose") or preview
-    lineas.extend(_texto_prose(prose))
+    h1 = articulo.find("h1")
+    titulo = _limpiar_texto(h1.get_text(" ", strip=True)) if h1 else None
 
-    # Donantes, periodo y duración
-    tag = _valor_tras_titulo(preview, "Donor(s)", "ul")
-    if tag:
-        donantes = [_limpiar_texto(li.get_text(" ", strip=True)) for li in tag.find_all("li")]
-        donantes = [d for d in donantes if d]
-        if donantes:
-            lineas.append("Donor(s): " + "; ".join(donantes))
+    estado = _valor_etiqueta(preview, "Status")
+    referencia = _valor_etiqueta(preview, "Reference")
+    tipo_contrato = _valor_etiqueta(preview, "Type of contract")
+    procedimiento = _valor_etiqueta(preview, "Procurement procedure")
+    texto_limite = _valor_etiqueta(preview, "Deadline")
+    fecha_limite = _parsear_fecha(texto_limite)
 
-    tag = _valor_tras_titulo(preview, "Implementation period", "p")
-    periodo = _limpiar_texto(tag.get_text(" ", strip=True)) if tag else None
-    tag = _valor_tras_titulo(preview, "Total duration", "p")
-    duracion = _limpiar_texto(tag.get_text(" ", strip=True)) if tag else None
-    if periodo:
-        lineas.append(f"Implementation period: {periodo}" + (f" ({duracion})" if duracion else ""))
-    elif duracion:
-        lineas.append(f"Total duration: {duracion}")
-
-    # Presupuesto
-    presupuesto = soup.select_one("section#budget")
-    tag = _valor_tras_titulo(presupuesto, "Total budget", "p")
-    total = _limpiar_texto(tag.get_text(" ", strip=True)) if tag else None
-    if total:
-        lineas.append(f"Total budget: {total}")
-    if presupuesto is not None:
-        contribuciones = []
-        for h3 in presupuesto.find_all("h3"):
-            if "contributions" in (h3.get_text(" ", strip=True) or "").lower():
-                ul = h3.find_next("ul")
-                for li in (ul.find_all("li") if ul else []):
-                    ps = [_limpiar_texto(x.get_text(" ", strip=True)) for x in li.find_all("p")]
-                    ps = [x for x in ps if x]
-                    if len(ps) >= 2:
-                        contribuciones.append(f"{ps[1]}: {ps[0]}")
-                break
-        if contribuciones:
-            lineas.append("Contributions managed by LuxDev: " + "; ".join(contribuciones))
-
-    # ODS
-    odd = soup.select_one("section#odd")
-    if odd is not None:
-        ods = [_limpiar_texto(h.get_text(" ", strip=True)) for h in odd.find_all("h4")]
-        ods = [o for o in ods if o]
-        if ods:
-            lineas.append("Sustainable Development Goals: " + "; ".join(ods))
-
-    # Documento: primer PDF de "Documentation" (se prefiere inglés)
-    url_documento = None
-    doc = soup.select_one("section#documentation")
-    if doc is not None:
-        candidatos = []
-        for a in doc.find_all("a", href=True):
-            if ".pdf" not in a["href"].lower():
-                continue
-            idioma = _limpiar_texto(a.find("span").get_text(" ", strip=True)) if a.find("span") else None
-            candidatos.append(((idioma or "").lower(), urljoin(BASE_URL + "/", a["href"])))
-        if candidatos:
-            url_documento = next((u for i, u in candidatos if i == "en"), candidatos[0][1])
-
-    # Regiones de intervención (puede haber varias en proyectos multi-país)
+    # Regiones de intervención (puede haber varias)
     regiones = []
     if preview is not None:
-        for a in preview.find_all("a"):
-            h3 = a.find("h3")
-            if h3 and (_limpiar_texto(h3.get_text(" ", strip=True)) or "").lower() == "regions of intervention":
-                span = a.find("span", class_=re.compile(r"font-primary"))
+        for h3 in preview.find_all("h3"):
+            if (_limpiar_texto(h3.get_text(" ", strip=True)) or "").lower().startswith("region"):
+                span = h3.find_next("span", class_=re.compile(r"font-primary"))
                 nombre = _limpiar_texto(span.get_text(" ", strip=True)) if span else None
                 if nombre and nombre not in regiones:
                     regiones.append(nombre)
 
+    # Documento (aviso de licitación) y su nombre
+    url_documento = None
+    nombre_documento = None
+    for a in (preview.find_all_next("a", href=True) if preview is not None else []):
+        if ".pdf" in a["href"].lower():
+            url_documento = urljoin(BASE_URL + "/", a["href"])
+            candidatos = [
+                _limpiar_texto(s.get_text(" ", strip=True))
+                for s in a.find_all("span", class_=re.compile(r"font-bold"))
+            ]
+            candidatos = [c for c in candidatos if c and c.lower() != "document"]
+            nombre_documento = candidatos[-1] if candidatos else None
+            break
+
+    # Proyecto relacionado (primer elemento de la sección "Related project";
+    # no se confunde con "Explore more", que son otras licitaciones)
+    proyecto_relacionado = None
+    for h2 in articulo.find_all("h2"):
+        if (_limpiar_texto(h2.get_text(" ", strip=True)) or "").lower() == "related project":
+            h3 = h2.find_next("h3")
+            if h3:
+                proyecto_relacionado = _limpiar_texto(h3.get_text(" ", strip=True))
+            break
+
+    lineas = []
+    if referencia:
+        lineas.append(f"Reference: {referencia}")
+    if tipo_contrato:
+        lineas.append(f"Type of contract: {tipo_contrato}")
+    if procedimiento:
+        lineas.append(f"Procurement procedure: {procedimiento}")
+    if estado:
+        lineas.append(f"Status: {estado}")
+    if fecha_limite:
+        lineas.append(f"Deadline: {fecha_limite}")
+    if nombre_documento:
+        lineas.append(f"Notice: {nombre_documento}")
+    if proyecto_relacionado:
+        lineas.append(f"Related project: {proyecto_relacionado}")
+
     return {
+        "titulo": titulo,
+        "estado": estado,
+        "referencia": referencia,
+        "tipo_contrato": tipo_contrato,
+        "fecha_limite": fecha_limite,
         "descripcion": "\n".join(lineas) if lineas else None,
         "url_documento": url_documento,
         "regiones": regiones,
@@ -414,17 +426,17 @@ def construir_registro(p: dict, hoy: date) -> dict:
     return {
         "codigo_unico": p["codigo_unico"],
         "fuente_origen": FUENTE,
-        "tipo_aviso": f"Project - {estado}" if estado else "Project",
+        "tipo_aviso": f"Call for tenders - {estado}" if estado else "Call for tenders",
         "titulo": p["titulo"],
         "descripcion": p.get("descripcion"),
         "pais": region,
         "paises": paises,
         "organismo": ORGANISMO,
-        "categoria": p.get("sector"),
+        "categoria": p.get("tipo_contrato"),
         "url_oficial": p["url_oficial"],
         "url_documento": p.get("url_documento"),
         "fecha_publicacion": hoy.isoformat(),  # primera detección (ver docstring)
-        "fecha_limite": None,
+        "fecha_limite": p.get("fecha_limite"),
     }
 
 
@@ -444,9 +456,12 @@ def preparar_lote_para_subir(normalizados: list, registros_existentes: dict) -> 
     for datos in normalizados:
         existente = registros_existentes.get(datos["codigo_unico"])
 
-        # Si la ficha de un proyecto existente no se pudo descargar, se conservan
-        # los datos guardados para no marcarlo como cambiado.
+        # Si la ficha de una licitación existente no se pudo descargar, se conservan
+        # los datos guardados para no marcarla como cambiada (el título del listado
+        # viene truncado con "...", así que tampoco se toma de ahí).
         if existente is not None:
+            if datos["titulo"].endswith("...") and existente.get("titulo"):
+                datos["titulo"] = existente["titulo"]
             if datos.get("descripcion") is None:
                 datos["descripcion"] = existente.get("descripcion")
             if datos.get("url_documento") is None:
@@ -488,14 +503,14 @@ def ejecutar_sincronizacion():
     hoy = date.today()
 
     print("=" * 100, flush=True)
-    print("SINCRONIZACION DE LICITACIONES INTERNACIONALES - LUXDEV (PROYECTOS)", flush=True)
+    print("SINCRONIZACION DE LICITACIONES INTERNACIONALES - LUXDEV (CALL FOR TENDERS)", flush=True)
     print("=" * 100, flush=True)
     print(f"Fuente: {LISTADO_URL}", flush=True)
 
     proyectos = extraer_proyectos_listado()
     if not proyectos:
         print(
-            "No se ha detectado ningún proyecto. "
+            "No se ha detectado ninguna licitación. "
             f"Revisa el log de arriba y, si existe, {CAPTURA_DEPURACION}.",
             flush=True,
         )
@@ -521,7 +536,8 @@ def ejecutar_sincronizacion():
         for p in bloque:
             ficha = obtener_ficha(p["url_oficial"])
             if ficha:
-                p.update(ficha)
+                # Solo se sobrescribe con valores presentes en la ficha.
+                p.update({k: v for k, v in ficha.items() if v})
             else:
                 print(f"    Aviso: sin ficha para {p['titulo'][:80]}", flush=True)
             time.sleep(PAUSA_ENTRE_FICHAS_SEGUNDOS)
@@ -542,7 +558,7 @@ def ejecutar_sincronizacion():
         )
 
     if total_a_subir == 0:
-        print("No hay proyectos nuevos ni cambios que sincronizar.", flush=True)
+        print("No hay licitaciones nuevas ni cambios que sincronizar.", flush=True)
         return
 
     print(f"\nSincronización LuxDev completada: {total_subidos}/{total_a_subir} registros subidos.", flush=True)
