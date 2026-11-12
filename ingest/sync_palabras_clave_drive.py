@@ -30,7 +30,8 @@ CABECERAS DEL EXCEL ACTUAL («DOSSIER») Y SU EQUIVALENCIA CON EL FORMATO ANTERI
   Sin cambios: EMPRESA, SECTOR, DESCRIPCIÓN DEL SECTOR, PRINCIPALES PROYECTOS TIPO, EXPERIENCIA PAÍSES, ZONA GEOGRÁFICA y PAÍSES DE
   INTERÉS, ZONAS Y PAISES DESCARTADOS, TAMAÑO, CERTIFICACIONES, FACTURACIÓN ANUAL, CLIENTES PRINCIPALES.
   Ya no existen (quedan a NULL): ESPECIALIDAD EXTRAIDA DE LAS REFERENCIAS y las palabras clave de referencias / de la bbdd / unificadas.
-  Nuevas (EP CLÚSTER, Nº consecutivo, Observaciones, CIF, CNAE, WEB): no tienen columna en la tabla; solo viajan en `datos_excel`.
+  Observaciones (columna «Observaciones»)  -> observaciones (texto libre; criterio prioritario de la reordenación con GPT).
+  Nuevas (EP CLÚSTER, Nº consecutivo, CIF, CNAE, WEB): no tienen columna en la tabla; solo viajan en `datos_excel`.
 Se siguen aceptando también las cabeceras del formato anterior.
 
 CABECERA DEL EXCEL                                       -> COLUMNA DE `empresas_palabras_clave`
@@ -46,6 +47,7 @@ CABECERA DEL EXCEL                                       -> COLUMNA DE `empresas
                                                             experiencia_paises / zona_geografica_interes / zonas_descartadas / ambito_geografico
   TAMAÑO / CERTIFICACIONES / FACTURACIÓN ANUAL / CLIENTES PRINCIPALES / importe mínimo-máximo ->
                                                             tamano / certificaciones / facturacion_anual / clientes_principales / importes
+  Observaciones                                          -> observaciones  (requiere la columna: alter table public.empresas_palabras_clave add column if not exists observaciones text;)
   (fila completa, cabecera real -> valor)                -> datos_excel (jsonb)
 El Excel no trae identificador: `clave_empresa` se genera a partir del nombre (slug estable; si dos nombres dieran el mismo
 se añade el número de fila). Los valores vacíos o «-» se guardan como NULL: no se inventa nada. Los textos se guardan tal cual
@@ -76,7 +78,7 @@ from archivos_drive import FILE_ID_PALABRAS_CLAVE, file_id_de
 CLAVE_SYNC_ESTADO = "palabras_clave_drive_modified_time"
 CLAVE_VERSION_INGESTA = "palabras_clave_ingesta_version"
 # Súbela cuando cambie la LÓGICA de este script: fuerza una resincronización aunque el Excel no cambie.
-VERSION_INGESTA = "2026-10-26.v1"
+VERSION_INGESTA = "2026-11-12.v1"   # v1 de 2026-11-12: añade la columna `observaciones`
 
 TABLA = "empresas_palabras_clave"
 HOJAS = ("DOSSIER", "Hoja1")      # hoja de datos: la actual y, por compatibilidad, la del formato anterior
@@ -108,6 +110,7 @@ CABECERAS = {
     "ambito_geografico": ([("oficinas o socios terceros paises", False),                    # formato actual
                            ("ambito geografico de operacion", False)], False),              # formato anterior
     "importes": ([("importe minimo", False)], False),
+    "observaciones": ([("observaciones", False)], False),     # texto libre; conserva saltos de línea y viñetas
 }
 VACIOS = {"", "-", "--", "—", "n/a", "na", "ninguno", "ninguna", "no consta", "s/d"}
 
@@ -253,7 +256,7 @@ def _escribir_resumen(lineas: list):
 
 
 def _resumen_de(registros: list) -> list:
-    return [f"Empresas leídas: {len(registros)}"] + [
+    return [f"Empresas leídas: {len(registros)}", f"Con observaciones: {sum(1 for r in registros if r.get('observaciones'))}"] + [
         f"Sin {c}: {sum(1 for r in registros if not r.get(c))}" for c in ("palabras_clave", "proyectos_tipo", "zonas_descartadas")
     ]
 
