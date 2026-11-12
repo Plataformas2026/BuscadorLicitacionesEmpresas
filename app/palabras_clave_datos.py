@@ -7,8 +7,8 @@ Es la ÚNICA fuente de empresas de esa pestaña: no lee `empresas` (BBDD_Empresa
 (Seguimiento_Empresas.xlsx), y esas pestañas tampoco leen esta tabla.
 
 Las columnas de la tabla ya tienen los nombres internos que usan los algoritmos (nombre_empresa, sector, palabras_clave,
-proyectos_tipo, experiencia_paises, zona_geografica_interes, zonas_descartadas, ambito_geografico...), de modo que no hay
-traducción de campos. Se añade `numero_interno` (= clave_empresa) porque así identifican a la empresa el ranking y GPT.
+proyectos_tipo, experiencia_paises, zona_geografica_interes, zonas_descartadas, ambito_geografico, observaciones...), de modo que
+no hay traducción de campos. Se añade `numero_interno` (= clave_empresa) porque así identifican a la empresa el ranking y GPT.
 Este módulo no usa Streamlit.
 """
 import re
@@ -19,7 +19,7 @@ COLUMNAS = (
     "clave_empresa, nombre_empresa, sector, descripcion_sector, especialidad_referencias, descripcion_actividad, "
     "palabras_clave_referencias, palabras_clave_bbdd, palabras_clave_unificadas, palabras_clave, proyectos_tipo, "
     "experiencia_paises, zona_geografica_interes, zonas_descartadas, tamano, certificaciones, facturacion_anual, "
-    "clientes_principales, ambito_geografico, importes, fecha_actualizacion"
+    "clientes_principales, ambito_geografico, importes, observaciones, fecha_actualizacion"
 )
 
 
@@ -52,7 +52,7 @@ def a_empresa(fila: dict) -> dict:
     # Alias con los nombres de campo que ya usan los informes (sin duplicar datos)
     empresa["paises_interes"] = fila.get("zona_geografica_interes")
     empresa["notas_libres"] = fila.get("importes")
-    empresa["observaciones_importantes"] = None
+    empresa["observaciones_importantes"] = fila.get("observaciones")
     return empresa
 
 
@@ -71,8 +71,9 @@ def cargar_empresas(supabase) -> list:
             inicio += 1000
     except Exception as error:  # noqa: BLE001
         raise ValueError(
-            f"No se pudo leer la tabla `{TABLA}` de Supabase ({type(error).__name__}). Ejecuta sql/crear_empresas_palabras_clave.sql "
-            "y lanza el workflow «Sincronizar palabras clave»."
+            f"No se pudo leer la tabla `{TABLA}` de Supabase ({type(error).__name__}). Si acabas de añadir el campo `observaciones`, "
+            "ejecuta en Supabase «alter table public.empresas_palabras_clave add column if not exists observaciones text;»; si la tabla no existe, ejecuta "
+            "sql/crear_empresas_palabras_clave.sql y lanza el workflow «Sincronizar palabras clave»."
         ) from None
     if not filas:
         raise ValueError(
